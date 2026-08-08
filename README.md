@@ -387,8 +387,9 @@ $$
 $$
 
 stays under `max_fit_residual_rms_resolutions` times the Hann spectral resolution
-$1.4382 / \texttt{estimation\_window\_s}$ Hz. Peaks that do not lie on one arithmetic series
-are not admitted to this comb model. The separate `diagnose` catalogue first looks for repeated
+$1.4382 / T$ Hz, where $T$ is the estimation-window duration configured by
+`removal.estimation_window_s`. Peaks that do not lie on one arithmetic series are not admitted
+to this comb model. The separate `diagnose` catalogue first looks for repeated
 pairwise spacings and then refines possible subharmonics; it reports that cohort-level
 structure independently from the per-recording removal fit.
 
