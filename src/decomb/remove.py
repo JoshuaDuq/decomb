@@ -2620,7 +2620,29 @@ def _authorize_channel_targets(
     plan: RunRemovalPlan,
     settings: RemovalSettings,
 ) -> RunRemovalPlan:
-    """Authorize candidate targets independently in every EEG channel and window."""
+    """Authorize candidate targets independently in every EEG channel and window.
+
+    The question here is not the one MNE's automatic detector asks. That detector sweeps a
+    whole spectrum for lines nobody named, so its family is every frequency it might have
+    stopped at, and the critical value `thomson_f_statistics` returns carries that
+    correction. This function is handed a target list the comb fit has already produced:
+    it asks, of each named frequency, whether this channel carries a line there. The family
+    is that list.
+
+    The gap between the two is not a detail. The shipped correction is Bonferroni over one
+    sample per time point -- 13500 of them in a 54 s window at 250 Hz -- against 56 comb
+    harmonics actually being asked about, and it costs about a factor of two in the
+    critical value. Applied to a 1.2 Hz comb standing 12 dB over its background, it
+    authorised roughly half of the (window x channel) decisions and left the rest of the
+    comb in the recording: the plan named the harmonic, the window vetoed it, and the
+    residual criterion in `apply` then refused the whole cohort over lines the removal had
+    been asked to take.
+
+    Each target counts once rather than once per bin, because the reach searched around it
+    is narrower than the multitaper bandwidth: `residual_search_hz` spans 0.3 Hz against a
+    0.6 Hz bandwidth, so the statistics inside a reach are one test seen several times, not
+    several tests.
+    """
     import mne
 
     picks = mne.pick_types(raw.info, eeg=True, exclude=())
@@ -2631,12 +2653,13 @@ def _authorize_channel_targets(
     for window in plan.windows:
         start, stop = window.bounds
         data = raw.get_data(picks=picks, start=start, stop=stop)
-        frequencies, statistic, threshold, _ = estimators.thomson_f_statistics(
+        frequencies, _, _, probabilities = estimators.thomson_f_statistics(
             data,
             sampling_frequency_hz=sampling_frequency_hz,
             bandwidth_hz=settings.mt_bandwidth,
             family_alpha=settings.residual_family_alpha,
         )
+        level = settings.residual_family_alpha / max(len(window.targets_hz), 1)
         channel_targets = []
         channel_widths = []
         for channel_index in range(data.shape[0]):
@@ -2645,7 +2668,7 @@ def _authorize_channel_targets(
             for target, width in zip(window.targets_hz, window.notch_widths_hz):
                 reach = max(float(width) / 2.0, settings.residual_search_hz)
                 inside = np.abs(frequencies - target) <= reach
-                if np.any(statistic[channel_index, inside] > threshold):
+                if np.any(probabilities[channel_index, inside] < level):
                     targets.append(float(target))
                     widths.append(float(width))
             channel_targets.append(tuple(targets))

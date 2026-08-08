@@ -224,8 +224,11 @@ removal:
 
   # Levels the criteria are decided at. residual_family_alpha is the family-wise rate of
   # the Thomson F search that authorises a second-pass removal, over one channel's whole
-  # frequency grid. The other two decide the cohort criteria; n_seam_controls sets the
-  # resolution of the seam test, whose smallest attainable p-value is 1/(n+1).
+  # frequency grid. The same level, over a different family, decides whether a channel
+  # carries a line at a target the comb fit already named: there the family is that target
+  # list, because the fit has already said where to look. The other two decide the cohort
+  # criteria; n_seam_controls sets the resolution of the seam test, whose smallest
+  # attainable p-value is 1/(n+1).
   residual_family_alpha: 0.05
   false_discovery_rate: 0.05
   seam_alpha: 0.05

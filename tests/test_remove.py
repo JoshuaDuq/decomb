@@ -379,6 +379,59 @@ def test_continuous_residual_support_reaches_every_overlapping_synthesis_window(
     assert routed.windows[2].channel_residual_targets_hz[0] == ()
 
 
+def _comb_window_plan(n_times: int) -> remove.RunRemovalPlan:
+    """One window carrying the whole fitted comb as its candidate targets."""
+    estimate = _estimate_for_study_test()
+    targets = estimate.harmonic_positions_hz
+    return remove.RunRemovalPlan(
+        model=None,
+        windows=(
+            remove.AdaptiveWindowRemovalPlan(
+                bounds=(0, n_times),
+                estimate=estimate,
+                targets_hz=targets,
+                notch_widths_hz=tuple(0.2 for _ in targets),
+                narrow_targets_hz=(),
+            ),
+        ),
+    )
+
+
+def test_channel_authorization_asks_only_about_the_targets_it_was_given():
+    """A line the comb fit already planned must not need whole-grid significance.
+
+    The multiplicity of this test is the target list, not the spectrum: the fit has
+    already said where to look, and each target's neighbourhood is one test because the
+    multitaper bandwidth is wider than the reach searched around it. Corrected against
+    every bin instead, a real line an order of magnitude over the noise is dropped, and
+    the plan quietly stops removing what it planned to remove.
+    """
+    import mne
+
+    sampling_frequency_hz = 250.0
+    n_times = int(sampling_frequency_hz * 54.0)
+    times = np.arange(n_times) / sampling_frequency_hz
+    planted_hz = 40.8
+    quiet_hz = 55.2
+
+    rng = np.random.default_rng(7)
+    data = rng.normal(size=(2, n_times)) * 1e-6
+    data += 6e-8 * np.sin(2.0 * np.pi * planted_hz * times)
+    raw = mne.io.RawArray(
+        data,
+        mne.create_info(["Cz", "Pz"], sampling_frequency_hz, "eeg"),
+        verbose="ERROR",
+    )
+
+    authorized = remove._authorize_channel_targets(
+        raw, _comb_window_plan(n_times), remove.RemovalSettings()
+    )
+    window = authorized.windows[0]
+
+    assert all(planted_hz in targets for targets in window.channel_targets_hz)
+    assert not any(quiet_hz in targets for targets in window.channel_targets_hz)
+
+
 def _estimate_for_study_test():
     return estimators.CombEstimate(
         fundamental_hz=1.2,
