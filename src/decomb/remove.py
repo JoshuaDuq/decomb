@@ -3001,7 +3001,7 @@ def benchmark_run(
     _, data_psd_before = _psd(raw, picks, settings)
     _, data_psd_after = _psd(cleaned_bare, picks, settings)
     _, data_psd_control = _psd(cleaned_control, picks, settings)
-    _, probe_psd_control = _psd(cleaned_probe_control, [0], settings)
+    _, probe_psd_control = _psd(cleaned_probe_control, list(range(n_eeg_channels)), settings)
     control_targets, control_widths = plan_target_spans(control_plan.windows)
 
     recovered = estimators.recover_probe(
