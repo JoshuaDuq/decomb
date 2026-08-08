@@ -241,10 +241,26 @@ class RemovalSettings:
     moves the reported null slightly.
     """
     min_harmonics_for_fit: int = estimators.MIN_HARMONICS_FOR_FIT
-    max_harmonic_residual_hz: float = estimators.MAX_HARMONIC_RESIDUAL_HZ
-    max_fit_residual_rms_hz: float = estimators.MAX_FIT_RESIDUAL_RMS_HZ
+
+    # The three tolerances below are widths in the spectrum the fit is read from, so they
+    # are stated in units of that spectrum's resolution rather than in hertz. A Hann-
+    # windowed pure tone has a half-power width of 1.4382 / T, which is the narrowest peak
+    # the analysis can produce and therefore the natural unit for "how far is far".
+    #
+    # In hertz they were only right for one window length. `estimation_window_s` sets the
+    # resolution -- 26.6 mHz at the shipped 54 s -- so lengthening the window to 108 s
+    # halves it while a fixed 0.06 Hz stays put, silently doubling the tolerance in the
+    # units that matter. Measured on a 15-participant cohort, one recording's supported
+    # harmonic count fell from 24 to 19 across exactly that change while another's rose,
+    # which is not a property any of these settings were meant to have.
+    #
+    # The multipliers reproduce the previous hertz values at 54 s to within 0.14%, so the
+    # shipped behaviour is unchanged and only its response to a different window is.
+    max_harmonic_residual_resolutions: float = 2.25
+    max_fit_residual_rms_resolutions: float = 1.5
+    max_line_width_resolutions: float = 9.4
+
     line_claim_hz: float = estimators.LINE_CLAIM_HZ
-    max_line_width_hz: float = estimators.LINE_WIDTH_CEILING_HZ
     residual_search_hz: float = estimators.RESIDUAL_SEARCH_HZ
     """How far either side of a target a residual is still that target's responsibility.
 
@@ -374,6 +390,31 @@ class RemovalSettings:
             bands.append(tuple(self.mains_notch_hz))
         return tuple(sorted(bands))
 
+    @property
+    def spectral_resolution_hz(self) -> float:
+        """Narrowest peak the fit's own spectrum can produce: a Hann tone's half-power width.
+
+        The window spectra the comb is fitted from are Hann periodograms over
+        ``estimation_window_s``, and the whole-run spectrum is their mean, which averages
+        the noise without sharpening the line. One resolution therefore describes both.
+        """
+        return spectral.hann_resolution_hz(self.estimation_window_s)
+
+    @property
+    def max_harmonic_residual_hz(self) -> float:
+        """How far a peak may sit from the fitted grid and still count as a member."""
+        return self.max_harmonic_residual_resolutions * self.spectral_resolution_hz
+
+    @property
+    def max_fit_residual_rms_hz(self) -> float:
+        """How much the kept harmonics may scatter about the grid they fitted."""
+        return self.max_fit_residual_rms_resolutions * self.spectral_resolution_hz
+
+    @property
+    def max_line_width_hz(self) -> float:
+        """How wide a peak may be and still be a line rather than a rhythm."""
+        return self.max_line_width_resolutions * self.spectral_resolution_hz
+
     def __post_init__(self) -> None:
         if not self.task.strip():
             raise ValueError("task must name a BIDS task label.")
@@ -397,10 +438,10 @@ class RemovalSettings:
             "uncertainty_confidence_z",
             "background_half_width_hz",
             "line_claim_hz",
-            "max_line_width_hz",
             "residual_search_hz",
-            "max_harmonic_residual_hz",
-            "max_fit_residual_rms_hz",
+            "max_harmonic_residual_resolutions",
+            "max_fit_residual_rms_resolutions",
+            "max_line_width_resolutions",
             "roundtrip_relative_tolerance",
         ):
             value = getattr(self, name)
@@ -412,6 +453,13 @@ class RemovalSettings:
                 raise ValueError(f"{name} must lie strictly between zero and one.")
         if self.min_harmonics_for_fit < 3:
             raise ValueError("min_harmonics_for_fit must be at least three.")
+        if self.max_fit_residual_rms_resolutions > self.max_harmonic_residual_resolutions:
+            raise ValueError(
+                "max_fit_residual_rms_resolutions cannot exceed "
+                "max_harmonic_residual_resolutions: harmonics further from the grid than "
+                "the residual bound are dropped before the RMS is taken, so a larger RMS "
+                "bound than that can never bind."
+            )
         if self.n_seam_controls < 2:
             raise ValueError("n_seam_controls must be at least two.")
         if self.detection_fdr_alpha is None and self.detection_min_prominence_db is None:

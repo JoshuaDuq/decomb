@@ -41,10 +41,10 @@ REMOVAL_OVERRIDES = {
     "high_hz": 90.0,
     "background_half_width_hz": 5.0,
     "min_harmonics_for_fit": 12,
-    "max_harmonic_residual_hz": 0.05,
-    "max_fit_residual_rms_hz": 0.03,
+    "max_harmonic_residual_resolutions": 2.0,
+    "max_fit_residual_rms_resolutions": 1.25,
     "line_claim_hz": 0.12,
-    "max_line_width_hz": 0.3,
+    "max_line_width_resolutions": 8.0,
     "residual_search_hz": 0.2,
     "residual_family_alpha": 0.01,
     "false_discovery_rate": 0.1,
@@ -312,11 +312,27 @@ def _captured(monkeypatch, module, name):
     return seen
 
 
+def _expected(settings, setting: str, parameter: str):
+    """What the estimator should have been handed for ``setting``.
+
+    Three tolerances are configured as multiples of the fit spectrum's resolution and
+    reach the estimator in hertz, so for those the question is whether the *derived* value
+    arrived -- a multiplier that reached the estimator unconverted would be a bug this test
+    exists to catch. Everything else is passed through as given.
+    """
+    if setting.endswith("_resolutions"):
+        # From the setting, not the parameter: the estimator names one of these
+        # `max_residual_rms_hz` where the settings object calls it
+        # `max_fit_residual_rms_hz`, and the derived attribute is the settings one.
+        return getattr(settings, setting.removesuffix("_resolutions") + "_hz")
+    return REMOVAL_OVERRIDES[setting]
+
+
 @pytest.mark.parametrize(
     "setting,parameter",
     (
         ("line_claim_hz", "claim_hz"),
-        ("max_line_width_hz", "max_line_width_hz"),
+        ("max_line_width_resolutions", "max_line_width_hz"),
         ("detection_low_hz", "low_hz"),
         ("detection_high_hz", "high_hz"),
         ("detection_fdr_alpha", "fdr_alpha"),
@@ -337,15 +353,15 @@ def test_a_detection_setting_reaches_the_detector(monkeypatch, setting, paramete
     remove.automatic_line_plans([_flat_run_spectra()], settings)
 
     assert seen, "detect_isolated_lines was never called"
-    assert all(call[parameter] == REMOVAL_OVERRIDES[setting] for call in seen)
+    assert all(call[parameter] == _expected(settings, setting, parameter) for call in seen)
 
 
 @pytest.mark.parametrize(
     "setting,parameter",
     (
         ("min_harmonics_for_fit", "min_harmonics"),
-        ("max_harmonic_residual_hz", "max_harmonic_residual_hz"),
-        ("max_fit_residual_rms_hz", "max_residual_rms_hz"),
+        ("max_harmonic_residual_resolutions", "max_harmonic_residual_hz"),
+        ("max_fit_residual_rms_resolutions", "max_residual_rms_hz"),
         ("search_hz", "search_hz"),
     ),
 )
@@ -358,4 +374,4 @@ def test_a_comb_fit_setting_reaches_the_estimator(monkeypatch, setting, paramete
     remove.automatic_line_plans([_flat_run_spectra()], settings)
 
     assert seen, "estimate_comb was never called"
-    assert all(call[parameter] == REMOVAL_OVERRIDES[setting] for call in seen)
+    assert all(call[parameter] == _expected(settings, setting, parameter) for call in seen)

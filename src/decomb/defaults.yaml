@@ -127,11 +127,26 @@ removal:
 
   # A fundamental fitted from three peaks licenses removing sixty harmonics, so the fit
   # has to be well supported before it authorises a grid: this many mutually consistent
-  # harmonics, none deviating more than max_harmonic_residual_hz, scattering no more than
-  # max_fit_residual_rms_hz about the fitted grid.
+  # harmonics, none deviating more than max_harmonic_residual_resolutions, scattering no
+  # more than max_fit_residual_rms_resolutions about the fitted grid.
   min_harmonics_for_fit: 20
-  max_harmonic_residual_hz: 0.06
-  max_fit_residual_rms_hz: 0.04
+
+  # Both tolerances are widths in the spectrum the fit is read from, so they are given in
+  # units of that spectrum's resolution -- the half-power width of a Hann-windowed pure
+  # tone, 1.4382 / estimation_window_s, which is the narrowest peak the analysis can
+  # produce and so the natural unit for "how far is far".
+  #
+  # They used to be in hertz, which was only right for one window length. The resolution
+  # is 26.6 mHz at the 54 s default, so doubling the window to 108 s halves it while a
+  # fixed 0.06 Hz stays put and quietly becomes twice as permissive. Measured across a
+  # 15-participant cohort, one recording's supported harmonic count fell from 24 to 19
+  # over exactly that change while another's rose from 19 to 26 -- the window length was
+  # moving two different things at once.
+  #
+  # 2.25 and 1.5 are 0.06 Hz and 0.04 Hz at 54 s, to within 0.13%, so nothing about the
+  # shipped behaviour changes; only its response to a different window does.
+  max_harmonic_residual_resolutions: 2.25
+  max_fit_residual_rms_resolutions: 1.5
 
   # How much spectrum each line costs: freq/ratio, because a mains-locked comb wanders in
   # proportion to harmonic number. MNE's own default is freq/200, which is far wider than
@@ -187,10 +202,13 @@ removal:
   min_runs_per_block_line: 2
   min_independent_windows_per_line: 3
 
-  # How much spectrum a resolved line claims for itself, and how wide a peak may be and
-  # still be a line rather than a rhythm.
+  # How much spectrum a resolved line claims for itself.
   line_claim_hz: 0.109
-  max_line_width_hz: 0.25
+
+  # How wide a peak may be and still be a line rather than a rhythm, in resolutions --
+  # see max_harmonic_residual_resolutions below for why these are not in hertz. 9.4 is
+  # 0.25 Hz at the shipped 54 s window, which is what this was.
+  max_line_width_resolutions: 9.4
 
   # How far either side of a target a residual is still that target's responsibility. The
   # notch's own width is the wrong region: a target that missed leaves its line just
