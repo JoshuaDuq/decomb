@@ -263,16 +263,23 @@ def band_share(measured, key, threshold_db=1.0):
     return float(np.mean(attenuation_db(measured, key)[inside] > threshold_db))
 
 
-def cost_hz(measured, key, threshold_db=1.0):
-    """Spectrum a transform took, in hertz, wherever it took it.
+def cost_hz(measured, key, threshold_db=1.0, view=None):
+    """Spectrum a transform took, in hertz, over `view` or over the whole analysed range.
 
     A share of `cost_band_hz` is the number `benchmark` reports, and it is the wrong one for
     a transform aimed outside that band: the cluster sits at 20 Hz, so notching it costs
     0.000 of 28-95 Hz while plainly costing something. Hertz is comparable everywhere.
+
+    `view` exists so a panel can state its own number. The removal spends most of its cost on
+    the comb, and quoting that total beside the cluster would credit the cluster column with
+    spectrum spent two bands away.
     """
     freqs = measured["freqs"]
     spacing = float(freqs[1] - freqs[0])
-    return float(np.sum(attenuation_db(measured, key) > threshold_db) * spacing)
+    taken = attenuation_db(measured, key) > threshold_db
+    if view is not None:
+        taken = taken & (freqs >= view[0]) & (freqs <= view[1])
+    return float(np.sum(taken) * spacing)
 
 
 def peak_over_background(measured, key, centre_hz, reach_hz):
@@ -288,32 +295,35 @@ def draw(measured, path: Path) -> None:
     from decomb.spectral import to_db
 
     freqs = measured["freqs"]
-    figure, axes = plt.subplots(2, 2, figsize=(13.0, 7.6), layout="constrained")
+    figure, axes = plt.subplots(
+        2,
+        2,
+        figsize=(13.0, 8.0),
+        layout="constrained",
+        sharex="col",
+        height_ratios=(1.15, 1.0),
+    )
 
     columns = (
         (
-            "a sparse comb — `apply`'s case",
+            "a sparse comb · the case for `apply`",
             COMB_VIEW_HZ,
             "decomb",
             "notch_comb",
             "probe_decomb",
             "probe_notch_comb",
-            f"{len(notch_frequencies())} notches, one per harmonic",
         ),
         (
-            "a dense cluster — `notch`'s case",
+            "a dense cluster · the case for `notch`",
             CLUSTER_VIEW_HZ,
             "decomb",
             "notch_cluster",
             "probe_decomb",
             "probe_notch_cluster",
-            f"one notch, {CLUSTER_SPAN_HZ + 2 * CLUSTER_WANDER_HZ:g} Hz wide",
         ),
     )
 
-    for column, (title, view, decomb_key, notch_key, cost_decomb, cost_notch, note) in enumerate(
-        columns
-    ):
+    for column, (title, view, decomb_key, notch_key, cost_decomb, cost_notch) in enumerate(columns):
         inside = (freqs >= view[0]) & (freqs <= view[1])
 
         top = axes[0][column]
@@ -341,7 +351,7 @@ def draw(measured, path: Path) -> None:
             0.0,
             attenuation_db(measured, cost_notch)[inside],
             color=NOTCH_COLOR,
-            alpha=0.35,
+            alpha=0.30,
             lw=0,
         )
         bottom.plot(
@@ -352,11 +362,20 @@ def draw(measured, path: Path) -> None:
         )
         bottom.axhline(1.0, color=FAINT_INK, lw=0.7, ls=":")
         bottom.set_title(
-            f"what it cost a signal carrying no artifact   ({note})",
+            "cost to a signal carrying no artifact",
             loc="left",
-            fontsize=9,
+            fontsize=9.5,
             color=MUTED_INK,
             pad=6,
+        )
+        bottom.set_title(
+            f"fit {cost_hz(measured, cost_decomb, view=view):.1f} · notch "
+            f"{cost_hz(measured, cost_notch, view=view):.1f} Hz of the "
+            f"{view[1] - view[0]:.1f} Hz shown",
+            loc="right",
+            fontsize=8.5,
+            color=FAINT_INK,
+            pad=7,
         )
         bottom.set_ylabel("attenuation (dB)" if column == 0 else "", fontsize=9, color=TITLE_INK)
         bottom.set_xlabel("frequency (Hz)", fontsize=9, color=TITLE_INK)
@@ -370,16 +389,20 @@ def draw(measured, path: Path) -> None:
                 spine.set_visible(side in ("left", "bottom"))
                 spine.set_color(AXIS_INK)
 
-    axes[0][0].legend(
+    # Outside the axes on purpose. Every corner of the upper panels holds either a comb
+    # peak or the notch's floor, so a legend placed inside one sits on the data it names.
+    figure.legend(
         handles=[
             plt.Line2D([], [], color=BEFORE_COLOR, lw=2.6, label="before"),
             plt.Line2D([], [], color=AFTER_COLOR, lw=1.4, label="after decomb"),
             plt.Line2D([], [], color=NOTCH_COLOR, lw=1.4, ls="--", label="after MNE notch"),
         ],
-        loc="lower left",
+        loc="outside lower center",
+        ncols=3,
         frameon=False,
-        fontsize=8.5,
+        fontsize=9,
         labelcolor=TITLE_INK,
+        handlelength=2.6,
     )
     decomb_share = band_share(measured, "probe_decomb")
     notch_share = band_share(measured, "probe_notch_comb")

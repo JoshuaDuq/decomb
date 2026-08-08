@@ -124,10 +124,12 @@ into 1 Hz at 20 Hz. Each column is put through the line-removal pass and through
 
 The lower row is the measurement the prose claims. A broadband recording carrying no
 artifact at all is put through each transform, so the attenuation plotted is what a signal
-loses rather than what an artifact loses. Clearing the comb costs 8.9 Hz of spectrum by
-fitting its lines and 50.0 Hz by notching them, or 13% against 74% of the 28--95 Hz cost
-band. The notch removes the comb further -- to 40.7 dB below background against the fit's
-1.1 dB -- and the difference in cost is what that buys.
+loses rather than what an artifact loses. Clearing the comb takes 55 notches, one per
+harmonic, against the same 55 fitted targets: 8.9 Hz of spectrum by fitting them and 50.0 Hz
+by notching them, or 13% against 74% of the 28--95 Hz cost band. Each panel states the cost
+over the span it draws rather than the whole band, so its numbers match its own picture. The
+notch removes the comb further -- to 40.7 dB below background against the fit's 1.1 dB -- and
+the difference in cost is what that buys.
 
 The cluster reverses it. Its peaks wander, so detection resolves 18 peaks over 3 dB where 12
 were planted and classifies only 8 as lines; the fit leaves the cluster exactly as it found
