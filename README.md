@@ -99,8 +99,7 @@ Two features survive, and both are the tool declining to act:
 ## The method, in equations
 
 Notation: $x[n]$ is one channel of one estimation window, $f_s$ the sampling rate, $N$ the
-window length in samples, $T = N/f_s$ its duration, $\Delta f = 1/T$ the bin width, and
-$K = \lfloor N/2 \rfloor + 1$ the number of one-sided bins.
+window length in samples, $T = N/f_s$ its duration, and $\Delta f = 1/T$ the bin width.
 
 ### 1. Spectral estimate
 
@@ -120,11 +119,11 @@ decibels as $X(f_k) = 10 \log_{10} S(f_k)$.
 
 Every threshold and every test in the workflow is applied to prominence, not to power.
 The local background is a running median over a window of half-width
-$H = \operatorname{round}(\Delta_{\mathrm{bg}} / \Delta f)$ bins with the centre $2c+1$ bins
+$H = \mathrm{round}(\Delta_{\mathrm{bg}} / \Delta f)$ bins with the centre $2c+1$ bins
 excluded, so a line cannot enter its own background:
 
 $$
-B(f_k) \;=\; \operatorname{median} \left[\, X(f_j) \;\text{ over }\; c < |j - k| \le H \,\right],
+B(f_k) \;=\; \mathrm{median}\,\left[\, X(f_j) \;\text{ over }\; c < |j - k| \le H \,\right],
 \qquad
 P(f_k) \;=\; X(f_k) - B(f_k).
 $$
@@ -140,7 +139,7 @@ the prominence spectrum's own lower tail — which the lines, being one-sided co
 cannot inflate:
 
 $$
-\hat\mu = \operatorname{median} P,
+\hat\mu = \mathrm{median}\,P,
 \qquad
 \hat\sigma = \hat\mu - Q_{0.158655}(P),
 $$
@@ -202,8 +201,12 @@ The uncertainty in $\hat f_0$ is a delete-one jackknife over the harmonics, whic
 assumption about how the per-harmonic errors are distributed:
 
 $$
-\widehat{\mathrm{SE}}(\hat f_0) \;=\; \sqrt{\frac{n-1}{n} \sum_{i=1}^{n} \left( \hat f_0^{(-i)} - \overline{\hat f_0^{(-\cdot)}} \right)^{2}} .
+\widehat{\mathrm{SE}}(\hat f_0) \;=\; \sqrt{\frac{n-1}{n} \sum_{i=1}^{n} \left( \hat f_0^{(-i)} - \bar f \right)^{2}},
+\qquad
+\bar f \;=\; \frac{1}{n} \sum_{i=1}^{n} \hat f_0^{(-i)},
 $$
+
+where $\hat f_0^{(-i)}$ is the fundamental refitted with harmonic $i$ left out.
 
 ### 5. What is removed
 
@@ -219,8 +222,12 @@ $$
 and for an isolated line, which inherits no such scaling,
 $W = \max(f/\rho,\, W_{\min},\, 1/T_{\text{filter}})$.
 
-Inside each width the operation is a projection, not an attenuation. MNE's `spectrum_fit`
-applies Thomson's multitaper *F* test for a deterministic sinusoid at each bin, per channel.
+Inside each width the operation is a projection, not an attenuation. The subtraction is
+MNE's `spectrum_fit`, which fits a deterministic sinusoid at each bin and removes it where
+Thomson's multitaper *F* test is significant, at MNE's own Bonferroni-corrected default.
+`decomb` reimplements the same statistic — in `estimators.thomson_f_statistics` — for the
+residual audit, so what checks the result is the test that produced it.
+
 With $L$ DPSS tapers $v_l$ of bandwidth `mt_bandwidth`, $Y_l(f)$ the tapered transforms,
 $U_l = \sum_n v_l[n]$, and $\mathcal{S}$ the symmetric tapers (the ones with $U_l \ne 0$),
 the least-squares amplitude and its test statistic are
@@ -231,12 +238,13 @@ $$
 F(f) \;=\; \frac{(L-1)\,\left|\hat\mu(f)\right|^{2} \sum_{l \in \mathcal{S}} U_l^{2}}{\sum_{l \in \mathcal{S}} \left| Y_l(f) - \hat\mu(f) U_l \right|^{2} \;+\; \sum_{l \notin \mathcal{S}} \left| Y_l(f) \right|^{2}} .
 $$
 
-Under the null of no sinusoid at $f$, $F(f) \sim F(2,\, 2L-2)$. The detector is Bonferroni-
-corrected over the whole transform grid, so the critical value is
-$F^{-1}(1 - \alpha/N;\, 2,\, 2L-2)$. Where the test fires, $\hat\mu(f)$ is subtracted; where
-it does not, the bin is untouched. This is why the cost is a few bins per line rather than a
-band: the operator removes the fitted sinusoid, and the surrounding spectrum passes through
-unchanged.
+Under the null of no sinusoid at $f$, $F(f) \sim F(2,\, 2L-2)$, and the family is the whole
+transform window, so the critical value is $F^{-1}(1 - \alpha/N;\, 2,\, 2L-2)$ with $N$ the
+number of samples in it. Statistics stay channel-specific, so a line present on four
+electrodes never authorises subtraction from the rest.
+
+Where the test fires, $\hat\mu(f)$ is subtracted; where it does not, the bin is untouched.
+That is the whole reason the cost is a few bins per line rather than a band.
 
 The fundamental is re-fitted in overlapping windows of `estimation_window_s` at a hop of
 half that, because a comb drifts over minutes. Each window is cleaned against its own
@@ -260,7 +268,7 @@ has to be invented.
 deviation at frequencies it never targeted is compared, channel by channel, against a
 control transform of the same size at frequencies *it* never targeted. Under the null the
 pair is exchangeable, so with $s$ channels where the real one is larger out of $m$ decided
-pairs, $p = \Pr[\mathrm{Binom}(m, \tfrac12) \ge s]$.
+pairs, $p = \mathrm{P}[\mathrm{Binom}(m, \tfrac12) \ge s]$.
 
 **Residual lines.** The worst residual inside each target's claimed window is compared
 against the same search run where no target is. With $n$ such controls the exact one-sided
@@ -296,7 +304,7 @@ charged twice. Inside the burst window,
 $$
 \text{energy ratio} = \frac{\sum_n r^2[n]}{\sum_n \hat r^2[n]},
 \qquad
-\text{correlation} = \min_{\text{channels}} \operatorname{corr}(r, \hat r),
+\text{correlation} = \min_{\text{channels}} \mathrm{corr}(r, \hat r),
 \qquad
 \text{intrinsic} = \frac{\sum_n \hat r^2[n]}{\sum_n b^2[n]},
 $$
