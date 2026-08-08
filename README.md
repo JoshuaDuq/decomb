@@ -96,223 +96,6 @@ Two features survive, and both are the tool declining to act:
 - **60 Hz** is comb harmonic 50, inside the `mains_notch_hz` band that `exclude_mains`
   hands to `notch`. Two stages must not aim at the same spectrum.
 
-## The method, in equations
-
-Notation: $x[n]$ is one channel of one estimation window, $f_s$ the sampling rate, $N$ the
-window length in samples, $T = N/f_s$ its duration, and $\Delta f = 1/T$ the bin width.
-
-### 1. Spectral estimate
-
-Each window is tapered with a Hann window $w[n]$ and transformed. The one-sided power
-spectral density, in SciPy's `density` scaling, is
-
-$$
-S(f_k) \;=\; \frac{c_k}{f_s \sum_{n} w^2[n]} \left| \sum_{n=0}^{N-1} w[n]\,x[n]\, e^{-2\pi i k n / N} \right|^{2}
-$$
-
-on the grid $f_k = k f_s / N$, with $c_k = 2$ everywhere except DC and Nyquist, where
-$c_k = 1$, so that the one-sided density integrates to the mean square of the windowed
-signal. Channels are combined by median and windows by mean, and the result is expressed in
-decibels as $X(f_k) = 10 \log_{10} S(f_k)$.
-
-### 2. Prominence
-
-Every threshold and every test in the workflow is applied to prominence, not to power.
-The local background is a running median over a window of half-width
-$H = \mathrm{round}(\Delta_{\mathrm{bg}} / \Delta f)$ bins with the centre $2c+1$ bins
-excluded, so a line cannot enter its own background:
-
-$$
-B(f_k) \;=\; \mathrm{median}\,\left[\, X(f_j) \;\text{ over }\; c < |j - k| \le H \,\right],
-\qquad
-P(f_k) \;=\; X(f_k) - B(f_k).
-$$
-
-$\Delta_{\mathrm{bg}}$ is `background_half_width_hz` and $c$ is one bin, because a
-Hann-windowed tone occupies three. Bins within $H$ of either edge have no symmetric window
-and are returned as NaN rather than estimated from a lopsided one.
-
-### 3. Detection
-
-Wherever there is no line, $P$ is zero-centred by construction, so the null is fitted from
-the prominence spectrum's own lower tail — which the lines, being one-sided contamination,
-cannot inflate:
-
-$$
-\hat\mu = \mathrm{median}\,P,
-\qquad
-\hat\sigma = \hat\mu - Q_{0.158655}(P),
-$$
-
-where $Q_\alpha$ is the $\alpha$ quantile; for a Gaussian the gap between the median and the
-15.87th percentile is exactly $\sigma$. Each searched bin gets a one-sided probability
-
-$$
-p_k \;=\; 1 - \Phi\left( \frac{P(f_k) - \hat\mu}{\hat\sigma} \right),
-$$
-
-and the family is controlled at `fdr_alpha` by Benjamini–Hochberg over exactly the bins the
-search was allowed to reach:
-
-$$
-q_{(i)} \;=\; \min_{j \ge i} \min\left(1, \frac{n\, p_{(j)}}{j}\right),
-\qquad \text{accept } q_{(i)} < \alpha .
-$$
-
-Runs of accepted bins separated by no more than `join_gap_bins` quiet bins are one line,
-represented by their largest bin. That bin is then refined below the grid by fitting a
-parabola to the three decibel samples around the summit — a Hann-windowed tone has a
-near-parabolic log-magnitude peak:
-
-$$
-\delta \;=\; \frac{1}{2}\,\frac{X_{k-1} - X_{k+1}}{X_{k-1} - 2X_k + X_{k+1}},
-\qquad
-\hat f = f_k + \delta\,\Delta f, \qquad |\delta| \le \tfrac{1}{2}.
-$$
-
-A detection's half-power width is measured by linear interpolation to $X_{\text{peak}} - 3$
-dB on each side and summed. This is the quantity that separates an instrument line from a
-brain rhythm: a Hann-windowed pure tone floors at $1.4382/T$, while a biological resonance
-is whole hertz wide.
-
-### 4. The comb fit
-
-A comb is an arithmetic series through the origin, so with $\hat f^{(k)}$ the refined
-position of harmonic $k$ and $w_k$ its prominence, the fundamental is the weighted
-least-squares slope
-
-$$
-\hat f_0 \;=\; \frac{\sum_{k \in \mathcal{K}} w_k\, k\, \hat f^{(k)}}{\sum_{k \in \mathcal{K}} w_k\, k^{2}} .
-$$
-
-Membership $\mathcal{K}$ is found by iterating to a fixed point: seed $\hat f_0$ with the
-weighted median of $\hat f^{(k)}/k$, keep every harmonic with
-$|\hat f^{(k)} - k \hat f_0| \le \tau$, refit, repeat. The fit authorises a removal grid
-only if $|\mathcal{K}| \ge$ `min_harmonics_for_fit` and the scatter about it is small:
-
-$$
-\mathrm{RMS} \;=\; \sqrt{\frac{1}{|\mathcal{K}|} \sum_{k \in \mathcal{K}} \left(\hat f^{(k)} - k \hat f_0\right)^{2}}
-$$
-
-stays under `max_fit_residual_rms_hz`. Peaks that do not lie on one arithmetic series are
-not a comb, however many of them there are.
-
-The uncertainty in $\hat f_0$ is a delete-one jackknife over the harmonics, which needs no
-assumption about how the per-harmonic errors are distributed:
-
-$$
-\widehat{\mathrm{SE}}(\hat f_0) \;=\; \sqrt{\frac{n-1}{n} \sum_{i=1}^{n} \left( \hat f_0^{(-i)} - \bar f \right)^{2}},
-\qquad
-\bar f \;=\; \frac{1}{n} \sum_{i=1}^{n} \hat f_0^{(-i)},
-$$
-
-where $\hat f_0^{(-i)}$ is the fundamental refitted with harmonic $i$ left out.
-
-### 5. What is removed
-
-Each target gets a width, not a fixed one: a comb is disciplined by its source, so a wander
-$\delta$ in the fundamental moves harmonic $k$ by $k\delta$, and the width has to carry that
-propagated uncertainty. For a comb harmonic $k$ at $f_k$, with $\rho$ = `notch_width_ratio`
-and $z$ = `uncertainty_confidence_z`,
-
-$$
-W_k \;=\; \max\left(\frac{f_k}{\rho},\, W_{\min}\right) \;+\; 2 z\, k\, \widehat{\mathrm{SE}}(\hat f_0),
-$$
-
-and for an isolated line, which inherits no such scaling,
-$W = \max(f/\rho,\, W_{\min},\, 1/T_{\text{filter}})$.
-
-Inside each width the operation is a projection, not an attenuation. The subtraction is
-MNE's `spectrum_fit`, which fits a deterministic sinusoid at each bin and removes it where
-Thomson's multitaper *F* test is significant, at MNE's own Bonferroni-corrected default.
-`decomb` reimplements the same statistic — in `estimators.thomson_f_statistics` — for the
-residual audit, so what checks the result is the test that produced it.
-
-With $L$ DPSS tapers $v_l$ of bandwidth `mt_bandwidth`, $Y_l(f)$ the tapered transforms,
-$U_l = \sum_n v_l[n]$, and $\mathcal{S}$ the symmetric tapers (the ones with $U_l \ne 0$),
-the least-squares amplitude and its test statistic are
-
-$$
-\hat\mu(f) \;=\; \frac{\sum_{l \in \mathcal{S}} Y_l(f)\, U_l}{\sum_{l \in \mathcal{S}} U_l^{2}},
-\qquad
-F(f) \;=\; \frac{(L-1)\,\left|\hat\mu(f)\right|^{2} \sum_{l \in \mathcal{S}} U_l^{2}}{\sum_{l \in \mathcal{S}} \left| Y_l(f) - \hat\mu(f) U_l \right|^{2} \;+\; \sum_{l \notin \mathcal{S}} \left| Y_l(f) \right|^{2}} .
-$$
-
-Under the null of no sinusoid at $f$, $F(f) \sim F(2,\, 2L-2)$, and the family is the whole
-transform window, so the critical value is $F^{-1}(1 - \alpha/N;\, 2,\, 2L-2)$ with $N$ the
-number of samples in it. Statistics stay channel-specific, so a line present on four
-electrodes never authorises subtraction from the rest.
-
-Where the test fires, $\hat\mu(f)$ is subtracted; where it does not, the bin is untouched.
-That is the whole reason the cost is a few bins per line rather than a band.
-
-The fundamental is re-fitted in overlapping windows of `estimation_window_s` at a hop of
-half that, because a comb drifts over minutes. Each window is cleaned against its own
-targets and widths, then the windows are recombined with squared-sine weights normalised to
-a partition of unity, so the seams add to one at every sample:
-
-$$
-g_m[n] = \sin^{2}\left( \pi \frac{n + \tfrac{1}{2}}{M} \right),
-\qquad
-\tilde g_m[n] = \frac{g_m[n]}{\sum_{m'} g_{m'}[n]},
-\qquad
-\sum_m \tilde g_m[n] = 1 .
-$$
-
-### 6. What the benchmark measures
-
-Every criterion is an exact test against a matched control, chosen so that no decibel margin
-has to be invented.
-
-**Off-target disturbance** is a paired sign test across channels. The real transform's
-deviation at frequencies it never targeted is compared, channel by channel, against a
-control transform of the same size at frequencies *it* never targeted. Under the null the
-pair is exchangeable, so with $s$ channels where the real one is larger out of $m$ decided
-pairs, $p = \mathrm{P}[\mathrm{Binom}(m, \tfrac12) \ge s]$.
-
-**Residual lines.** The worst residual inside each target's claimed window is compared
-against the same search run where no target is. With $n$ such controls the exact one-sided
-probability, counting the observation among the candidates, is
-
-$$
-p \;=\; \frac{1 + n_{\ge}}{1 + n},
-$$
-
-where $n_{\ge}$ counts the controls that reach or exceed the observation. Counting the
-observation among the candidates is what makes this exact rather than optimistic: the
-smallest attainable value is $1/(n+1)$.
-
-Because each run's $p$ is uniform under the null, requiring every run to pass would reject a
-faultless cohort almost surely; the decision is therefore Benjamini–Hochberg over the runs
-at `false_discovery_rate`, and passes when it makes no discovery.
-
-**Seams** use a synchronised-shift test. Each recording contributes one observed
-boundary maximum and `n_seam_controls` controls from shift positions where no seam is; each
-candidate is scaled by the 95th percentile of the others, and both the largest ratio and the
-count of ratios above one are compared against their permutation distributions, each at
-$\alpha/2$.
-
-**Band cost** is measured, never asserted. A broadband probe goes through the identical
-transform and the loss per bin is $\ell(f) = X_{\text{before}}(f) - X_{\text{after}}(f)$,
-averaged over channels; the reported figure is the share of bins in `cost_band_hz` with
-$\ell > 1$ dB and with $\ell > 3$ dB.
-
-**Transients.** An injected Gaussian burst is recovered and compared against the same burst
-put through the same removal alone, so the unavoidable loss is divided out rather than
-charged twice. Inside the burst window,
-
-$$
-\text{energy ratio} = \frac{\sum_n r^2[n]}{\sum_n \hat r^2[n]},
-\qquad
-\text{correlation} = \min_{\text{channels}} \mathrm{corr}(r, \hat r),
-\qquad
-\text{intrinsic} = \frac{\sum_n \hat r^2[n]}{\sum_n b^2[n]},
-$$
-
-with $b$ the injected burst, $\hat r$ the reference, and $r$ the recovered one. The first two
-are gated by `PreservationGate`; the third is reported, because a signal exactly at an
-artifact frequency is not separable from the artifact.
-
 ## What makes it different
 
 **It refuses.** `apply` will not run without a passing `benchmark` for the same data and
@@ -337,9 +120,88 @@ a valid input. Nothing here requires a task, a trigger channel, or an epoch stru
 pip install -e .
 ```
 
-Python 3.11+. Depends on MNE, MNE-BIDS, NumPy, SciPy, pandas, matplotlib.
+Python 3.11+. Depends on MNE, MNE-BIDS, pybv, NumPy, SciPy, pandas, matplotlib, joblib and
+PyYAML. `pip install -e ".[dev]"` adds pytest and ruff.
 
-## Use
+`decomb --version` confirms the install, and `decomb --help` lists the stages.
+
+## Quickstart
+
+Point `decomb` at a BIDS root and ask what is in it. Nothing is written to your data until
+`apply`, and `apply` will not run until `benchmark` has passed.
+
+```bash
+decomb diagnose --bids-root data/bids --output-dir outputs/diagnosis
+```
+
+```
+Measuring 3 recording(s) under data/bids
+58 line(s) over 3 subject(s): 53 comb, 0 isolated
+  fundamental 1.200000 Hz over harmonics 24-79, residual RMS 0.4 mHz
+  set removal.nominal_fundamental_hz to this value and removal.harmonic_range to the span above.
+
+share of each band that is line artifact (median over subjects):
+  delta          0.00%  (worst subject 0.00%, 0 line(s) inside)
+  theta          0.00%  (worst subject 0.00%, 0 line(s) inside)
+  alpha          0.00%  (worst subject 0.00%, 0 line(s) inside)
+  beta           1.78%  (worst subject 1.88%, 2 line(s) inside)
+  gamma         21.00%  (worst subject 21.62%, 38 line(s) inside)
+```
+
+Two numbers decide whether to go on. The **fundamental and its harmonic span** go into your
+config, because every later stage measures against the grid they define. The **share of each
+band** is what says whether removal is worth doing at all — here a fifth of gamma is line
+artifact and delta through alpha are untouched by it, so only the high bands have anything
+to gain.
+
+Copy the packaged [`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml`, set what
+`diagnose` just reported, then run the rest against that one file:
+
+```bash
+decomb benchmark --config decomb.yaml
+```
+
+```
+passed 3/3 runs
+  gate_transient_preserved         3/3
+  gate_transient_undistorted       3/3
+  seam (cohort criterion)          PASS: 0 exceeded (count p=1.0000, maximum p=0.8780), worst ratio 0.17
+  residual (cohort criterion)      PASS: 0 of 3 recordings (smallest p=0.122)
+  focal residual (cohort)          PASS: 0 of 3 recordings (smallest p=0.512)
+  preservation (measurement)       probes 1.5e-05 dB against a control's 0.00057; off-target band 0.019 dB against 0.014
+  band cost (measurement)          median 0.138, worst 0.141 of 28-95 Hz lost by a broadband probe
+  in-band probe survival           median 0.002, worst 0.000 (measurement, not a criterion)
+```
+
+`benchmark` injects known signals into your own recordings, removes the lines, and measures
+what came back. Only then will the write run:
+
+```bash
+decomb apply --config decomb.yaml
+decomb verify --config decomb.yaml
+decomb report --config decomb.yaml
+```
+
+```
+median suppression 10.1 dB; worst residual line 12.31 dB
+  declared data/bids_decombed/dataset_description.json a derivative of data/bids
+```
+
+`apply` refuses unless a `benchmark` recorded under the same settings passed on the same
+recordings — the fingerprint is checked, so loosening a criterion and re-running invalidates
+the certificate rather than inheriting it. `verify` then re-sweeps what was written under
+FDR control, knowing nothing about where the targets were.
+
+The transcripts above are real, from three 300 s synthetic recordings carrying a known
+1.2 Hz comb, with the paths shortened. [`docs/make_figure.py`](docs/make_figure.py) builds
+that dataset and runs these same stages, so the whole sequence is reproducible without any
+data of your own:
+
+```bash
+python docs/make_figure.py --keep /tmp/decomb-demo
+```
+
+## The stages
 
 ```bash
 decomb diagnose     # what lines are there, do they share a fundamental, and do they matter?
@@ -351,11 +213,53 @@ decomb notch        # optional: wide notch over cluster bands
 decomb psd          # before-and-after spectra
 ```
 
-Start with `diagnose`. It reports the fitted fundamental and the harmonic span that
-supports it; put those in your config before benchmarking. It also reports the share of
-each analysed band that is line artifact, which is what decides whether removal is worth
-doing at all, and counts detections per band, which is how you tell a band `apply` can
-clear from one only `notch` can.
+Every stage reads the same config file and takes the same options; `decomb --help` lists
+them all. The ones you are likely to want:
+
+| Option | Effect |
+|---|---|
+| `--config PATH` | the config to use (default `./decomb.yaml`, else the packaged defaults). `DECOMB_CONFIG` does the same |
+| `--bids-root PATH` | override the source root, without editing the config |
+| `--output-root PATH` | `apply`: where the cleaned copy goes |
+| `--output-dir PATH`, `--report-dir PATH` | where the catalogue and the tables go |
+| `--subjects sub-01 sub-02` | `diagnose`/`psd` only: restrict to a subset |
+
+`--subjects` is refused by `benchmark`, `apply`, `verify` and `notch` on purpose. Their
+criteria are decided over the recordings jointly, so a subset could neither certify a
+dataset nor leave the output root in a state the provenance describes.
+
+`diagnose` also counts detections per band, which is how you tell a band `apply` can clear
+from one only `notch` can.
+
+## What each stage writes
+
+Tables are TSV, so every number a stage decided on can be read without the tool that wrote
+it. Locations come from `paths` in the config; `diagnosis_dir` and `removal_dir` default to
+`outputs/diagnosis` and `outputs/removal`.
+
+| Stage | Writes | Holds |
+|---|---|---|
+| `diagnose` | `lines.tsv` | one row per detection: refined frequency, prominence with its bootstrap interval, half-power width, q-value, how many subjects carried it, comb harmonic, and where it sits on the `k/TR` grid |
+| | `comb.tsv` | the fitted fundamental and spacing, the harmonics supporting it, and the scatter about the fitted grid |
+| | `lines_per_band.tsv`, `band_impact.tsv` | detections per band, and the share of each band that is line artifact |
+| | `spectra.npz` | the spectra the sweep ran on |
+| `benchmark` | `benchmark.tsv` | one row per recording: every criterion, the control it was measured against, its p-value, and the settings fingerprint |
+| `apply` | `<output_root>/` | the cleaned BIDS copy — `.eeg` binaries rewritten, every sidecar byte-identical |
+| | `<output_root>/dataset_description.json` | `GeneratedBy` provenance: version, settings fingerprint, the full parameter set, and the measured band cost |
+| | `removal_manifest.tsv` | one row per recording: the fundamental used, target counts, suppression and residual statistics, the read-back check, and the digests tying it to its benchmark |
+| `verify` | `verification.tsv` | the blind re-sweep of the written data beside the same sweep of the original, and the verdict |
+| | `verification_spectra.npz` | the spectra that sweep ran on |
+| `report` | `band_outcomes.tsv` | artifact share per band, before and after |
+| | `per_subject_line_residual.tsv` | what survived at each target, per subject |
+| | `removal_before_after.png` | the summary figure |
+| `psd` | `psd_before_after.png`, `_panels.png`, `_per_recording.png` | overall, tiled, and per-recording spectra |
+| `notch` | `notch_manifest.tsv` | the bands taken wholesale, if you ran it |
+
+`apply` stages the whole derivative in a hidden directory and moves it into place only after
+every recording has been written and read back within
+`removal.roundtrip_relative_tolerance`, so an interrupted run cannot leave a half-cleaned
+dataset behind. `removal_manifest.tsv` is written into both `removal_dir` and the output
+root, so the cleaned copy always carries its own record of what was done to it.
 
 ## Configuration
 
@@ -387,6 +291,34 @@ is the important one: `1.2` is a seed for the search, not a fact about your data
 
 Only EEG channels are transformed. `channels.tsv` is authoritative, so ECG and EOG stay
 byte-identical and outside the criteria.
+
+## How it works
+
+Six steps, each stated as an equation in **[docs/METHOD.md](docs/METHOD.md)** so it can be
+checked against the code:
+
+1. **Spectral estimate.** Hann-tapered periodogram per estimation window, combined by median
+   over channels and mean over windows.
+2. **Prominence.** Every threshold and test in the workflow applies to a bin's excess over a
+   running-median local background that excludes the bin's own neighbourhood — so a line
+   cannot enter its own background.
+3. **Detection.** The null is fitted from the prominence spectrum's own lower tail, which
+   the lines cannot inflate, and the family is controlled at `fdr_alpha` by
+   Benjamini-Hochberg. Accepted peaks are refined below the grid by parabolic interpolation,
+   and their half-power width is what separates an instrument line from a brain rhythm.
+4. **The comb fit.** A comb is an arithmetic series through the origin, so the fundamental is
+   a weighted least-squares slope over harmonics found by iterating to a fixed point. It
+   authorises a removal grid only if enough mutually consistent harmonics support it and the
+   scatter about it is small. Its uncertainty is a delete-one jackknife.
+5. **What is removed.** Each target's width carries the fundamental's uncertainty propagated
+   to its harmonic number. Inside that width the operation is a projection, not an
+   attenuation: a deterministic sinusoid is fitted per bin and subtracted only where
+   Thomson's multitaper *F* test is significant. The fundamental is re-fitted in overlapping
+   windows recombined with squared-sine weights that sum to one.
+6. **What the benchmark measures.** Every criterion is an exact test against a matched
+   control that repeats the same search where no target is — a sign test for off-target
+   disturbance, permutation for the seams, and counting for residual lines — so no decibel
+   margin has to be invented.
 
 ## What the criteria actually decide
 
@@ -439,8 +371,12 @@ from your own data.
 ## Tests
 
 ```bash
+pip install -e ".[dev]"
 pytest
 ```
+
+535 tests, about a minute. They build synthetic recordings from seeded noise and known
+lines, so what they check is the measurement rather than a stored fixture.
 
 ## License
 

@@ -37,8 +37,8 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 decomb = "decomb.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jduquette/decomb"
-Issues = "https://github.com/jduquette/decomb/issues"
+Homepage = "https://github.com/JoshuaDuq/decomb"
+Issues = "https://github.com/JoshuaDuq/decomb/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
