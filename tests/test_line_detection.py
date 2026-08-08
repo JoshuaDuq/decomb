@@ -19,6 +19,11 @@ import pytest
 from decomb import estimators
 
 
+def _probe(**overrides) -> estimators.Probe:
+    """A probe with its tones stated; the default asks for placement instead."""
+    return estimators.Probe(**{"sinusoid_hz": (35.40, 43.80, 65.40, 78.60), **overrides})
+
+
 def _spectrum(
     peaks=(), *, rhythms=(), f0=1.2, harmonics=(), df=0.002, high=100.0, noise_db=0.4, seed=0
 ):
@@ -263,7 +268,7 @@ def test_production_detection_is_not_blind_at_the_probe_frequencies():
     real line ever does sit on a probe tone it raises, which says move the probe rather
     than stop looking.
     """
-    probe = estimators.Probe()
+    probe = _probe()
     tones = probe.sinusoid_hz + (probe.burst_hz,)
     freqs = np.arange(1.0, 100.0, 0.002)
     spectrum = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)

@@ -226,9 +226,19 @@ benchmark:
   probe:
     # Tones injected where the removal does NOT act, standing for narrowband neural
     # activity. Placed midway between comb harmonics -- (k + 0.5) * f0 -- which is the
-    # unique position maximising the distance to both neighbours. Move these when your
-    # comb has a different spacing; the benchmark refuses if one lands on a target.
-    sinusoid_hz: [35.40, 43.80, 65.40, 78.60]
+    # unique position maximising the distance to both neighbours.
+    #
+    # Empty means the benchmark places them itself, from the targets of every plan it is
+    # about to measure. That is the default because it is the first moment the answer is
+    # knowable: the midpoints need a fitted fundamental, and the isolated lines are found
+    # per recording. A cohort catalogue naming 9 isolated lines corresponded to 297 distinct
+    # targets across 89 plans, and hand-picked tones that cleared every catalogue line still
+    # landed 0.046 and 0.118 Hz from lines that were not in it -- discovered six hours into
+    # a benchmark, because that is when the colliding recording came up.
+    #
+    # Give a list to override. It is checked the same way, and refused the same way.
+    sinusoid_hz: []
+    sinusoid_count: 4
     sinusoid_amplitude_v: 5.0e-7
 
     # A broadband transient, which is the realistic worst case: its bandwidth necessarily
@@ -254,10 +264,23 @@ benchmark:
     # The only two criteria decidable inside one recording. Everything else is an excess
     # over a matched control and is decided across the recordings.
     #
-    # min_intrinsic_energy_ratio is derived from the instrument: a Gaussian burst of
-    # duration sigma spans about 4/(2*pi*sigma) Hz, crossing span/spacing comb lines, each
-    # subtracted over freq/notch_width_ratio. For the defaults above that expected loss is
-    # near 7.5%, and the floor sits at twice it.
+    # min_intrinsic_energy_ratio is a BUDGET, not a property of the instrument, even though
+    # the arithmetic below reads like a derivation. The transient it measures is compared
+    # against itself put through the same removal alone, so the ratio already is the
+    # geometric cost of projecting out these targets and there is nothing independent left
+    # to predict it from. The level has to be declared.
+    #
+    # A Gaussian burst of duration sigma spans about 4/(2*pi*sigma) Hz, crossing
+    # span/spacing comb lines, each subtracted over freq/notch_width_ratio. For a comb-only
+    # removal at the settings above that expected loss is near 7.5%, and this floor sits at
+    # twice it. Isolated lines are removed too and they are not in that arithmetic: a
+    # dataset carrying twenty of them per recording pays much more, through no fault of its
+    # own. On a 15-participant EEG-fMRI cohort the measured loss was 11% typical and 21%
+    # worst, and this default refused seven recordings whose collateral damage was nil.
+    #
+    # So set it from your own data rather than inheriting it. `decomb benchmark` reports
+    # the loss your dataset's geometry costs before it applies this criterion, and says so
+    # explicitly when a run fails on this line.
     min_intrinsic_energy_ratio: 0.85
     max_intrinsic_energy_ratio: 1.05
     # An invariant on a linear operator, kept because a non-linear failure would break it.

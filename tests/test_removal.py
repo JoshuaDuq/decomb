@@ -8,6 +8,16 @@ import pytest
 from decomb import estimators, spectral
 
 
+def _probe(**overrides) -> estimators.Probe:
+    """A probe with its tones stated.
+
+    ``Probe.sinusoid_hz`` defaults to empty, which asks the benchmark to place the tones
+    from the targets of the plans it is about to measure. These tests are about what a
+    probe does once placed, so they fix the tones rather than depend on a placement.
+    """
+    return estimators.Probe(**{"sinusoid_hz": (35.40, 43.80, 65.40, 78.60), **overrides})
+
+
 def test_thomson_f_test_identifies_a_channel_specific_stationary_line():
     sampling_frequency_hz = 200.0
     times = np.arange(2_000) / sampling_frequency_hz
@@ -417,7 +427,7 @@ class TestRemovalFrequencies:
 
 class TestProbe:
     def test_waveform_contains_every_sinusoid(self):
-        probe = estimators.Probe(burst_amplitude_v=0.0)
+        probe = _probe(burst_amplitude_v=0.0)
         sfreq, n = 1000.0, 240_000
         times = np.arange(n) / sfreq
         freqs, psd = spectral.hann_periodogram(probe.waveform(times), sfreq)
@@ -426,14 +436,14 @@ class TestProbe:
             assert psd[index] > 100 * np.median(psd)
 
     def test_burst_is_localised_in_time(self):
-        probe = estimators.Probe(sinusoid_amplitude_v=0.0)
+        probe = _probe(sinusoid_amplitude_v=0.0)
         times = np.arange(240_000) / 1000.0
         wave = probe.waveform(times)
         inside = probe.burst_window(times)
         assert np.abs(wave[inside]).max() > 100 * np.abs(wave[~inside]).max()
 
     def test_burst_window_brackets_the_centre(self):
-        probe = estimators.Probe()
+        probe = _probe()
         times = np.arange(240_000) / 1000.0
         window = probe.burst_window(times)
         assert times[window].min() == pytest.approx(probe.burst_centre_s - 0.2, abs=0.01)
@@ -442,16 +452,16 @@ class TestProbe:
 
 class TestProbeClearance:
     def test_accepts_well_separated_probes(self):
-        estimators.check_probe_clearance(estimators.Probe(), [1.2 * k for k in range(24, 80)])
+        estimators.check_probe_clearance(_probe(), [1.2 * k for k in range(24, 80)])
 
     def test_rejects_a_probe_sitting_on_a_target(self):
-        probe = estimators.Probe(sinusoid_hz=(36.0,))
+        probe = _probe(sinusoid_hz=(36.0,))
         with pytest.raises(ValueError, match="clearance"):
             estimators.check_probe_clearance(probe, [1.2 * k for k in range(24, 80)])
 
     def test_the_default_probes_clear_the_real_comb(self):
         targets = [1.2 * k for k in range(24, 80)]
-        estimators.check_probe_clearance(estimators.Probe(), targets)
+        estimators.check_probe_clearance(_probe(), targets)
 
     def test_the_default_probes_clear_the_comb_wherever_the_fundamental_sits(self):
         """A static grid is not the grid the adaptive model actually removes on.
@@ -468,7 +478,7 @@ class TestProbeClearance:
         """
         for fundamental in np.linspace(1.198, 1.202, 81):
             targets = [fundamental * k for k in range(22, 84)]
-            estimators.check_probe_clearance(estimators.Probe(), targets)
+            estimators.check_probe_clearance(_probe(), targets)
 
 
 class TestMetrics:
@@ -490,14 +500,14 @@ class TestMetrics:
     def test_probe_preservation_detects_an_untouched_probe(self):
         freqs = np.arange(0, 100, 1 / 21.6)
         psd = np.ones((4, freqs.size))
-        result = estimators.probe_preservation(freqs, psd, psd.copy(), estimators.Probe())
+        result = estimators.probe_preservation(freqs, psd, psd.copy(), _probe())
         assert result["max_probe_deviation_db"] == pytest.approx(0.0)
 
     def test_probe_preservation_detects_a_removed_probe(self):
         freqs = np.arange(0, 100, 1 / 21.6)
         before = np.ones((4, freqs.size))
         after = before.copy()
-        probe = estimators.Probe()
+        probe = _probe()
         after[:, int(np.argmin(np.abs(freqs - probe.sinusoid_hz[0])))] = 0.5
         result = estimators.probe_preservation(freqs, before, after, probe)
         assert result["max_probe_deviation_db"] == pytest.approx(3.01, abs=0.02)
@@ -506,7 +516,7 @@ class TestMetrics:
         freqs = np.arange(0, 100, 1 / 21.6)
         before = np.ones((64, freqs.size))
         after = before.copy()
-        probe = estimators.Probe()
+        probe = _probe()
         index = int(np.argmin(np.abs(freqs - probe.sinusoid_hz[0])))
         after[0, index] = 0.01
 
@@ -552,7 +562,7 @@ class TestMetrics:
 
     def test_a_probe_matching_its_reference_scores_one(self):
         times = np.arange(240_000) / 1000.0
-        probe = estimators.Probe()
+        probe = _probe()
         wave = probe.waveform(times)
         result = estimators.probe_recovery(np.tile(wave, (3, 1)), wave, times, probe)
         assert result["burst_energy_ratio"] == pytest.approx(1.0, abs=1e-9)
@@ -560,7 +570,7 @@ class TestMetrics:
         assert result["intrinsic_energy_ratio"] == pytest.approx(1.0, abs=1e-9)
 
     def test_probe_recovery_rejects_a_time_axis_mismatch(self):
-        probe = estimators.Probe(burst_centre_s=0.5)
+        probe = _probe(burst_centre_s=0.5)
         recovered = np.ones((2, 100))
         reference = np.ones(100)
 
@@ -571,7 +581,7 @@ class TestMetrics:
         # The reference already lost a fifth of its energy to the removal; a recovered
         # probe that matches it exactly must still score a ratio of one.
         times = np.arange(240_000) / 1000.0
-        probe = estimators.Probe()
+        probe = _probe()
         reference = probe.waveform(times) * np.sqrt(0.8)
         result = estimators.probe_recovery(np.tile(reference, (3, 1)), reference, times, probe)
         assert result["burst_energy_ratio"] == pytest.approx(1.0, abs=1e-9)
@@ -579,14 +589,14 @@ class TestMetrics:
 
     def test_a_halved_probe_shows_a_quarter_of_the_energy(self):
         times = np.arange(240_000) / 1000.0
-        probe = estimators.Probe()
+        probe = _probe()
         wave = probe.waveform(times)
         result = estimators.probe_recovery(np.tile(wave * 0.5, (3, 1)), wave, times, probe)
         assert result["burst_energy_ratio"] == pytest.approx(0.25, abs=1e-9)
 
     def test_a_distorted_probe_loses_correlation(self):
         times = np.arange(240_000) / 1000.0
-        probe = estimators.Probe()
+        probe = _probe()
         rng = np.random.default_rng(0)
         recovered = np.tile(rng.normal(size=times.size) * 1e-6, (3, 1))
         result = estimators.probe_recovery(recovered, probe.waveform(times), times, probe)
@@ -604,7 +614,7 @@ class TestMetrics:
     def test_probe_recovery_rejects_an_empty_window(self):
         times = np.arange(1000) / 1000.0  # one second, burst centre is at 120 s
         with pytest.raises(ValueError, match="outside the recording"):
-            estimators.probe_recovery(np.ones((2, 1000)), np.ones(1000), times, estimators.Probe())
+            estimators.probe_recovery(np.ones((2, 1000)), np.ones(1000), times, _probe())
 
 
 class TestRemovedBandFraction:
@@ -755,7 +765,7 @@ class TestEndToEndOnSyntheticData:
         # floor being wrong.
         for harmonic in range(24, 80):
             signal += 1e-6 * np.sin(2 * np.pi * fundamental * harmonic * times + harmonic)
-        probe = estimators.Probe(burst_centre_s=100.0)
+        probe = _probe(burst_centre_s=100.0)
         signal += probe.waveform(times)[None, :]
 
         info = mne.create_info([f"E{i}" for i in range(4)], sfreq, "eeg")

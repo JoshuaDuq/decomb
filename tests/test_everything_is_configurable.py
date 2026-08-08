@@ -89,6 +89,7 @@ BENCHMARK_OVERRIDES = {
     "broadband_probe_channels": 2,
     "probe": {
         "sinusoid_hz": [30.0, 50.0],
+        "sinusoid_count": 3,
         "sinusoid_amplitude_v": 1.0e-6,
         "burst_hz": 45.0,
         "burst_centre_s": 60.0,

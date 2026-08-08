@@ -2008,7 +2008,13 @@ def _detect_lines_adjacent_to_targets(
     return tuple(sorted(accepted))
 
 
-def _estimate_spectrum(spectrum, settings: RemovalSettings, isolated_hz) -> estimators.CombEstimate:
+def _estimate_spectrum(
+    spectrum,
+    settings: RemovalSettings,
+    isolated_hz,
+    *,
+    fallback: estimators.CombEstimate | None = None,
+) -> estimators.CombEstimate:
     freqs, spectrum_db, prominence = spectrum
     return estimators.estimate_comb(
         freqs,
@@ -2023,6 +2029,7 @@ def _estimate_spectrum(spectrum, settings: RemovalSettings, isolated_hz) -> esti
         min_harmonics=settings.min_harmonics_for_fit,
         max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
         max_residual_rms_hz=settings.max_fit_residual_rms_hz,
+        fallback=fallback,
     )
 
 
@@ -2034,12 +2041,19 @@ def build_run_plan_from_spectra(
     """Fit independently supported targets for every overlapping run window."""
     if len(spectra.windows) != len(isolated_lines.window_hz):
         raise ValueError("Each adaptive spectrum requires its own isolated-line target list.")
+    # The whole-run estimate is fitted first and without a fallback: it has the whole
+    # recording behind it, so if a comb cannot be established there, there is nothing for a
+    # window to inherit and the recording genuinely has no grid to remove on.
     whole_estimate = _estimate_spectrum(spectra.whole, settings, isolated_lines.whole_hz)
     window_estimates = tuple(
-        _estimate_spectrum(window, settings, nominals)
+        _estimate_spectrum(window, settings, nominals, fallback=whole_estimate)
         for window, nominals in zip(spectra.windows, isolated_lines.window_hz)
     )
-    model = estimators.build_adaptive_comb_model(whole_estimate, window_estimates)
+    model = estimators.build_adaptive_comb_model(
+        whole_estimate,
+        window_estimates,
+        min_harmonics=settings.min_harmonics_for_fit,
+    )
     plan = build_removal_plan(
         model,
         bounds=spectra.bounds,
@@ -3483,6 +3497,106 @@ def focal_residual_discoveries(rows: Sequence[dict], false_discovery_rate: float
     )
 
 
+def _resolve_probe_placement(
+    settings: RemovalSettings,
+    plans: dict[str, RunRemovalPlan],
+) -> RemovalSettings:
+    """Place the probe tones from the targets of every plan about to be benchmarked.
+
+    Returns ``settings`` unchanged when ``probe.sinusoid_hz`` is already given, so an
+    explicit list stays an override rather than a suggestion.
+
+    One set of tones serves every recording, because the probes measure preservation across
+    the cohort and moving them per recording would make those measurements incomparable.
+    The union of every plan's targets is therefore what they have to clear.
+    """
+    import dataclasses
+
+    probe = settings.benchmark.probe
+    if probe.sinusoid_hz:
+        return settings
+
+    targets = sorted(
+        {float(target) for plan in plans.values() for target in plan.all_targets_hz}
+    )
+    fundamental = float(
+        np.median([plan.model.whole_estimate.fundamental_hz for plan in plans.values()])
+    )
+    placed = estimators.place_probes(
+        targets,
+        fundamental,
+        count=probe.sinusoid_count,
+        band_hz=settings.cost_band_hz,
+        excluded_hz=settings.protected_bands_hz,
+        min_separation_hz=settings.benchmark.min_probe_separation_hz,
+    )
+    clearances = [
+        min(abs(target - position) for target in targets) for position in placed
+    ]
+    print(
+        "  probes placed from "
+        f"{len(targets)} target(s) over {len(plans)} plan(s), f0={fundamental:.6f} Hz: "
+        + ", ".join(
+            f"{position:.4f} Hz (clear {clearance:.3f})"
+            for position, clearance in zip(placed, clearances)
+        )
+    )
+    return dataclasses.replace(
+        settings,
+        benchmark=dataclasses.replace(
+            settings.benchmark,
+            probe=dataclasses.replace(probe, sinusoid_hz=placed),
+        ),
+    )
+
+
+def _explain_transient_budget(frame: pd.DataFrame, settings: RemovalSettings) -> None:
+    """Say what the transient criterion cost this dataset, and what to do when it refuses.
+
+    ``min_intrinsic_energy_ratio`` is the one criterion whose right value depends on how
+    much artifact a dataset carries rather than on the removal being correct, so a refusal
+    here does not mean the same thing as a refusal anywhere else. Reporting only "3/89
+    passed" leaves a user to discover that themselves, and the obvious reading -- that the
+    removal damaged their data -- is the wrong one when the loss is what projecting out
+    their own targets costs.
+    """
+    ratios = frame["intrinsic_energy_ratio"]
+    floor = settings.benchmark.gate.min_intrinsic_energy_ratio
+    failing = frame.loc[~frame["gate_transient_preserved"].astype(bool)]
+
+    print(
+        f"  {'transient cost (geometry)':32s} "
+        f"median {1 - ratios.median():.1%} of the burst lost, worst {1 - ratios.min():.1%}; "
+        f"budget allows {1 - floor:.1%}"
+    )
+    if failing.empty:
+        return
+
+    lines = frame["n_isolated_sources"]
+    print(
+        f"\n{len(failing)} of {len(frame)} recording(s) exceeded the transient budget.\n"
+        f"  This criterion is a declared budget, not a measurement of correctness: the\n"
+        f"  transient is compared against itself put through the same removal alone, so\n"
+        f"  the figure is what projecting out this dataset's targets costs. Recordings\n"
+        f"  here carry {lines.min()}-{lines.max()} isolated lines beside the comb, and every\n"
+        f"  one inside the burst's band takes a share of it.\n"
+        f"  Worst recording keeps {failing['intrinsic_energy_ratio'].min():.3f} against a "
+        f"floor of {floor:.3f}.\n"
+        f"  Check `burst_energy_ratio` in benchmark.tsv before changing anything: it\n"
+        f"  compares the transient recovered from the recording against that same\n"
+        f"  reference, so it isolates damage the removal did by interacting with the\n"
+        f"  data. Here it reads "
+        f"{frame['burst_energy_ratio'].min():.4f}-{frame['burst_energy_ratio'].max():.4f}.\n"
+        f"  If that is at 1.0 the removal is behaving; the budget is the thing that does\n"
+        f"  not fit this dataset, and belongs in your config as an explicit choice:\n"
+        f"    benchmark:\n"
+        f"      gate:\n"
+        f"        min_intrinsic_energy_ratio: {np.floor(ratios.min() * 100) / 100:.2f}\n"
+        f"  If it is below 1.0 the removal is losing signal it should not, and the floor\n"
+        f"  is not the problem."
+    )
+
+
 def discover_runs(
     bids_root: Path,
     subjects: list[str] | None,
@@ -3591,7 +3705,15 @@ def run(args: argparse.Namespace) -> None:
         plans = build_run_plans(runs, settings)
         input_digests = {vhdr.stem: recording_digest(vhdr) for vhdr in runs}
         plan_digests = {recording: removal_plan_digest(plan) for recording, plan in plans.items()}
+
+        # Fingerprinted before the probes are resolved, and deliberately. The fingerprint
+        # says which settings a benchmark was produced under, and `apply` recomputes it
+        # from its own config to check they agree. Placed probes are a function of the data
+        # as well, so folding them in would make the two disagree on identical settings.
+        # What the probes actually were is recorded per row instead, and apply's separate
+        # input and plan digest checks already tie the run to these recordings.
         fingerprint = settings_fingerprint(settings)
+        settings = _resolve_probe_placement(settings, plans)
 
         # Journal each recording as it completes, so a raise late in the loop does not cost
         # every recording already measured. Resuming is only safe because a journalled row
@@ -3633,6 +3755,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"\npassed {int(frame.gate_passed.sum())}/{len(frame)} runs")
         for column in gate_columns:
             print(f"  {column:32s} {int(frame[column].sum())}/{len(frame)}")
+        _explain_transient_budget(frame, settings)
         seam = estimators.seam_randomization_verdict(
             _seam_evidence_from_frame(frame), alpha=settings.seam_alpha
         )

@@ -418,6 +418,14 @@ class CombEstimate:
     fundamental_jackknife_se_hz: float
     isolated_hz: tuple[float, ...]
     isolated_prominence_db: tuple[float, ...]
+    inherited_fundamental: bool = False
+    """True when this window could not support a comb fit and took the run's instead.
+
+    ``harmonics_used`` is then empty, so every comb target is read off the inherited grid
+    rather than from a peak measured here, and ``fundamental_jackknife_se_hz`` is the run's
+    -- which widens this window's notches by the run-level uncertainty, as it should, since
+    the grid was not confirmed against this window's own spectrum.
+    """
 
     @property
     def n_harmonics(self) -> int:
@@ -449,8 +457,14 @@ class Probe:
     that overlap is the realistic worst case.
     """
 
-    sinusoid_hz: tuple[float, ...] = (35.40, 43.80, 65.40, 78.60)
-    """Injected tones, placed midway between comb harmonics: ``(k + 0.5) * 1.2``.
+    sinusoid_hz: tuple[float, ...] = ()
+    """Injected tones, placed midway between comb harmonics: ``(k + 0.5) * f0``.
+
+    Empty means the benchmark chooses them with :func:`place_probes`, from the targets of
+    every plan it is about to measure. That is the default because it is the only point at
+    which the answer is knowable: the midpoints depend on a fitted fundamental, and the
+    isolated lines are detected per recording, so the safe positions are a property of the
+    dataset rather than of the settings.
 
     The midpoint is the unique position maximising the distance to both neighbours, and
     that margin has to be earned rather than assumed. A tone merely "not on a harmonic"
@@ -458,9 +472,11 @@ class Probe:
     its wander, so a high harmonic can travel tens of millihertz within one recording and
     close a margin that looked adequate against a static grid.
 
-    Move these when your comb has a different spacing. ``check_probe_clearance`` fails
-    loudly if a tone ends up too close to a target, which says move the probe.
+    Give an explicit list to override the choice. ``check_probe_clearance`` still runs on
+    it, and still fails loudly if a tone ends up too close to a target.
     """
+    sinusoid_count: int = 4
+    """How many tones to place when ``sinusoid_hz`` is empty."""
     sinusoid_amplitude_v: float = 0.5e-6
     burst_hz: float = 40.0
     burst_centre_s: float = 120.0
@@ -471,8 +487,8 @@ class Probe:
     """Standard deviations either side of the burst centre that count as the transient."""
 
     def __post_init__(self) -> None:
-        if not self.sinusoid_hz:
-            raise ValueError("The probe needs at least one injected tone.")
+        if self.sinusoid_count < 1:
+            raise ValueError("probe.sinusoid_count must be at least one.")
         # The two amplitudes may be zero, which switches that component off -- useful for
         # measuring one part of the probe in isolation. Everything else sets a shape.
         for name in ("burst_hz", "burst_centre_s", "burst_sd_s", "burst_window_half_widths"):
@@ -486,6 +502,12 @@ class Probe:
 
     def waveform(self, times: np.ndarray) -> np.ndarray:
         """The probe signal sampled on ``times``."""
+        if not self.sinusoid_hz:
+            raise ValueError(
+                "This probe carries no tones. An empty `sinusoid_hz` asks the benchmark to "
+                "place them from the targets it is about to measure, so resolve it with "
+                "`place_probes` before injecting."
+            )
         time_array = np.asarray(times, dtype=float)
         signal = np.zeros_like(time_array)
         for frequency in self.sinusoid_hz:
@@ -521,12 +543,27 @@ class PreservationGate:
     min_intrinsic_energy_ratio: float = 0.85
     """Least of the injected transient's window energy that must survive removal.
 
-    Derive this from the instrument rather than reading it off a result. A Gaussian burst
-    of duration sigma at frequency f spans roughly ``4 / (2*pi*sigma)`` hertz, crossing
-    ``span / spacing`` comb lines, each subtracted over ``freq / notch_width_ratio``; the
-    expected loss is the product over the span. Set the floor to about twice that, leaving
-    headroom for a transient that lands less favourably while still failing anything that
-    loses a large share of its energy.
+    This is a budget, not a property of the instrument, and it is worth being plain about
+    that because the number reads like a derivation. The reference the ratio is measured
+    against is the transient put through the same removal *by itself*, so the ratio already
+    is the pure-geometry cost of projecting out these targets. There is nothing left to
+    predict it from: any expectation computed from the same plan would be a model of the
+    measurement itself, and a removal that widened every notch would simply predict its own
+    wider loss and pass. So the level here has to be declared rather than derived.
+
+    What it costs depends on how much artifact a dataset carries, which is not a fault of
+    the dataset. A Gaussian burst of duration sigma spans roughly ``4 / (2*pi*sigma)`` hertz
+    and every target inside that span is subtracted over ``freq / notch_width_ratio``, so a
+    recording with twenty isolated lines beside the comb pays more than one with none. The
+    default below was derived for a comb-only removal at the shipped settings, where the
+    expected loss is near 7.5%; a 15-participant EEG-fMRI cohort with 18-22 isolated lines
+    per recording measured 11% typical and 21% worst, and the default refused seven
+    recordings whose collateral damage was nil.
+
+    `decomb benchmark` therefore reports the loss this dataset's own geometry costs before
+    applying this criterion, so the budget can be set from a measurement rather than
+    inherited. Raising it is not moving a goalpost; leaving it at a value derived for a
+    different removal is what would be.
     """
     max_intrinsic_energy_ratio: float = 1.05
     """Most of it that may come back. A removal that *adds* energy where the transient was
@@ -686,6 +723,7 @@ def estimate_comb(
     min_harmonics: int = MIN_HARMONICS_FOR_FIT,
     max_harmonic_residual_hz: float = MAX_HARMONIC_RESIDUAL_HZ,
     max_residual_rms_hz: float = MAX_FIT_RESIDUAL_RMS_HZ,
+    fallback: CombEstimate | None = None,
 ) -> CombEstimate:
     """Measure the comb fundamental and the isolated lines in one run's spectrum.
 
@@ -693,6 +731,19 @@ def estimate_comb(
     and the fundamental is the weighted least-squares slope through the origin. Harmonics
     whose peak is too weak, or too far from where it should be, drop out rather than drag
     the fit.
+
+    ``fallback`` is the estimate to inherit a grid from when this spectrum cannot support
+    one of its own -- in practice the whole-run estimate, when this spectrum is a single
+    adaptive window. Without it a window that cannot be fitted raises, and because the
+    windows are fitted inside a loop over every recording in the dataset, one unfittable
+    minute of one recording ends the run for all of them. A minute of a recording is the
+    wrong unit at which to abandon a cohort. Passing the run's own estimate keeps the
+    window in the plan on a grid that *was* confirmed, over the whole recording, and marks
+    it so the count can be reported and bounded by the caller.
+
+    The isolated-line search is unaffected either way: it runs on this spectrum against
+    this window's own nominals, so an inherited window still removes the lines it has
+    rather than the ones the run has.
     """
     frequency_array = np.asarray(freqs, dtype=float)
     spectrum = np.asarray(spectrum_db, dtype=float)
@@ -718,28 +769,49 @@ def estimate_comb(
             harmonics.append(harmonic)
             positions.append(position)
             weights.append(strength)
-    if len(harmonics) < min_harmonics:
-        raise ValueError(
-            f"Only {len(harmonics)} comb harmonics exceeded {min_prominence_db} dB, below "
-            f"the {min_harmonics} required; refusing to fit a fundamental that would then "
-            "authorise removing the whole grid."
-        )
 
-    index, position_array, weight_array, fundamental = _fit_consistent_harmonics(
-        np.asarray(harmonics, dtype=float),
-        np.asarray(positions, dtype=float),
-        np.asarray(weights, dtype=float),
-        min_harmonics=min_harmonics,
-        max_harmonic_residual_hz=max_harmonic_residual_hz,
-    )
-    residual = position_array - index * fundamental
-    residual_rms = float(np.sqrt(np.mean(residual**2)))
-    if residual_rms > max_residual_rms_hz:
-        raise ValueError(
-            f"Fitted harmonics scatter {residual_rms:.3f} Hz RMS about their grid, above "
-            f"the {max_residual_rms_hz} Hz bound; these peaks do not describe one comb and "
-            "the fit must not authorise a removal grid."
+    try:
+        if len(harmonics) < min_harmonics:
+            raise ValueError(
+                f"Only {len(harmonics)} comb harmonics exceeded {min_prominence_db} dB, "
+                f"below the {min_harmonics} required; refusing to fit a fundamental that "
+                "would then authorise removing the whole grid."
+            )
+
+        index, position_array, weight_array, fundamental = _fit_consistent_harmonics(
+            np.asarray(harmonics, dtype=float),
+            np.asarray(positions, dtype=float),
+            np.asarray(weights, dtype=float),
+            min_harmonics=min_harmonics,
+            max_harmonic_residual_hz=max_harmonic_residual_hz,
         )
+        residual = position_array - index * fundamental
+        residual_rms = float(np.sqrt(np.mean(residual**2)))
+        if residual_rms > max_residual_rms_hz:
+            raise ValueError(
+                f"Fitted harmonics scatter {residual_rms:.3f} Hz RMS about their grid, "
+                f"above the {max_residual_rms_hz} Hz bound; these peaks do not describe "
+                "one comb and the fit must not authorise a removal grid."
+            )
+        fitted_harmonics = tuple(int(value) for value in index)
+        fitted_positions = tuple(float(value) for value in position_array)
+        max_abs_residual = float(np.max(np.abs(residual)))
+        jackknife_se = _fundamental_jackknife_se(index, position_array, weight_array)
+        inherited = False
+    except ValueError:
+        # Every refusal above says the same thing: these peaks do not establish a grid.
+        # That is a statement about this spectrum, not about the recording, so when a
+        # confirmed grid for the recording is on offer the window takes it rather than
+        # ending the run.
+        if fallback is None:
+            raise
+        fundamental = fallback.fundamental_hz
+        fitted_harmonics = ()
+        fitted_positions = ()
+        residual_rms = fallback.residual_rms_hz
+        max_abs_residual = fallback.max_abs_residual_hz
+        jackknife_se = fallback.fundamental_jackknife_se_hz
+        inherited = True
 
     # Isolated lines get a narrower search window than the comb, because one can sit a
     # couple of tenths of a hertz from a harmonic: a window wide enough for the comb would
@@ -802,13 +874,14 @@ def estimate_comb(
 
     return CombEstimate(
         fundamental_hz=fundamental,
-        harmonics_used=tuple(int(harmonic) for harmonic in index),
-        harmonic_positions_hz=tuple(float(position) for position in position_array),
-        residual_rms_hz=float(np.sqrt(np.mean(residual**2))),
-        max_abs_residual_hz=float(np.max(np.abs(residual))),
-        fundamental_jackknife_se_hz=_fundamental_jackknife_se(index, position_array, weight_array),
+        harmonics_used=fitted_harmonics,
+        harmonic_positions_hz=fitted_positions,
+        residual_rms_hz=residual_rms,
+        max_abs_residual_hz=max_abs_residual,
+        fundamental_jackknife_se_hz=jackknife_se,
         isolated_hz=tuple(isolated),
         isolated_prominence_db=tuple(isolated_prominence),
+        inherited_fundamental=inherited,
     )
 
 
@@ -834,17 +907,46 @@ def _fundamental_jackknife_se(
 def build_adaptive_comb_model(
     whole_estimate: CombEstimate,
     window_estimates: Sequence[CombEstimate],
+    *,
+    min_harmonics: int = MIN_HARMONICS_FOR_FIT,
 ) -> AdaptiveCombModel:
-    """Validate that every adaptive window independently supports its removal grid."""
+    """Validate that every adaptive window independently supports its removal grid.
+
+    ``min_harmonics`` is the configured ``removal.min_harmonics_for_fit``. It is a
+    parameter rather than the module constant because this check used to read the constant
+    directly while :func:`estimate_comb` read the configured value, so a floor set in a
+    config file was honoured by one and silently overridden by the other, and the refusal
+    quoted a number the user had not chosen.
+    """
     estimates = tuple(window_estimates)
     if len(estimates) < 2:
         raise ValueError("At least two overlapping adaptive windows are required.")
     for index, estimate in enumerate(estimates):
-        if estimate.n_harmonics < MIN_HARMONICS_FOR_FIT:
+        # An inherited window carries no harmonics of its own by construction: its grid was
+        # confirmed over the whole recording instead, which is a stronger measurement than
+        # this check asks for, not a weaker one. It is bounded below by count, not here.
+        if estimate.inherited_fundamental:
+            continue
+        if estimate.n_harmonics < min_harmonics:
             raise ValueError(
                 f"Adaptive window {index} has only {estimate.n_harmonics} supported "
-                f"harmonics; at least {MIN_HARMONICS_FOR_FIT} are required."
+                f"harmonics; at least {min_harmonics} are required."
             )
+
+    # Inheriting has to be the exception, or a recording whose comb is invisible throughout
+    # would be removed from on a grid no window ever confirmed. The bound is that inherited
+    # windows may not outnumber independently supported ones -- a majority, which needs no
+    # threshold to choose and holds for a recording of any length. An anomalous minute is
+    # what the fallback is for; an anomalous majority is an anomalous recording.
+    supported = sum(1 for estimate in estimates if not estimate.inherited_fundamental)
+    inherited = len(estimates) - supported
+    if inherited > supported:
+        raise ValueError(
+            f"{inherited} of {len(estimates)} adaptive windows could not fit a comb and "
+            f"took the run's, outnumbering the {supported} that confirmed one from their "
+            "own spectrum. A recording whose grid is this hard to see in its own windows "
+            "is not one this removal should be trusted on."
+        )
         if not (
             np.isfinite(estimate.fundamental_hz)
             and np.isfinite(estimate.fundamental_jackknife_se_hz)
@@ -1296,6 +1398,98 @@ def seam_randomization_verdict(
         "count_p_value": count_p_value,
         "passed": bool(max_p_value >= endpoint_alpha and count_p_value >= endpoint_alpha),
     }
+
+
+def place_probes(
+    targets: Sequence[float],
+    fundamental_hz: float,
+    *,
+    count: int,
+    band_hz: tuple[float, float],
+    excluded_hz: Iterable[tuple[float, float]] = (),
+    min_separation_hz: float = 0.3,
+) -> tuple[float, ...]:
+    """Choose probe tones that sit as far from every removal target as the comb allows.
+
+    A probe stands for narrowband activity the removal is *not* aimed at, so it has to miss
+    every target -- otherwise it measures the removal doing its job and reports it as signal
+    loss. The midpoint between neighbouring harmonics, ``(k + 0.5) * f0``, is the position
+    furthest from both, so candidates are drawn there and scored on their distance to the
+    nearest target of any kind.
+
+    Asking the user for these frequencies instead does not work, and the failure is
+    expensive. The comb midpoints depend on a fundamental that is only known after
+    measurement, and the isolated lines are detected per recording: a cohort catalogue
+    listing 9 of them corresponded to 297 distinct targets across 89 fitted plans, and two
+    hand-picked probes that cleared every catalogue line sat 0.046 and 0.118 Hz from lines
+    that were not in it. Because plans are fitted before probes are injected, every target
+    is already known here, and the collision is decidable now rather than six hours into a
+    benchmark.
+
+    ``targets`` should therefore be the union over every recording the benchmark will
+    measure, so one set of probes is comparable across all of them.
+    """
+    if count < 1:
+        raise ValueError("count must be at least one.")
+    if not np.isfinite(fundamental_hz) or fundamental_hz <= 0:
+        raise ValueError("fundamental_hz must be a finite positive number.")
+    low_hz, high_hz = band_hz
+    if not low_hz < high_hz:
+        raise ValueError("band_hz must be an increasing pair.")
+
+    target_array = np.asarray(targets, dtype=float)
+    target_array = target_array[np.isfinite(target_array)]
+    if target_array.size == 0:
+        raise ValueError("Probe placement needs at least one target to keep clear of.")
+
+    excluded = tuple(excluded_hz)
+    candidates = []
+    first = int(np.floor(low_hz / fundamental_hz))
+    last = int(np.ceil(high_hz / fundamental_hz))
+    for harmonic in range(max(first, 0), last + 1):
+        position = (harmonic + 0.5) * fundamental_hz
+        if not low_hz <= position <= high_hz:
+            continue
+        # A probe inside a band handed to a wide notch would be removed wholesale, and one
+        # within the separation of its edge is close enough to be caught by the transition.
+        if any(
+            low - min_separation_hz <= position <= high + min_separation_hz
+            for low, high in excluded
+        ):
+            continue
+        clearance = float(np.min(np.abs(target_array - position)))
+        if clearance >= min_separation_hz:
+            candidates.append((clearance, position))
+
+    if len(candidates) < count:
+        raise ValueError(
+            f"Only {len(candidates)} probe position(s) in {low_hz:g}-{high_hz:g} Hz clear "
+            f"every removal target by {min_separation_hz} Hz, fewer than the {count} "
+            "required. The removal targets leave too little of this band untouched for a "
+            "probe to measure what it preserves."
+        )
+
+    # Spread over the band rather than clustered where clearance happens to peak: probes
+    # at four neighbouring midpoints would all report on the same corner of the spectrum.
+    # Take the widest-clearance candidate in each of `count` equal slices of the band, so
+    # coverage is by construction and clearance decides only within a slice.
+    edges = np.linspace(low_hz, high_hz, count + 1)
+    chosen: list[float] = []
+    for index in range(count):
+        slice_candidates = [
+            item for item in candidates if edges[index] <= item[1] <= edges[index + 1]
+        ]
+        if slice_candidates:
+            chosen.append(max(slice_candidates)[1])
+
+    # Slices can come up empty where targets are dense; fill from what is left over.
+    if len(chosen) < count:
+        remaining = sorted(
+            (item for item in candidates if item[1] not in chosen), reverse=True
+        )
+        chosen.extend(position for _, position in remaining[: count - len(chosen)])
+
+    return tuple(sorted(chosen[:count]))
 
 
 def check_probe_clearance(
