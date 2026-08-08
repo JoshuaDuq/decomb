@@ -10,7 +10,40 @@ signals and matched controls before `apply` can write a derivative. It does not 
 physical source of a line, replace gradient or pulse correction, or guarantee that every
 narrow feature is an artifact.
 
-## Scientific context and scope
+## Abstract
+
+`decomb` is a research software tool for characterising and selectively removing narrowband
+spectral artifacts from continuous EEG stored in BIDS-compatible BrainVision recordings. Its
+primary use case is residual environmental or electrical contamination in EEG acquired during
+or near fMRI, after gradient and ballistocardiographic correction. The software combines
+cohort-level spectral diagnosis, per-recording harmonic-comb modelling, adaptive multitaper
+sinusoid fitting, matched-control benchmarking, blind remeasurement, and derivative provenance.
+It is designed to make the removal decision auditable rather than to infer artifact source or
+to replace established EEG--fMRI correction methods. The repository currently demonstrates
+implementation behavior on synthetic data; it does not establish general performance across
+scanners, sites, or clinical populations.
+
+## Contributions and evidence boundary
+
+The software contribution is methodological and operational rather than a claim of a new
+physical artifact mechanism. It provides:
+
+- a catalogue that detects narrow spectral features without a user-supplied frequency list;
+- a comb model that estimates a fundamental from multiple harmonics and adapts it across
+  overlapping windows;
+- target-specific sinusoid fitting alongside an explicitly separate wide-notch stage for
+  dense clusters;
+- predeclared, matched-control measurements of residuals, seam artifacts, signal disturbance,
+  and spectral cost; and
+- BIDS derivative writing with effective-configuration records, input and plan digests, and
+  read-back checks.
+
+These are properties of the implementation. The literature cited below motivates the artifact
+classes, spectral estimators, statistical procedures, and data standards; it does not validate
+`decomb` itself. Claims about performance must therefore be supported by study-specific
+validation on the recordings to which the software is applied.
+
+## 1. Motivation and related work
 
 Gradient and pulse artifacts are separate preprocessing problems. Gradient artifact is
 periodic with the imaging sequence and is commonly reduced with average artifact subtraction
@@ -39,28 +72,45 @@ an attribution of the line to gradient artifact.
 The tool is deliberately narrower than general artifact correction. It targets resolvable
 narrow lines and comb members. Broad or non-stationary clusters belong in the optional wide
 `notch` stage, and signal exactly coincident with an artifact is not separable from it. Turning
-off the source remains the preferred intervention when possible [[9](#references)].
+off the source remains the preferred intervention when possible [[9](#references)]. A
+systematic review of simultaneous EEG--fMRI artifact reduction emphasizes that artifact
+classes, acquisition choices, and correction methods should be reported explicitly, and that
+comparative evidence is limited and methods require context-specific validation
+[[18](#references)]. This README therefore separates literature-supported motivation from
+implementation-specific behavior.
 
-## Why narrowband removal is different from a wide notch
+## 2. Narrowband removal and related methods
 
 A wide FIR notch removes its full stop-band, including frequencies where no artifact was
-measured. The line-removal pass instead gives each target an explicit, uncertainty-aware
-width and fits sinusoids only inside those target regions. This is the same general
-multitaper line-estimation family as Thomson's harmonic analysis [[10](#references)] and
-related multitaper implementations [[11](#references)], but `decomb` uses MNE's
-`spectrum_fit` implementation and its own target-selection and residual-audit logic. It is
-not a reimplementation of CleanLine.
+measured. Filtering can introduce attenuation and other distortions outside the intended
+stop-band, so filter characteristics and signal-preservation effects should be evaluated for
+the analysis at hand [[19](#references)]. The line-removal pass instead gives each target an
+explicit, uncertainty-aware width and fits sinusoids only inside those target regions. It is
+in the same broad multitaper line-estimation family as Thomson's harmonic analysis
+[[10](#references)] and related implementations [[11](#references)]. The CleanLine and
+Chronux family is also described in the multitaper methods text by Mitra and Bokil
+[[25](#references)]. `decomb` invokes MNE's `spectrum_fit` in explicit-target mode: its own
+catalogue supplies the frequencies and widths rather than asking MNE to discover them. The
+residual audit is implemented separately, so `decomb` is not a reimplementation of CleanLine.
+CleanLine, reference-layer adaptive filtering, and spectrum-interpolation methods make
+different assumptions about the source, stationarity, or availability of reference
+measurements [[20](#references), [24](#references)]. Reference-layer methods additionally
+require dedicated reference recordings from specialized hardware; `decomb` operates on the
+standard EEG channels alone. Comparative
+studies therefore do not establish that one method dominates in all EEG or scanner settings
+[[18](#references), [20](#references)]. `decomb` makes no superiority claim; it reports the
+measurements obtained from its own plan and controls.
 
 ![Power spectra before and after removal](docs/psd_before_after.png)
 
 The figure is a reproducible synthetic demonstration generated by
-[`docs/make_figure.py`](docs/make_figure.py). It contains a 1.2 Hz comb over harmonics 24--79,
+[`docs/make_figure.py`](docs/make_figure.py). It contains a 1.2 Hz comb over harmonics 24--79 (inclusive),
 a broad 42 Hz rhythm centred on harmonic 35, and a 60 Hz line inside the configured mains
 band. The example illustrates that a broad feature can overlap a comb member without being
 classified as a narrow line, and that `apply` and `notch` must not target the same band. Its
 numbers are properties of this generated dataset, not performance estimates for real EEG.
 
-## Design choices
+## 3. Software contribution and design
 
 **Benchmark before writing.** `apply` requires a benchmark produced from the same input,
 settings, and fitted plans. It checks the per-recording gate and then re-evaluates the cohort
@@ -77,7 +127,9 @@ removal plan did not target.
 **Continuous recordings.** The workflow reads no events and requires no epoch structure.
 It still requires at least one complete estimation window and suitable continuous EEG data.
 
-## Install
+## 4. Reproducible workflow
+
+### 4.1 Installation
 
 ```bash
 pip install -e .
@@ -87,7 +139,7 @@ Python 3.11+. Depends on MNE, MNE-BIDS, pybv, NumPy, SciPy, pandas, matplotlib, 
 PyYAML. `pip install -e ".[dev]"` adds pytest and ruff. `decomb --help` lists the stages
 and options.
 
-## Quickstart
+### 4.2 Quickstart
 
 Point `decomb` at a BIDS root and inspect the catalogue. This stage does not write a cleaned
 dataset:
@@ -128,7 +180,7 @@ into place. To reproduce the synthetic demonstration without data of your own:
 python docs/make_figure.py --keep /tmp/decomb-demo
 ```
 
-## The stages
+### 4.3 Stages
 
 ```bash
 decomb diagnose     # what lines are there, do they share a fundamental, and do they matter?
@@ -158,7 +210,7 @@ provenance describes.
 `diagnose` also counts detections per band. This helps distinguish a band with resolvable
 lines from a dense cluster that may require the wide `notch` stage.
 
-## What each stage writes
+### 4.4 Outputs and provenance
 
 The tables are TSV so the numbers a stage decided on can be read without `decomb`.
 Locations come from `paths`. `diagnosis_dir` and `removal_dir` default to
@@ -192,7 +244,7 @@ original, with `verification_spectra.npz` beside it. `report` writes `band_outco
 at each target per subject) and `removal_before_after.png`. `psd` writes overall, tiled
 and per-recording spectra. `notch` writes `notch_manifest.tsv`.
 
-## Configuration
+### 4.5 Configuration
 
 One file holds everything. Copy the packaged
 [`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml` and change what you need. Your
@@ -206,13 +258,17 @@ ignored so a misspelling cannot leave you believing a setting is in force.
 Values marked `SITE` describe one room and mean nothing for another. The comb fundamental
 is the important one. `1.2` is a seed for the search. It is not a fact about your data.
 
-## Requirements on your data
+### 4.6 Data contract
+
+The input and derivative conventions follow BIDS and its EEG extension [[21](#references),
+[22](#references)]. `decomb` supports the subset described below rather than claiming to be
+a general BIDS EEG reader.
 
 - **BIDS**, read at `sub-*/[ses-*/]eeg/*_eeg.vhdr`, with or without `ses-` and `run-`.
-- **BrainVision**, `IEEE_FLOAT_32` and `MULTIPLEXED`. `apply` rewrites only the `.eeg`
-  binaries; source sidecars are copied byte-for-byte except the derivative
-  `dataset_description.json`. Sampling rate, channel set, length, and annotations cannot
-  drift. Other formats are refused instead of silently converted.
+- **BrainVision**, `IEEE_FLOAT_32` and `MULTIPLEXED`. These constraints allow `apply` to
+  rewrite only the `.eeg` binaries while preserving the source sidecars byte-for-byte, except
+  for the derivative `dataset_description.json`. Sampling rate, channel set, length, and
+  annotations cannot drift. Other formats are refused instead of silently converted.
 - **At least one estimation window** per recording. 54 s by default.
 - **Gradient and pulse artifact already corrected.** `decomb` is the step after those. It
   does not replace either. Run it on data that has been through your usual EEG-fMRI
@@ -221,12 +277,16 @@ is the important one. `1.2` is a seed for the search. It is not a fact about you
 Only EEG channels are transformed. `channels.tsv` is authoritative so ECG and EOG stay
 byte-identical and outside the criteria.
 
-## The method, in equations
+## 5. Methods
+
+The implementation is intentionally separated into measurement, modelling, transformation, and
+verification. The equations below describe the estimators used by the code; they are not
+assumptions that every artifact in an EEG recording follows the same model.
 
 Notation: $x[n]$ is one channel of one estimation window, $f_s$ the sampling rate, $N$ the
 window length in samples, $T = N/f_s$ its duration, and $\Delta f = 1/T$ the bin width.
 
-### 1. Spectral estimate
+### 5.1 Spectral estimate
 
 Each window is tapered with a Hann window $w[n]$ and transformed. The one-sided power
 spectral density, in SciPy's `density` scaling, is
@@ -240,7 +300,7 @@ $c_k = 1$, so that the one-sided density integrates to the mean square of the wi
 signal. Channels are combined by median and windows by mean. The result is expressed in
 decibels as $X(f_k) = 10 \log_{10} S(f_k)$.
 
-### 2. Prominence
+### 5.2 Local prominence
 
 Detection thresholds and line-selection tests use local prominence rather than absolute
 power. The local background is a running median over a window of half-width
@@ -257,7 +317,7 @@ $\Delta_{\mathrm{bg}}$ is `background_half_width_hz` and $c$ is one bin, because
 Hann-windowed tone occupies three. Bins within $H$ of either edge have no symmetric window
 and are returned as NaN instead of estimated from a lopsided one.
 
-### 3. Detection
+### 5.3 Detection and linewidth
 
 The catalogue detector applies the following null model to the cohort-mean prominence
 spectrum. The removal planner uses the same local-prominence convention, but its comb and
@@ -306,7 +366,7 @@ $1.4382/T$; this resolution scale is used to distinguish narrow features from br
 [[14](#references)]. Linewidth is a classification rule, not proof that a feature is
 instrumental or physiological.
 
-### 4. Comb fitting and classification
+### 5.4 Comb fitting and classification
 
 The removal planner searches near the configured nominal fundamental and obtains one
 candidate peak for each configured harmonic. With $\hat f^{(k)}$ the refined position of
@@ -344,11 +404,13 @@ $$
 
 where $\hat f_0^{(-i)}$ is the fundamental refitted with harmonic $i$ left out.
 
-### 5. What is removed
+### 5.5 Transformation and reconstruction
 
-Each target gets a width and not a fixed one. A comb is disciplined by its source so a
-wander $\delta$ in the fundamental moves harmonic $k$ by $k\delta$, and the width has to
-carry that propagated uncertainty. For a comb harmonic $k$ at $f_k$, with $\rho$ =
+The implementation uses MNE-Python for EEG I/O, multitaper sinusoid fitting, and Welch
+comparison spectra [[23](#references), [26](#references)]. Each target receives an explicit
+width. For the comb
+model, a frequency shift $\delta$ in the fundamental moves harmonic $k$ by $k\delta$, so the
+width carries that propagated uncertainty. For a comb harmonic $k$ at $f_k$, with $\rho$ =
 `notch_width_ratio` and $z$ = `uncertainty_confidence_z`,
 
 $$
@@ -358,8 +420,9 @@ $$
 and for an isolated line which inherits no such scaling,
 $W = \max(f/\rho,\, W_{\min},\, 1/T_{\text{filter}})$.
 
-Inside each width, `decomb` calls MNE's `spectrum_fit` with explicit target frequencies,
-widths, filter length, and multitaper bandwidth. The MNE implementation fits deterministic
+Inside each width, `decomb` calls MNE's `spectrum_fit` with the explicit target frequencies,
+widths, filter length, and multitaper bandwidth supplied by its removal plan. It does not use
+MNE's automatic target-discovery mode. The MNE implementation fits deterministic
 sinusoidal components on its frequency grid and removes significant components; the exact
 threshold is therefore part of the installed MNE version's `spectrum_fit` behavior. The
 package separately reimplements the Thomson statistic in
@@ -397,7 +460,9 @@ g_m[n] = \sin^{2}\left( \pi \frac{n + \tfrac{1}{2}}{M} \right),
 \sum_m \tilde g_m[n] = 1 .
 $$
 
-### 6. Benchmark measurements and decisions
+## 6. Validation and decision rules
+
+### 6.1 Benchmark measurements
 
 `benchmark` injects four narrow sinusoids away from the targets, a Gaussian-enveloped
 sinusoidal transient, a signal at selected target frequencies, and a broadband noise probe.
@@ -448,7 +513,7 @@ $$
 Only correlation is a per-recording gate. The energy ratio measures collateral change and
 the intrinsic ratio measures the cost of placing a transient across the removal geometry.
 
-## What the criteria decide
+### 6.2 What the criteria decide
 
 The per-recording benchmark gate is controlled by `min_burst_correlation`, the configured
 minimum correlation between the recovered and reference transient. The resulting
@@ -464,7 +529,7 @@ the transient energy ratios remain measurements. They should be interpreted agai
 study's scientific bandwidth and signal requirements, not treated as universal pass/fail
 thresholds. The package deliberately does not ship a default spectral-cost ceiling.
 
-## `apply` and `notch` are counterparts
+### 6.3 `apply` and `notch` are counterparts
 
 `apply` performs target-specific sinusoid fitting in the measured line regions. `notch`
 removes a whole band at its full width whether or not signal was in it. It exists for
@@ -476,7 +541,7 @@ They must not both aim at the same spectrum. The removal excludes every band lis
 `notch_bands`. `notch_bands` ships empty. A band belongs there only on measured evidence
 from your own data.
 
-## Limitations
+## 7. Limitations
 
 - Detection and fitting assume that the relevant line remains resolvable within an estimation
   window. Short windows reduce frequency resolution; long windows reduce adaptation to drift.
@@ -490,7 +555,7 @@ from your own data.
   behavior, not a claim of general performance on clinical or scanner-specific recordings.
   Report study-specific measurements and retain the generated provenance with any derivative.
 
-## Tests
+## 8. Verification and tests
 
 ```bash
 pip install -e ".[dev]"
@@ -501,7 +566,7 @@ The tests use seeded synthetic recordings and known lines where appropriate, so 
 measurement and invariants rather than relying only on stored fixtures. The test count and
 runtime are environment-dependent.
 
-## References
+## 9. References
 
 1. Allen PJ, Josephs O, Turner R (2000). A method for removing imaging artifact from
    continuous EEG recorded during functional MRI. *NeuroImage* 12(2):230-239.
@@ -563,6 +628,33 @@ runtime are environment-dependent.
 17. Slepian D (1978). Prolate spheroidal wave functions, Fourier analysis, and uncertainty
     V: the discrete case. *Bell System Technical Journal* 57(5):1371-1430.
     [doi:10.1002/j.1538-7305.1978.tb02104.x](https://doi.org/10.1002/j.1538-7305.1978.tb02104.x)
+18. Bullock M, Jackson GD, Abbott DF (2021). Artifact reduction in simultaneous EEG-fMRI: a
+    systematic review of methods and contemporary usage. *Frontiers in Neurology* 12:622719.
+    [doi:10.3389/fneur.2021.622719](https://doi.org/10.3389/fneur.2021.622719)
+19. Widmann A, Schröger E, Maess B (2015). Digital filter design for electrophysiological
+    data: a practical approach. *Journal of Neuroscience Methods* 250:34-46.
+    [doi:10.1016/j.jneumeth.2014.08.002](https://doi.org/10.1016/j.jneumeth.2014.08.002)
+20. Leske S, Dalal SS (2019). Reducing power line noise in EEG and MEG data via spectrum
+    interpolation. *NeuroImage* 189:763-776.
+    [doi:10.1016/j.neuroimage.2019.01.026](https://doi.org/10.1016/j.neuroimage.2019.01.026)
+21. Gorgolewski KJ, Auer T, Calhoun VD, et al. (2016). The brain imaging data structure, a
+    format for organizing and describing outputs of neuroimaging experiments. *Scientific Data*
+    3:160044. [doi:10.1038/sdata.2016.44](https://doi.org/10.1038/sdata.2016.44)
+22. Pernet CR, Appelhoff S, Gorgolewski KJ, et al. (2019). EEG-BIDS, an extension to the brain
+    imaging data structure for electroencephalography. *Scientific Data* 6:103.
+    [doi:10.1038/s41597-019-0104-8](https://doi.org/10.1038/s41597-019-0104-8)
+23. Gramfort A, Luessi M, Larson E, et al. (2014). MNE software for processing MEG and EEG
+    data. *NeuroImage* 86:446-460.
+    [doi:10.1016/j.neuroimage.2013.10.027](https://doi.org/10.1016/j.neuroimage.2013.10.027)
+24. Steyrl D, Krausz G, Koschutnig K, Edlinger G, Müller-Putz GR (2018). Online reduction of
+    artifacts in EEG of simultaneous EEG-fMRI using reference layer adaptive filtering.
+    *Brain Topography* 31(1):129-149.
+    [doi:10.1007/s10548-017-0606-7](https://doi.org/10.1007/s10548-017-0606-7)
+25. Mitra PP, Bokil H (2007). *Observed Brain Dynamics: Analyzing Brain Activity in Time,
+    Frequency, and Space*. Oxford University Press.
+26. Gramfort A, Luessi M, Larson E, et al. (2013). MEG and EEG data analysis with MNE-Python.
+    *Frontiers in Neuroscience* 7:267.
+    [doi:10.3389/fnins.2013.00267](https://doi.org/10.3389/fnins.2013.00267)
 
 Implementation reference: MNE-Python,
 [`mne.filter.notch_filter`](https://mne.tools/stable/generated/mne.filter.notch_filter.html),
