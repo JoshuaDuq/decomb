@@ -1905,8 +1905,20 @@ def _seam_evidence_from_frame(
     return tuple(evidence)
 
 
-def _detection_scaffold(freqs, spectrum_db, prominence, settings: RemovalSettings):
-    """Fit the comb-only model that defines isolated-line clearance."""
+def _detection_scaffold(
+    freqs,
+    spectrum_db,
+    prominence,
+    settings: RemovalSettings,
+    *,
+    fallback: estimators.CombEstimate | None = None,
+):
+    """Fit the comb-only model that defines isolated-line clearance.
+
+    Takes the same ``fallback`` as the planning fit, for the same reason: this runs per
+    window too, so a window that cannot establish a grid would otherwise end the run
+    before a plan is ever built.
+    """
     return estimators.estimate_comb(
         freqs,
         spectrum_db,
@@ -1920,6 +1932,7 @@ def _detection_scaffold(freqs, spectrum_db, prominence, settings: RemovalSetting
         min_harmonics=settings.min_harmonics_for_fit,
         max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
         max_residual_rms_hz=settings.max_fit_residual_rms_hz,
+        fallback=fallback,
     )
 
 
@@ -2931,9 +2944,12 @@ def _line_observations(
     observations = []
     fundamentals = []
     for run_index, run in enumerate(spectra):
+        # The whole-run scaffold is fitted first and without a fallback, so a recording
+        # with no comb anywhere is still refused; the windows may then inherit it.
         whole_scaffold = _detection_scaffold(*run.whole, settings)
         window_scaffolds = tuple(
-            _detection_scaffold(*spectrum, settings) for spectrum in run.windows
+            _detection_scaffold(*spectrum, settings, fallback=whole_scaffold)
+            for spectrum in run.windows
         )
         sources = (
             (run.whole, None, whole_scaffold),
@@ -3035,8 +3051,12 @@ def _comb_adjacent_observations(
     """
     observations = []
     for run_index, run in enumerate(spectra):
+        # Same fallback as its mirror in `_line_observations`: this fit is per window, so a
+        # window that cannot establish a grid takes the one the whole recording confirmed.
+        whole_scaffold = _detection_scaffold(*run.whole, settings)
         window_estimates = tuple(
-            _detection_scaffold(*spectrum, settings) for spectrum in run.windows
+            _detection_scaffold(*spectrum, settings, fallback=whole_scaffold)
+            for spectrum in run.windows
         )
         sources = (
             *(
