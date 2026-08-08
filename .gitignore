@@ -13,3 +13,12 @@ data/
 logs/
 trials/
 decomb.yaml
+
+# Local experiment and pipeline helpers
+/build_cohort.sh
+/build_trial*.sh
+/make_trial_config.py
+/preflight.py
+/probe_*.py
+/run_pipeline.sh
+/run_trials.sh
