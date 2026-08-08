@@ -7,7 +7,7 @@ made during concurrent fMRI.
 frequency. Before writing, it runs the same removal over injected test signals and stops if
 the result falls outside criteria declared in the config.
 
-## The artifact, and why the usual corrections miss it
+## What gradient and pulse correction leave behind
 
 EEG recorded inside a scanner is corrected in two large steps, and a third class of
 artifact is left behind by both.
@@ -56,8 +56,7 @@ spare; a phase-stable line shared across electrodes inflates coherence between e
 carrying it, so it reads as global connectivity at that frequency; and because its power is
 concentrated into a few millihertz rather than spread over the band, a line that is small
 in microvolts can still be most of that band's power. `decomb diagnose` measures that share
-per band and per participant, which is the number to decide on rather than an impression of
-the spectrum.
+per band and per participant, so the decision can be made on a number.
 
 Given `dataset.tr_seconds`, every detected line is also placed on the `k/TR` grid of the
 acquisition. A line **on** that grid is residual gradient artifact, and points back to the
@@ -87,30 +86,30 @@ Delta, theta and alpha are untouched: not one bin moves by 1 dB. Across the remo
 the 55 targeted harmonics fall from 12.3 dB above background to 1.1 dB, and outside the
 lines the spectrum moves by at most 0.06 dB.
 
-Two features survive, in both cases because the removal did not act on them:
+Two features survive, neither of them removed:
 
 - **42 Hz** carries a 2.8 Hz-wide rhythm sitting exactly on comb harmonic 35. The harmonic
   inside it is removed and the rhythm is not, because a rhythm is whole hertz wide and a
-  line is a tenth of one. Linewidth, rather than any prominence threshold, is what keeps the
-  oscillation out of the removal's reach.
+  line is a tenth of one. Linewidth keeps the oscillation out of the removal's reach, not
+  any prominence threshold.
 - **60 Hz** is comb harmonic 50, inside the `mains_notch_hz` band that `exclude_mains`
   hands to `notch`. Two stages must not aim at the same spectrum.
 
 ## Design choices
 
-**No write without a benchmark.** `apply` will not run unless `benchmark` passed on the same
-data under the same settings, and the criteria are declared in the config before the
-measurement is taken.
+**The benchmark gate.** `apply` will not run unless `benchmark` passed on the same data
+under the same settings, and the criteria are declared in the config before the measurement
+is taken.
 
-**Band cost is measured rather than assumed.** A broadband probe goes through the identical
-transform, so the reported cost is what a signal occupying the band loses, not what the plan
-predicted. It is recorded in the output's `GeneratedBy` provenance.
+**Band cost.** A broadband probe goes through the identical transform, so the reported cost
+is what a signal occupying the band loses rather than what the plan predicted. It is
+recorded in the output's `GeneratedBy` provenance.
 
-**Verification is blind.** `verify` re-sweeps the cleaned data under FDR control without
+**Blind verification.** `verify` re-sweeps the cleaned data under FDR control without
 knowledge of where the targets were, so it can find a line the removal never aimed at.
 
-**No events required.** Any continuous recording is a valid input: no task, trigger channel
-or epoch structure.
+**No events.** Any continuous recording is a valid input; no task, trigger channel or epoch
+structure is needed.
 
 ## Install
 
@@ -144,10 +143,9 @@ share of each band that is line artifact (median over subjects):
   gamma         21.00%  (worst subject 21.62%, 38 line(s) inside)
 ```
 
-Two numbers decide whether to go on. The **fundamental and its harmonic span** define the
-grid every later stage measures against. The **share of each band** says whether removal is
-worth doing at all: here a fifth of gamma is line artifact and delta through alpha are
-untouched by it, so only the high bands have anything to gain.
+The fundamental and the harmonic span go into the config, since every later stage measures
+against the grid they define. The band shares say whether to bother at all: a fifth of gamma
+is line artifact here, and delta through alpha carry none of it.
 
 Copy the packaged [`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml`, set what
 `diagnose` just reported, then run the rest against that one file:
@@ -168,7 +166,7 @@ passed 3/3 runs
   in-band probe survival           median 0.002, worst 0.000 (measurement, not a criterion)
 ```
 
-Only then will the write run:
+With that passed, the write:
 
 ```bash
 decomb apply --config decomb.yaml
@@ -181,12 +179,12 @@ median suppression 10.1 dB; worst residual line 12.31 dB
   declared data/bids_decombed/dataset_description.json a derivative of data/bids
 ```
 
-The settings fingerprint is what ties the two together, so loosening a criterion and
-re-running invalidates the certificate rather than inheriting it.
+`apply` matches the settings fingerprint that `benchmark` recorded, so loosening a criterion
+and re-running does not inherit the old pass.
 
-These transcripts are real, from three 300 s synthetic recordings carrying a known 1.2 Hz
-comb, paths shortened. [`docs/make_figure.py`](docs/make_figure.py) builds that dataset and
-runs these same stages, so the sequence is reproducible without data of your own:
+The output above came from three 300 s synthetic recordings with a known 1.2 Hz comb, with
+the paths shortened. [`docs/make_figure.py`](docs/make_figure.py) builds that dataset and
+runs the same stages, so you can reproduce it without data of your own:
 
 ```bash
 python docs/make_figure.py --keep /tmp/decomb-demo
@@ -224,38 +222,35 @@ from one only `notch` can.
 
 ## What each stage writes
 
-Everything is TSV, so every number a stage decided on can be read without the tool that
-wrote it. Locations come from `paths`; `diagnosis_dir` and `removal_dir` default to
+The tables are TSV, so the numbers a stage decided on can be read without `decomb`.
+Locations come from `paths`; `diagnosis_dir` and `removal_dir` default to
 `outputs/diagnosis` and `outputs/removal`.
 
-**`diagnose`** writes `lines.tsv`, one row per detection: refined frequency, prominence with
-its bootstrap interval, half-power width, the q-value that admitted it, how many subjects
-carried it, its comb harmonic, and where it falls on the `k/TR` grid. `comb.tsv` holds the
-fitted fundamental and spacing, the supporting harmonics, and the scatter about the grid.
-`lines_per_band.tsv` and `band_impact.tsv` are the per-band counts and artifact shares
-printed at the end of the run; `spectra.npz` keeps the spectra the sweep saw.
+`diagnose` writes the catalogue. `lines.tsv` has a row per detection — refined frequency,
+prominence and its bootstrap interval, half-power width, the q-value that admitted it, the
+number of subjects carrying it, its comb harmonic, and its position on the `k/TR` grid.
+`comb.tsv` has the fitted fundamental and spacing, the supporting harmonics and the scatter
+about the grid. `lines_per_band.tsv` and `band_impact.tsv` hold the per-band counts and
+artifact shares printed at the end of the run, and `spectra.npz` the spectra the sweep saw.
 
-**`benchmark`** writes `benchmark.tsv`: one row per recording with every criterion, the
-control it was measured against, its p-value, and the settings fingerprint.
+`benchmark` writes `benchmark.tsv`, a row per recording carrying every criterion, the
+control it was measured against, its p-value and the settings fingerprint.
 
-**`apply`** writes the cleaned copy to `output_root`, `.eeg` binaries rewritten and every
-sidecar byte-identical. Its `dataset_description.json` carries the `GeneratedBy` provenance —
-version, fingerprint, full parameter set, measured band cost. `removal_manifest.tsv` records
-per recording the fundamental used, the target counts, the suppression and residual
-statistics, the read-back check, and the digests tying the write to its benchmark.
-
-**`verify`** writes `verification.tsv`, the blind re-sweep set beside the same sweep of the
-original, plus `verification_spectra.npz`.
-
-**`report`** writes `band_outcomes.tsv` (artifact share per band, before and after),
-`per_subject_line_residual.tsv` (what survived at each target, per subject) and
-`removal_before_after.png`. **`psd`** writes overall, tiled and per-recording spectra;
-**`notch`** writes `notch_manifest.tsv`.
-
-`apply` stages the derivative in a hidden directory and moves it into place only once every
+`apply` writes the cleaned copy to `output_root` with the `.eeg` binaries rewritten and
+every sidecar byte-identical, and records in its `dataset_description.json` the version,
+the fingerprint, the full parameter set and the measured band cost. Alongside it,
+`removal_manifest.tsv` gives the fundamental used, the target counts, the suppression and
+residual statistics, the read-back check and the digests tying the write to its benchmark.
+The whole derivative is staged in a hidden directory and moved into place only once every
 recording has been written and read back within `removal.roundtrip_relative_tolerance`, so
-an interrupted run cannot leave a half-cleaned dataset. `removal_manifest.tsv` goes to both
-`removal_dir` and the output root, so the copy carries its own record of what was done to it.
+an interrupted run cannot leave a half-cleaned dataset. The manifest goes to `removal_dir`
+and to the output root, so the copy carries its own record of what was done to it.
+
+`verify` writes `verification.tsv`, the blind re-sweep set beside the same sweep of the
+original, with `verification_spectra.npz` beside it. `report` writes `band_outcomes.tsv`
+(artifact share per band, before and after), `per_subject_line_residual.tsv` (what survived
+at each target, per subject) and `removal_before_after.png`. `psd` writes overall, tiled and
+per-recording spectra, and `notch` writes `notch_manifest.tsv`.
 
 ## Configuration
 
