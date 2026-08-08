@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import estimators
+from decomb import estimators, remove
 
 
 def _estimate(
@@ -40,6 +40,62 @@ def test_nonstationary_windows_produce_an_adaptive_model():
     )
     assert model.fundamental_range_hz == pytest.approx(0.0019)
     assert model.max_adjacent_shift_hz == pytest.approx(0.0018)
+
+
+def test_the_benchmark_keeps_every_window_fundamental_not_only_its_range():
+    """A range and a largest step cannot tell a steady drift from a single jump.
+
+    They are the same two numbers either way, and the difference decides whether the
+    fundamental can be interpolated between windows at all. Only the series settles it.
+    """
+    whole = _estimate(1.2, jackknife_se_hz=8e-5)
+    windows = tuple(
+        _estimate(value, jackknife_se_hz=2e-4) for value in (1.1990, 1.2008, 1.1992, 1.2009)
+    )
+    model = estimators.build_adaptive_comb_model(whole, windows)
+
+    assert remove.window_fundamental_series(model) == "1.1990000;1.2008000;1.1992000;1.2009000"
+
+
+def test_the_window_fundamental_series_resolves_steps_below_the_fit_uncertainty():
+    """The series is only worth keeping if a step can be compared against its own error bar.
+
+    At the four decimals the neighbouring frequency columns use, a 597 uHz step and a 70 uHz
+    standard error land within a few counts of each other and the comparison is lost.
+    """
+    whole = _estimate(1.2, jackknife_se_hz=7e-5)
+    windows = tuple(_estimate(value, jackknife_se_hz=7e-5) for value in (1.2, 1.2000007))
+    model = estimators.build_adaptive_comb_model(whole, windows)
+
+    first, second = remove.window_fundamental_series(model).split(";")
+
+    assert first != second
+
+
+def test_the_fundamental_columns_carry_the_series_beside_the_summary_of_it():
+    """Both benchmark rows report the same four facts about the fundamental.
+
+    They are reported together because each summary number is only interpretable against
+    the series: a step means one thing beside a steady climb and another beside a flat run.
+    """
+    whole = _estimate(1.2, jackknife_se_hz=8e-5)
+    windows = tuple(
+        _estimate(value, jackknife_se_hz=2e-4) for value in (1.1990, 1.2008, 1.1992, 1.2009)
+    )
+    model = estimators.build_adaptive_comb_model(whole, windows)
+    plan = remove.build_removal_plan(
+        model,
+        bounds=((0, 100), (50, 150), (100, 200), (150, 250)),
+        narrow_targets_hz=((), (), (), ()),
+        settings=remove.RemovalSettings(),
+    )
+
+    columns = remove.fundamental_columns(plan)
+
+    assert columns["window_fundamental_hz"] == "1.1990000;1.2008000;1.1992000;1.2009000"
+    assert columns["fundamental_range_hz"] == pytest.approx(0.0019)
+    assert columns["max_adjacent_shift_hz"] == pytest.approx(0.0018)
+    assert columns["max_window_standard_error_hz"] == pytest.approx(2e-4)
 
 
 def test_a_window_without_enough_harmonic_support_is_refused():

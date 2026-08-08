@@ -584,11 +584,7 @@ class AdaptiveWindowRemovalPlan:
             )
             if not all(np.isfinite(value) for value in values):
                 raise ValueError("Channel targets and widths must be finite.")
-            if any(
-                width <= 0.0
-                for widths in self.channel_target_widths_hz
-                for width in widths
-            ):
+            if any(width <= 0.0 for widths in self.channel_target_widths_hz for width in widths):
                 raise ValueError("Channel target widths must be positive.")
         _validate_residual_targets(self, "Adaptive-window")
 
@@ -1278,12 +1274,8 @@ def adaptive_band_metrics(
         return window.channel_target_plans
 
     def continuous_plans(window):
-        focal_targets = window.channel_residual_targets_hz or tuple(
-            () for _ in base_plans(window)
-        )
-        focal_widths = window.channel_residual_widths_hz or tuple(
-            () for _ in base_plans(window)
-        )
+        focal_targets = window.channel_residual_targets_hz or tuple(() for _ in base_plans(window))
+        focal_widths = window.channel_residual_widths_hz or tuple(() for _ in base_plans(window))
         return tuple(
             (
                 (*base_targets, *window.aggregate_residual_targets_hz, *targets),
@@ -1572,10 +1564,7 @@ def _clean_planned_segment(
     )
     if len(plan_indices) != segment.get_data().shape[0]:
         raise ValueError("The removal plan does not map every supplied EEG channel.")
-    if any(
-        not 0 <= index < len(window.channel_targets_hz)
-        for index in plan_indices
-    ):
+    if any(not 0 <= index < len(window.channel_targets_hz) for index in plan_indices):
         raise ValueError("The removal plan contains an out-of-range channel index.")
 
     grouped: dict[tuple[tuple[float, ...], tuple[float, ...]], list[int]] = {}
@@ -3022,6 +3011,36 @@ def matched_control_plan(plan: RunRemovalPlan, settings: RemovalSettings) -> Run
     return replace(plan, windows=displaced)
 
 
+def window_fundamental_series(model: estimators.AdaptiveCombModel) -> str:
+    """Every window's fitted fundamental, in order.
+
+    The row already carries the range and the largest adjacent step, and those two numbers
+    are the same for a fundamental that drifts steadily and for one that holds still and
+    jumps once. The difference decides whether the fundamental may be interpolated between
+    windows, so it is worth keeping the series the summary was taken from.
+
+    Seven decimals rather than the four the frequency columns use, because the comparison
+    that settles it is one step against a jackknife standard error of tens of microhertz.
+    """
+    return ";".join(f"{value:.7f}" for value in model.window_fundamental_hz)
+
+
+def fundamental_columns(plan: RunRemovalPlan) -> dict:
+    """What a row records about the fitted fundamental: its summary, and the series behind it.
+
+    Kept together because neither reads correctly alone. A 600 uHz step means one thing in a
+    steady climb and another in an otherwise flat run, and the summary cannot tell them apart.
+    """
+    return {
+        "fundamental_range_hz": plan.model.fundamental_range_hz,
+        "max_adjacent_shift_hz": plan.model.max_adjacent_shift_hz,
+        "max_window_standard_error_hz": max(
+            window.estimate.fundamental_jackknife_se_hz for window in plan.windows
+        ),
+        "window_fundamental_hz": window_fundamental_series(plan.model),
+    }
+
+
 def benchmark_run(
     vhdr: Path,
     settings: RemovalSettings,
@@ -3075,9 +3094,7 @@ def benchmark_run(
     in_band_hz = estimators.in_band_probe_frequencies(
         targets, count=settings.benchmark.in_band_probe_count
     )
-    in_band_waveform = estimators.sinusoid_waveform(
-        times, in_band_hz, probe.sinusoid_amplitude_v
-    )
+    in_band_waveform = estimators.sinusoid_waveform(times, in_band_hz, probe.sinusoid_amplitude_v)
     in_band_probe = mne.io.RawArray(
         np.broadcast_to(in_band_waveform, (n_eeg_channels, in_band_waveform.size)).copy(),
         mne.pick_info(raw.info, picks, copy=True),
@@ -3136,12 +3153,8 @@ def benchmark_run(
     freqs, _, _ = run_spectrum(cleaned_bare, settings)
     _, probe_psd_before = _psd(probe_only, list(range(n_eeg_channels)), settings)
     _, probe_psd_after = _psd(cleaned_probe, list(range(n_eeg_channels)), settings)
-    in_band_freqs, in_band_psd_before = _psd(
-        in_band_probe, list(range(n_eeg_channels)), settings
-    )
-    _, in_band_psd_after = _psd(
-        cleaned_in_band_probe, list(range(n_eeg_channels)), settings
-    )
+    in_band_freqs, in_band_psd_before = _psd(in_band_probe, list(range(n_eeg_channels)), settings)
+    _, in_band_psd_after = _psd(cleaned_in_band_probe, list(range(n_eeg_channels)), settings)
     broadband_picks = list(range(n_eeg_channels))
     broadband_freqs, broadband_psd_before = _psd(broadband_probe, broadband_picks, settings)
     _, broadband_psd_after = _psd(cleaned_broadband_probe, broadband_picks, settings)
@@ -3210,11 +3223,7 @@ def benchmark_run(
         "recording": vhdr.stem,
         "fundamental_hz": estimate.fundamental_hz,
         "n_adaptive_windows": len(plan.windows),
-        "fundamental_range_hz": plan.model.fundamental_range_hz,
-        "max_adjacent_shift_hz": plan.model.max_adjacent_shift_hz,
-        "max_window_standard_error_hz": max(
-            window.estimate.fundamental_jackknife_se_hz for window in plan.windows
-        ),
+        **fundamental_columns(plan),
         "n_harmonics": estimate.n_harmonics,
         "median_targets_per_window": float(
             np.median([len(window.targets_hz) for window in plan.windows])
@@ -3748,11 +3757,7 @@ def apply_run(
         "recording": vhdr.stem,
         "fundamental_hz": estimate.fundamental_hz,
         "n_adaptive_windows": len(plan.windows),
-        "fundamental_range_hz": plan.model.fundamental_range_hz,
-        "max_adjacent_shift_hz": plan.model.max_adjacent_shift_hz,
-        "max_window_standard_error_hz": max(
-            window.estimate.fundamental_jackknife_se_hz for window in plan.windows
-        ),
+        **fundamental_columns(plan),
         "residual_rms_hz": estimate.residual_rms_hz,
         "n_harmonics": estimate.n_harmonics,
         "median_targets_per_window": float(
@@ -3915,9 +3920,7 @@ def _resolve_probe_placement(
     if probe.sinusoid_hz:
         return settings
 
-    targets = sorted(
-        {float(target) for plan in plans.values() for target in plan.all_targets_hz}
-    )
+    targets = sorted({float(target) for plan in plans.values() for target in plan.all_targets_hz})
     fundamental = float(
         np.median([plan.model.whole_estimate.fundamental_hz for plan in plans.values()])
     )
@@ -3929,9 +3932,7 @@ def _resolve_probe_placement(
         excluded_hz=settings.protected_bands_hz,
         min_separation_hz=settings.benchmark.min_probe_separation_hz,
     )
-    clearances = [
-        min(abs(target - position) for target in targets) for position in placed
-    ]
+    clearances = [min(abs(target - position) for target in targets) for position in placed]
     print(
         "  probes placed from "
         f"{len(targets)} target(s) over {len(plans)} plan(s), f0={fundamental:.6f} Hz: "
