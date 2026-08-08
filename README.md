@@ -163,10 +163,20 @@ spaced: 16 of the 56 gaps in this target list fall below 1.19 Hz and the smalles
 and at that spacing `notch_filter` refuses to build at *any* transition bandwidth it will
 accept -- below 0.05 Hz it demands a filter longer than the recording can support. Five
 targets have to be merged into neighbouring stop-bands before the filter exists at all, which
-is visible as the wide bands near 58 and 94 Hz. Second, this recording's comb drifts far more
-than the cohort's typical: 840 µHz across the run against sub-0000's 18 µHz, enough that the
-fit places its harmonics to 59 mHz against a 27 mHz resolution, which `decomb` reports when it
+is visible as the wide bands near 58 and 94 Hz. Second, the fitted fundamental is far less
+settled than the cohort's typical: 840 µHz of range against sub-0000's 18 µHz, and the fit
+places its harmonics to 59 mHz against a 27 mHz resolution, which `decomb` reports when it
 fits.
+
+That range is scatter, not drift, which the summary could not have shown. The per-window
+series says the fundamental wanders 230 µHz from window to window -- fifteen times the 15 µHz
+jackknife standard error the fit claims for each one -- while the trend across the whole run
+is +87 µHz, half a sigma and indistinguishable from none. The baseline behaves the same way:
+268 µHz of scatter against a --357 µHz trend at 1.8 sigma. Whether the comb moves or the
+estimate wanders is not settled here, and it matters, because a removal that followed the line
+rather than notching a band around it would need a path to follow. There is no trend to
+interpolate and the window estimates disagree by fifteen times their own error bars, so that
+path cannot be built from them as they stand.
 
 The same subject's baseline acquisition -- 593 s, no task -- was put through the identical
 measurement as a check, and gives 9.2 Hz against 50.7 Hz. Two real recordings and one
