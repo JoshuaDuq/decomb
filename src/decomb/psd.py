@@ -59,14 +59,7 @@ class PsdSettings:
     overlap: float = 0.5
     band_hz: tuple[float, float] = BAND_HZ
     panel_span_hz: float = 10.0
-    """Width of each panel in the tiled figure.
-
-    The overview draws the whole band on one axis, where many bins share each pixel and a
-    comb line is sub-pixel from its neighbour -- so it shows that lines went and cannot show
-    whether they went surgically. Tiling the same data into consecutive spans of this width
-    brings it towards one bin per pixel, which is what it takes to see the shape of an
-    individual notch.
-    """
+    """Width of each panel in the tiled figure -- narrow enough for roughly one bin per pixel."""
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.window_s) or self.window_s <= 0.0:
@@ -208,10 +201,8 @@ def figure_band_panels(
 ) -> None:
     """The same spectra tiled into readable spans, one panel per range.
 
-    The overview cannot show the shape of a notch, because it draws several bins per pixel.
-    Here each panel spans ``panel_span_hz``, which brings it towards one bin per pixel, and
-    autoscales on its own contents so a deep notch in one span does not flatten the spectrum
-    in another.
+    Each panel autoscales on its own contents, so a deep notch in one span does not
+    flatten the spectrum in another.
     """
     edges = panel_edges((float(freqs[0]), float(freqs[-1])), settings.panel_span_hz)
     figure, axes = plt.subplots(len(edges), 1, figsize=(13, 1.9 * len(edges)), squeeze=False)

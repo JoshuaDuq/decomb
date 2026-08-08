@@ -68,7 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_stage(args: argparse.Namespace) -> None:
-    """Dispatch one stage to the module that implements it."""
     # A subject subset cannot certify or transform a dataset: the gates are decided over
     # the recordings jointly, and a partial write would leave the output root in a state
     # no provenance describes.

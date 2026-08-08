@@ -2,26 +2,20 @@
 
     decomb notch
 
-``apply`` subtracts a sinusoid wherever a line is resolvable. Some contamination is not
-resolvable. A band can carry a hundred distinct peaks above 3 dB at millihertz resolution,
-non-stationary between windows -- the structure mains itself usually has. Subtracting
-sinusoids one at a time cannot win against that: remove the tallest and the next one
-surfaces, and no detection threshold changes it. A notch wide enough to span the cluster
-is the only thing that does.
+``apply`` subtracts a sinusoid wherever a line is resolvable. Some contamination is not:
+a band can carry a hundred distinct peaks above 3 dB at millihertz resolution,
+non-stationary between windows -- the structure mains itself usually has. Removing the
+tallest peak one at a time just exposes the next one; only a notch spanning the whole
+cluster works, at the cost of the band's full width whether or not signal was in it. That
+different trade is why this is its own stage: it runs last, reads what ``apply`` wrote,
+and writes its own BIDS root so the two transforms stay separable.
 
-That is a different trade from the rest of this workflow, so it is a different stage. The
-line removal buys its suppression at a few hundredths of a hertz per line; this pays the
-full width of a band whether or not signal was in it. It runs last, reads what ``apply``
-wrote, and writes its own BIDS root, so the two are separable and either can be inspected
-alone.
+Like ``apply``, sidecars are copied byte-for-byte and only ``.eeg`` binaries are
+rewritten; only EEG channels are filtered, ECG and EOG stay byte-identical.
 
-Like ``apply``, every sidecar is copied byte-for-byte and only the ``.eeg`` binaries are
-rewritten, so sampling rate, channel set, length and annotations cannot drift. Only EEG
-channels are filtered; ECG and EOG stay byte-identical.
-
-Nothing here is gated. A fixed-width FIR notch has no estimator that can be wrong, so
-there is no fit to certify -- what there is instead is a manifest recording, per recording
-and per band, how much the notch actually took and what it cost in each analysed band.
+A fixed-width FIR notch has no estimator that can be wrong, so nothing here is gated --
+instead the manifest records, per recording and per band, what the notch actually took
+and what it cost in each analysed band.
 """
 
 from __future__ import annotations

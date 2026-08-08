@@ -476,7 +476,6 @@ class Probe:
     it, and still fails loudly if a tone ends up too close to a target.
     """
     sinusoid_count: int = 4
-    """How many tones to place when ``sinusoid_hz`` is empty."""
     sinusoid_amplitude_v: float = 0.5e-6
     burst_hz: float = 40.0
     burst_centre_s: float = 120.0

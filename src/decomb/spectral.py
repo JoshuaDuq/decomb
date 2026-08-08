@@ -444,26 +444,16 @@ def refine_comb_fundamental(
     most-supported gap a multiple of the true period. Dividing recovers it.
 
     Subdividing can never explain fewer lines, so a plain "explains more" rule would
-    subdivide without end. A divisor is therefore accepted only when it explains at least
-    ``min_gain`` more in relative terms; a genuine halving of the period roughly doubles
-    the membership, while spurious subdivision picks up a stray line or two.
+    subdivide without end. A divisor is accepted only when it explains at least
+    ``min_gain`` more in relative terms; a genuine halving roughly doubles the membership,
+    while spurious subdivision picks up a stray line or two.
 
-    Two corrections make that rule behave as described.
-
-    The gap is refined before it is used. It arrives as a pair spacing, good to a few
-    millihertz, while membership is tested against an absolute tolerance -- and a spacing
-    error grows as ``k * error``, so 6 mHz at harmonic 78 is 0.47 Hz, eight times a typical
-    0.06 Hz tolerance. Unrefined, a gap 7 mHz wide of the truth can explain a couple of
-    dozen lines where the refined value explains most of them -- which leaves the divisor
-    sweep a low base to beat and hands it a subharmonic.
-
-    And the comparison is on membership *in excess of chance*, not raw membership. A grid
-    of spacing ``s`` admits any line within ``tolerance_hz`` of a multiple, which is
-    ``2 * tolerance_hz / s`` of the axis, which grows as the spacing shrinks. Subdivision
-    therefore buys membership simply by getting denser: a fine grid can
-    "explain" more lines than the true fundamental while most of those are chance. Scoring
-    the excess over chance removes that advantage, and leaves a real halving untouched,
-    since halving doubles the chance term and the observed count alike.
+    Two corrections keep that rule honest: the candidate spacing is refined locally before
+    being tested (a pair-gap error of ``k * error`` at high harmonics can otherwise starve
+    the true fundamental of the membership it should get and hand a subharmonic the win),
+    and membership is scored in excess of chance rather than raw, since a denser grid
+    admits more lines by construction (``2 * tolerance_hz / spacing`` of the axis) and
+    would otherwise win just by subdividing.
     """
     array = np.asarray(frequencies, dtype=float)
     if not np.isfinite(spacing) or spacing <= 0:
@@ -471,12 +461,9 @@ def refine_comb_fundamental(
     if max_divisor < 1:
         raise ValueError("max_divisor must be at least 1.")
 
-    # Every divisor is taken from the gap as supplied and refined afterwards, never from an
-    # already-refined or already-accepted spacing. The gap is frequently a multiple that
-    # explains nothing on its own -- a comb missing every third member has a dominant gap
-    # of three spacings and no line on that grid at all -- so refining it first only
-    # lets it wander, and dividing the wandered value misses the exact submultiple that
-    # dividing the original hits.
+    # Each divisor comes from the original supplied gap, not from an already-refined or
+    # already-accepted spacing -- refining first would let it wander before dividing, and
+    # miss the exact submultiple that dividing the original hits.
     best = _spacing_refined_locally(array, spacing, tolerance_hz, search_fraction)
     best_excess, best_members = _comb_excess(array, best, tolerance_hz)
     for divisor in range(2, max_divisor + 1):
@@ -488,16 +475,10 @@ def refine_comb_fundamental(
         if excess >= threshold and excess > 0:
             best, best_excess, best_members = candidate, excess, members
 
-    # Searching over spacing can manufacture membership, so the excess has to pay for it.
-    # A grid fine enough admits everything, and with the spacing free rather than given, a
-    # few lines can always be made to look periodic -- three leftover peaks from a cluster
-    # will happily fit a spacing unrelated to the real comb, and that spurious family then
-    # fails the recording's verification.
-    #
-    # Chance membership is binomial: each of ``n`` lines falls inside the grid's covered
-    # fraction independently, so its spread is the usual sqrt(n p (1-p)). Requiring the
-    # excess to clear two of those keeps a real comb, whose excess runs many deviations
-    # clear, and drops a family that is only as periodic as chance.
+    # A free spacing can always be made to look periodic (a few leftover peaks will fit
+    # some unrelated grid), so require the excess to clear two binomial standard
+    # deviations of chance membership -- a real comb runs many deviations clear of that,
+    # a spurious family does not.
     covered = min(1.0, 2.0 * tolerance_hz / best)
     deviation = float(np.sqrt(array.size * covered * (1.0 - covered)))
     if best_excess < 2.0 * deviation:
@@ -526,7 +507,7 @@ def _spacing_refined_locally(
 
     A refinement, not a search: the span is small enough to correct the pair gap's own
     error and too small to wander onto an unrelated period. The step keeps the highest
-    harmonic moving well under the tolerance, because that harmonic is where a small
+    harmonic's error well under the tolerance, since that harmonic is where a small
     spacing error first shows.
     """
     highest = float(np.max(np.abs(array))) if array.size else 0.0
@@ -535,22 +516,18 @@ def _spacing_refined_locally(
     span = spacing * search_fraction
     if not np.isfinite(step) or step <= 0.0 or span <= 0.0:
         return float(spacing)
-    # The supplied spacing is always a candidate. An arange over the span need not land on
-    # it, and a spacing that is already exact must not be nudged onto the nearest grid
-    # point -- 122 uHz is nothing until harmonic 49 multiplies it into 6 mHz.
+    # The supplied spacing is always a candidate: an arange over the span need not land on
+    # it, and an already-exact spacing must not be nudged onto the nearest grid point --
+    # 122 uHz is nothing until harmonic 49 multiplies it into 6 mHz.
     candidates = np.arange(spacing - span, spacing + span + step, step)
     candidates = np.append(candidates[candidates > 0.0], float(spacing))
     if candidates.size == 0:
         return float(spacing)
 
-    # Ranked on membership and then on fit, deliberately not on excess-over-chance. The
-    # chance term is what makes different divisors comparable; inside one scan it only
-    # varies as 1/spacing, which would tilt every tie towards the widest grid still holding
-    # its members and leave the offset the highest harmonic multiplies back up.
-    #
-    # And ties are the normal case here: on a comb the grid already explains completely,
-    # every spacing for some way either side explains it just as completely. Among equal
-    # membership the closest fit is the fundamental.
+    # Ranked on membership then on fit, not on excess-over-chance -- that term only varies
+    # as 1/spacing within one scan, which would bias ties toward the widest grid. Ties are
+    # the normal case: on a comb, a range of spacings around the true one all explain it
+    # completely, and among equal membership the closest fit is the fundamental.
     scored = []
     for candidate in candidates:
         members = comb_members(array, float(candidate), tolerance_hz=tolerance_hz)

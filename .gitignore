@@ -10,3 +10,6 @@ venv/
 outputs/
 data/
 .DS_Store
+logs/
+trials/
+decomb.yaml
