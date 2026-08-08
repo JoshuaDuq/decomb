@@ -145,7 +145,9 @@ def test_offset_support_is_covered_where_it_was_observed_and_not_mirrored():
     covered by a notch centred on the peak instead, with the localization margin included.
     """
     freqs = np.arange(20.0, 30.0, 0.05)
-    prominence = np.zeros(freqs.size)
+    # Signed noise, not a flat floor: the admission rule fits its threshold to the
+    # background's own spread, and a flat background has none.
+    prominence = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
     peak = int(np.argmin(np.abs(freqs - 24.9)))
     prominence[peak] = 15.0
     window = remove.AdaptiveWindowRemovalPlan(
@@ -175,6 +177,37 @@ def test_offset_support_is_covered_where_it_was_observed_and_not_mirrored():
     assert expanded.notch_widths_hz[0] == pytest.approx(0.1)
 
 
+def test_a_peak_no_target_is_answerable_for_gets_no_notch():
+    """Widening covers a target's own support, and nothing else in the band.
+
+    A real line half a hertz from the nearest harmonic is a detection question, settled by
+    the detector against replication across recordings. If this function answered it too it
+    would mint targets from a single window's spectrum with none of that evidence -- and
+    the first thing to notice would be the benchmark's own probe tone disappearing under
+    one of them.
+    """
+    freqs = np.arange(20.0, 30.0, 0.05)
+    prominence = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
+    prominence[int(np.argmin(np.abs(freqs - 24.9)))] = 15.0  # beside the target
+    prominence[int(np.argmin(np.abs(freqs - 27.4)))] = 15.0  # nowhere near it
+    window = remove.AdaptiveWindowRemovalPlan(
+        bounds=(0, 200),
+        estimate=_estimate(1.2, 1e-4),
+        targets_hz=(25.0,),
+        notch_widths_hz=(0.1,),
+        narrow_targets_hz=(),
+    )
+
+    expanded = remove._expand_window_to_observed_support(
+        window,
+        ((freqs, prominence, prominence),),
+        remove.RemovalSettings(),
+    )
+
+    assert _covers(expanded, 24.9)
+    assert not _covers(expanded, 27.4)
+
+
 def test_single_bin_support_still_asks_for_a_positive_notch():
     """The production caller passes no localization margin, so the bin span is the floor.
 
@@ -183,7 +216,9 @@ def test_single_bin_support_still_asks_for_a_positive_notch():
     recording's plan raises rather than the width being quietly wrong.
     """
     freqs = np.arange(20.0, 30.0, 0.05)
-    prominence = np.zeros(freqs.size)
+    # Signed noise, not a flat floor: the admission rule fits its threshold to the
+    # background's own spread, and a flat background has none.
+    prominence = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
     prominence[int(np.argmin(np.abs(freqs - 24.9)))] = 15.0
     window = remove.AdaptiveWindowRemovalPlan(
         bounds=(0, 200),

@@ -459,8 +459,8 @@ def refine_comb_fundamental(
 
     And the comparison is on membership *in excess of chance*, not raw membership. A grid
     of spacing ``s`` admits any line within ``tolerance_hz`` of a multiple, which is
-    ``2 * tolerance_hz / s`` of the axis -- 60% for a 0.2 Hz grid against 10% for a 1.2 Hz
-    one. Subdivision therefore buys membership simply by getting denser: a fine grid can
+    ``2 * tolerance_hz / s`` of the axis, which grows as the spacing shrinks. Subdivision
+    therefore buys membership simply by getting denser: a fine grid can
     "explain" more lines than the true fundamental while most of those are chance. Scoring
     the excess over chance removes that advantage, and leaves a real halving untouched,
     since halving doubles the chance term and the observed count alike.
@@ -473,8 +473,8 @@ def refine_comb_fundamental(
 
     # Every divisor is taken from the gap as supplied and refined afterwards, never from an
     # already-refined or already-accepted spacing. The gap is frequently a multiple that
-    # explains nothing on its own -- a 1.2 Hz comb missing every third member has a
-    # dominant gap of 3.6 Hz and no line on that grid at all -- so refining it first only
+    # explains nothing on its own -- a comb missing every third member has a dominant gap
+    # of three spacings and no line on that grid at all -- so refining it first only
     # lets it wander, and dividing the wandered value misses the exact submultiple that
     # dividing the original hits.
     best = _spacing_refined_locally(array, spacing, tolerance_hz, search_fraction)

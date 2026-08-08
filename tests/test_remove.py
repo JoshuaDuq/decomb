@@ -488,12 +488,10 @@ class TestRemovalSettings:
         assert settings.mt_bandwidth == pytest.approx(0.9)
         assert settings.filter_length == "8s"
 
-    def test_candidate_floor_cannot_exceed_the_confirmation_floor(self):
-        with pytest.raises(ValueError, match="candidate prominence"):
-            remove.RemovalSettings(
-                detection_candidate_prominence_db=11.0,
-                detection_min_prominence_db=10.0,
-            )
+    def test_admission_must_be_decided_by_something(self):
+        """Turning off both the calibrated test and the floor decides nothing at all."""
+        with pytest.raises(ValueError, match="Nothing would decide"):
+            remove.RemovalSettings(detection_fdr_alpha=None, detection_min_prominence_db=None)
 
     def test_detected_nominal_search_must_stay_below_one_line_width(self):
         with pytest.raises(ValueError, match="detection_search_hz"):
@@ -713,8 +711,17 @@ def test_removal_settings_reads_the_mains_exclusion_flag():
     )
 
 
-def _synthetic_spectrum(peaks=(), *, f0=1.2, harmonics=(24, 79), df=0.002):
-    """A spectrum carrying a full comb plus the given isolated peaks."""
+def _synthetic_spectrum(peaks=(), *, f0=1.2, harmonics=(24, 79), df=0.002, noise_db=0.0, seed=0):
+    """A spectrum carrying a full comb plus the given isolated peaks.
+
+    ``noise_db`` adds a signed background, which the calibrated detector needs: it fits its
+    threshold to the background's own spread, and a flat spectrum has none. It is off by
+    default because the shape-logic tests -- clearance, width, dedup -- are about a
+    controlled peak profile and a random background only obscures what they pin.
+
+    Signed, as prominence is: a bin below its own local background is negative, and the
+    null takes its scale from that lower half.
+    """
     freqs = np.arange(1.0, 100.0, df)
     spectrum = np.zeros_like(freqs)
     sigma = 0.109 / 2.355
@@ -726,6 +733,10 @@ def _synthetic_spectrum(peaks=(), *, f0=1.2, harmonics=(24, 79), df=0.002):
         add(k * f0, 14.0)
     for centre, height in peaks:
         add(centre, height)
+    # Added after the peaks, not before: `np.maximum` against a zero-floored peak profile
+    # would clip every negative bin to zero, leaving a background with a point mass at zero
+    # and no lower tail for a null to be fitted from.
+    spectrum += np.random.default_rng(seed).normal(0.0, noise_db, freqs.size)
     return freqs, spectrum, spectrum.copy()
 
 
@@ -744,7 +755,7 @@ def test_a_distinct_narrow_comb_adjacent_line_is_detected():
 @pytest.mark.parametrize(
     "frequency,prominence",
     (
-        (27.72, 9.9),  # below the existing spatially robust prominence floor
+        (27.72, 9.9),  # below the prominence floor this path still carries
         (27.78, 14.0),  # outside the residual-responsibility region
         (27.62, 14.0),  # already covered by the parent comb target
         (60.10, 14.0),  # mains belongs to the downstream mains notch
@@ -754,6 +765,32 @@ def test_an_unsupported_comb_adjacent_candidate_is_rejected(frequency, prominenc
     spectrum = _synthetic_spectrum(peaks=[(frequency, prominence)])
 
     assert _adjacent_lines(spectrum) == ()
+
+
+def test_a_rhythm_sitting_on_a_harmonic_yields_no_comb_adjacent_source():
+    """A rhythm is not a source, however prominent the bins it lifts.
+
+    This pins the whole-run path only, and that is worth saying plainly: on
+    `docs/make_figure.py`'s dataset, where a 2.8 Hz rhythm is planted on harmonic 35, the
+    *block* path lands four targets inside it under this floor and five under the
+    calibrated rule that was measured against it. Neither bar separates a narrow source
+    from a narrow noise summit riding on a broad feature -- a single window's noise lifts
+    the summit past whichever one is in force. See
+    `RemovalSettings.detection_adjacent_min_prominence_db` for the second condition that
+    measurement says would.
+
+    Asked as a difference against the same spectrum without the rhythm, rather than against
+    an empty answer: this fixture's background also puts summits on harmonic shoulders
+    elsewhere in the band, which this path admits and replication downstream discards. That
+    is a separate known weakness. What must be zero is what the rhythm *adds*.
+    """
+    freqs, spectrum_db, prominence = _synthetic_spectrum(noise_db=0.4)
+    with_rhythm = prominence + 9.0 * np.exp(-0.5 * ((freqs - 27.6) / 1.2) ** 2)
+
+    without = _adjacent_lines((freqs, spectrum_db, prominence))
+    within = _adjacent_lines((freqs, np.maximum(spectrum_db, with_rhythm), with_rhythm))
+
+    assert set(np.round(within, 6)) - set(np.round(without, 6)) == set()
 
 
 def test_a_broad_comb_adjacent_peak_is_not_called_an_electrical_line():
@@ -1101,11 +1138,18 @@ def test_a_block_replicated_line_in_two_runs_is_authorised():
 
 
 def test_weak_incidental_candidates_do_not_dilute_two_strong_supporting_runs():
+    """Weak here means indistinguishable from the background, not merely quiet.
+
+    A candidate 0.04 Hz from a real line is inside the line's own claim radius, so if it is
+    admitted anywhere it is the same source and it takes the position with it. What keeps
+    that from happening is that it is never admitted -- and what decides that is whether
+    the recording's own background can account for it, not how many decibels it has.
+    """
     settings = remove.RemovalSettings()
-    empty = _synthetic_spectrum()
-    strong = _synthetic_spectrum(peaks=[(27.52, 16.5)])
-    moderate = _synthetic_spectrum(peaks=[(27.52, 15.5)])
-    weak = _synthetic_spectrum(peaks=[(27.48, 7.0)])
+    empty = _synthetic_spectrum(noise_db=0.4)
+    strong = _synthetic_spectrum(peaks=[(27.52, 16.5)], noise_db=0.4)
+    moderate = _synthetic_spectrum(peaks=[(27.52, 15.5)], noise_db=0.4)
+    weak = _synthetic_spectrum(peaks=[(27.48, 0.6)], noise_db=0.4)
     spectra = [
         _session_run(empty, windows=(strong, strong)),
         _session_run(empty, windows=(moderate,)),

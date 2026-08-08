@@ -25,7 +25,7 @@ import pandas as pd
 
 from decomb import spectral
 
-BACKGROUND_HALF_WIDTH_HZ = 4.6296
+BACKGROUND_HALF_WIDTH_HZ = 100.0 / 21.6
 """Default half-width of the window a bin's background is estimated from, in Hz.
 
 Wide enough that a line cannot raise its own background, narrow enough to follow the
@@ -82,6 +82,8 @@ class DetectionSettings:
     """How far either side of a candidate spacing the fundamental is refined. A refinement
     of a measured gap, not a search for a period -- keep it small."""
     bootstrap_resamples: int = 10_000
+    bootstrap_alpha: float = 0.05
+    """Interval level of the reported bootstrap: 0.05 gives a 95% interval."""
     bootstrap_seed: int = 42
     """Percentile bootstrap of each line's prominence across the sampling unit."""
 
@@ -109,6 +111,8 @@ class DetectionSettings:
             raise ValueError("max_subharmonic_divisor must be at least one.")
         if self.bootstrap_resamples < 2:
             raise ValueError("bootstrap_resamples must be at least two.")
+        if not 0.0 < self.bootstrap_alpha < 1.0:
+            raise ValueError("bootstrap_alpha must lie strictly between zero and one.")
 
     @classmethod
     def from_config(cls, config) -> DetectionSettings:
@@ -260,6 +264,7 @@ def detect_cohort_lines(
             point, low, high = spectral.bootstrap_ci(
                 values,
                 n_resamples=settings.bootstrap_resamples,
+                alpha=settings.bootstrap_alpha,
                 seed=settings.bootstrap_seed,
             )
         refined = spectral.refine_peak_frequency(grid.freqs, cohort, index)

@@ -146,15 +146,19 @@ def _per_subject_residuals(
     subjects: tuple[str, ...],
     subject_targets: dict[str, tuple[float, ...]],
     half_width_bins: int,
+    max_line_width_hz: float,
+    residual_search_hz: float,
 ) -> pd.DataFrame:
     rows = []
     for subject, spectrum in zip(subjects, cleaned):
         prominence = spectral.prominence_db(
             spectral.to_db(spectrum), half_width_bins=half_width_bins
         )
-        narrow = estimators._narrow_peak_mask(freqs, prominence)
+        narrow = estimators._narrow_peak_mask(
+            freqs, prominence, max_line_width_hz=max_line_width_hz
+        )
         for frequency in _line_sources(subject_targets[subject]):
-            inside = np.abs(freqs - frequency) <= estimators.RESIDUAL_SEARCH_HZ
+            inside = np.abs(freqs - frequency) <= residual_search_hz
             candidates = np.flatnonzero(inside & narrow & np.isfinite(prominence))
             index = (
                 int(candidates[np.argmax(prominence[candidates])])
@@ -185,7 +189,7 @@ def build_report(
     manifest = pd.read_csv(removal_dir / "removal_manifest.tsv", sep="\t")
     subject_targets = subject_artifact_targets(manifest, subjects, settings)
 
-    half_width = catalogue.half_width_bins(freqs)
+    half_width = catalogue.half_width_bins(freqs, settings.background_half_width_hz)
     rows = []
     for name, (low, high) in sorted(bands.items(), key=lambda item: item[1][0]):
         band = (float(low), float(high))
@@ -216,6 +220,8 @@ def build_report(
         subjects,
         subject_targets,
         half_width,
+        settings.max_line_width_hz,
+        settings.residual_search_hz,
     )
     return {
         "bands": pd.DataFrame(rows),
@@ -229,7 +235,12 @@ def build_report(
     }
 
 
-def figure(report: dict, path: Path, protected_bands_hz: Sequence[tuple[float, float]]) -> None:
+def figure(
+    report: dict,
+    path: Path,
+    protected_bands_hz: Sequence[tuple[float, float]],
+    background_half_width_hz: float,
+) -> None:
     """Cohort spectra before and after, with the bands another stage owns shaded out."""
     freqs, original, cleaned = report["freqs"], report["original"], report["cleaned"]
     inside = (freqs >= 3) & (freqs <= 100)
@@ -253,7 +264,7 @@ def figure(report: dict, path: Path, protected_bands_hz: Sequence[tuple[float, f
         "wide notch."
     )
 
-    half_width = catalogue.half_width_bins(freqs)
+    half_width = catalogue.half_width_bins(freqs, background_half_width_hz)
     for data, colour, label in ((original, "#C1442E", "before"), (cleaned, "#111827", "after")):
         prominence = np.median(
             np.stack(
@@ -297,6 +308,7 @@ def run(args: argparse.Namespace) -> None:
         report,
         args.removal_dir / "removal_before_after.png",
         settings.protected_bands_hz,
+        settings.background_half_width_hz,
     )
 
     frame = report["bands"]

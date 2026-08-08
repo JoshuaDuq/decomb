@@ -77,15 +77,24 @@ of a hertz per line rather than a band.
 
 ![Power spectra before and after removal](docs/psd_before_after.png)
 
-Synthetic data: three 300 s recordings, pink background, a 1.2 Hz comb at harmonics 24-79
-sitting a few dB above it. All 56 harmonics go; the background between them is unchanged,
-and the lower panel shows the change is confined to the lines. `verify` finds 56 comb lines
-before and none after.
+Three 300 s synthetic recordings: pink background, a 1.2 Hz comb over harmonics 24-79
+standing 12 dB above it, and a rhythm planted on one of those harmonics. The figure is
+produced by [`docs/make_figure.py`](docs/make_figure.py), which builds the data, runs
+`diagnose`, `benchmark` and `apply` through their ordinary entry points, and prints every
+number below as it measures it — so the claims can be checked and regenerated.
 
-Two peaks deliberately survive, and both are the tool declining to act rather than failing
-to. 60 Hz is comb harmonic 50, inside the `mains_notch_hz` band that `exclude_mains` hands
-to a wide notch elsewhere. The 57.25 Hz line is an isolated line planted at ~7 dB, below the
-10 dB `detection_min_prominence_db` floor — nothing licensed removing it, so nothing did.
+Delta, theta and alpha are untouched: not one bin moves by 1 dB. Across the removed span
+the 55 targeted harmonics fall from 12.3 dB above background to 1.1 dB, and outside the
+lines the spectrum moves by at most 0.06 dB.
+
+Two features survive, and both are the tool declining to act:
+
+- **42 Hz** carries a 2.8 Hz-wide rhythm sitting exactly on comb harmonic 35. The harmonic
+  inside it is removed and the rhythm is not, because a rhythm is whole hertz wide and a
+  line is a tenth of one. This — not any prominence threshold — is what keeps a real
+  oscillation out of the removal's reach.
+- **60 Hz** is comb harmonic 50, inside the `mains_notch_hz` band that `exclude_mains`
+  hands to `notch`. Two stages must not aim at the same spectrum.
 
 ## What makes it different
 

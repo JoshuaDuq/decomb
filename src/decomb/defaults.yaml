@@ -45,7 +45,7 @@ detection:
   # Half-width of the running-median window a bin's local background is taken from. Wide
   # enough that a line cannot raise its own background -- several comb spacings -- and
   # narrow enough to follow the 1/f slope.
-  background_half_width_hz: 4.6296
+  background_half_width_hz: 4.62962962962963
 
   # False discovery rate the sweep is controlled at.
   fdr_alpha: 0.05
@@ -75,7 +75,9 @@ detection:
   spacing_search_fraction: 0.02
 
   # Percentile bootstrap of each line's prominence across the sampling unit.
+  # bootstrap_alpha is the interval level: 0.05 reports a 95% interval.
   bootstrap_resamples: 10000
+  bootstrap_alpha: 0.05
   bootstrap_seed: 42
 
 # ---------------------------------------------------------------------------------------
@@ -83,12 +85,12 @@ detection:
 # ---------------------------------------------------------------------------------------
 removal:
   # Length of each adaptive estimation window. Sets the frequency resolution the fit works
-  # at -- 54 s gives 18.5 mHz -- and so the shortest recording that can be processed. It
+  # at (1 / estimation_window_s) and so the shortest recording that can be processed. It
   # must resolve the spacing of the lines being removed.
   estimation_window_s: 54.0
   filter_length: "27s"   # half the estimation window
   filter_jobs: 4
-  mt_bandwidth: 0.6      # +/-0.3 Hz: half the distance to the neighbouring comb line
+  mt_bandwidth: 0.6      # set to your comb spacing: the band reaches half this either side
 
   # SITE. Where the comb search starts; every recording is then measured on its own.
   nominal_fundamental_hz: 1.2
@@ -116,7 +118,12 @@ removal:
   # Search and acceptance geometry for the comb fit.
   search_hz: 0.25          # comb search half-width; keep below half the comb spacing
   min_prominence_db: 1.0
-  background_half_width_hz: 4.6296
+
+  # Half-width of the window a bin's local background is taken from. Wide enough that a
+  # line cannot raise its own background -- several comb spacings -- and narrow enough to
+  # follow the 1/f slope. The digits matter: the residual audit picks its background bins
+  # with a continuous test, so rounding this moves the window by a bin at some targets.
+  background_half_width_hz: 4.62962962962963
 
   # A fundamental fitted from three peaks licenses removing sixty harmonics, so the fit
   # has to be well supported before it authorises a grid: this many mutually consistent
@@ -139,14 +146,42 @@ removal:
   # line's position varies between participants by more than a safe static window.
   detection_low_hz: 20.0
   detection_high_hz: 100.0
-  detection_min_prominence_db: 10.0
-  # A candidate may be weaker than the above in one recording only if the same summit
-  # recurs across recordings and one of them clears the full threshold.
-  detection_candidate_prominence_db: 6.0
-  # A window-by-window scan makes many more comparisons than a whole-recording scan, so it
-  # needs a higher floor: ordinary short-window spectra throw up recurrent 10-13 dB local
-  # maxima that are not lines.
-  detection_block_min_prominence_db: 15.0
+
+  # What admits a peak as a line: a false discovery rate against a null fitted to this
+  # recording's own prominence spectrum, over exactly the bins the search reached.
+  #
+  # Not a decibel floor. Prominence is not invariant to the analysis -- a sinusoid's peak
+  # integrates coherently with window length while the background does not, so the same
+  # physical line gains about 3 dB per doubling of estimation_window_s, and a fixed bar
+  # means something different at every window and on every channel. A bar also carries no
+  # error rate. This test calibrates itself to the recording's own noise and states the
+  # rate at which it is wrong.
+  detection_fdr_alpha: 0.05
+
+  # Optional prominence floor on top of that test. null disables it, which is the default.
+  # Declare one only if your site wants a stated minimum amplitude; it is then recorded in
+  # the derivative's provenance as the explicit choice it is.
+  detection_min_prominence_db: null
+
+  # The search beside a validated harmonic asks a different question -- not "is this above
+  # the background" but "is this a second source, or this harmonic's own skirt" -- and it
+  # still answers with a bar. A calibrated replacement (hold the summit against the same
+  # offset at every other harmonic) was built and measured: it agrees with this bar on real
+  # data and beats it on a clean comb, but neither separates a narrow source from a narrow
+  # noise summit riding on a rhythm, which is the failure that matters. See the setting's
+  # docstring in remove.py for the measurement and the second condition that would.
+  detection_adjacent_min_prominence_db: 10.0
+
+  # Extra spectrum left either side of a peak's measured support when widening a notch.
+  # Zero covers exactly the bins the support was observed over.
+  support_margin_hz: 0.0
+
+  # Also a bar, and not a detection one: how prominent a peak must be before its observed
+  # extent is allowed to widen a notch that is already removing it. Admitting more peaks
+  # here does not find more artifact, it empties more band -- replacing this with the
+  # calibrated test cost 334 extra notches and 1.1 dB of suppression on one recording.
+  support_min_prominence_db: 10.0
+
   detection_search_hz: 0.05    # refinement only; must stay below line_claim_hz
   min_runs_per_line: 3
   min_runs_per_block_line: 2

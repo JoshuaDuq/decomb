@@ -143,7 +143,7 @@ class TestDetection:
 
     def _spectrum(self, peaks, df=0.002):
         freqs = np.arange(1.0, 100.0, df)
-        spectrum = np.zeros_like(freqs)
+        spectrum = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
         sigma = 0.109 / 2.355
         for centre, height in peaks:
             spectrum[:] = np.maximum(

@@ -45,24 +45,16 @@ the fundamental's wander.
 
 The right ratio is the largest one that still pushes every line below its local
 background: too small and the removal becomes a band removal, too large and the high
-harmonics escape the window their own wander needs. Sweeping it on a development dataset
-is the way to set it, and ``decomb benchmark`` reports the resulting cost.
-
-    f/200 (MNE default)  25.3% of band   worst line -6.6 dB
-    f/300                17.1%           worst line -6.1 dB
-    f/450                12.1%           worst line -4.3 dB
-    f/600                 8.4%           worst line +4.0 dB   (a line survives)
-    fixed 0.10 Hz         8.8%           worst line +4.1 dB   (a line survives)
-
-The example above is one such sweep, on a 1.2 Hz comb at 54 s resolution. The minimum
-width exists because the lowest harmonics need more than one bin whatever the ratio says.
+harmonics escape the window their own wander needs. Sweep it on a development subset and
+read the cost off ``decomb benchmark``, which reports both the share of ``cost_band_hz``
+lost and the worst line left standing. ``notch_width_min_hz`` sets a floor under the
+result, because the lowest harmonics need more than one bin whatever the ratio says.
 """
 MT_BANDWIDTH = 0.6
 """Multitaper bandwidth for the sinusoid estimate, in Hz.
 
-At 0.6 Hz the estimation band reaches +/-0.3 Hz, half the distance to the neighbouring
-line of a 1.2 Hz comb, so no line's amplitude is estimated from a band containing another.
-Set it to half the spacing of your own comb.
+The estimation band reaches half this either side of a target, so set it to the spacing of
+your comb: no line's amplitude is then estimated from a band containing another.
 
 ``filter_length`` is chosen alongside it. A window too short to resolve the comb spacing
 cannot work at all; one merely long enough still leaves a bin-quantised shoulder beside a
@@ -191,14 +183,12 @@ class RemovalSettings:
     estimation_window_s: float = 54.0
     """Length of each adaptive estimation window, in seconds.
 
-    This sets the frequency resolution the fit works at -- 54 s gives 18.5 mHz -- and so
-    the shortest recording that can be processed at all. It must resolve the spacing of
-    the lines being removed, and the recording must hold at least one whole window.
+    Sets the frequency resolution the fit works at -- ``1 / estimation_window_s`` -- and so
+    the shortest recording that can be processed. It must resolve the spacing of the lines
+    being removed, and the recording must hold at least one whole window.
 
-    Alongside a periodic acquisition there is a reason to prefer a window commensurate
-    with that period: its bins then land cleanly relative to the acquisition's own
-    periodicity. 54 s is 60 repetitions of a 0.9 s TR. Elsewhere it is simply the window
-    length.
+    Where the artifact comes from a periodic acquisition, a window that is a whole number of
+    those periods puts the bins in a fixed relationship to it, which is worth preferring.
     """
     max_band_cost: float | None = None
     """Optional ceiling on the share of ``cost_band_hz`` a broadband signal may lose.
@@ -239,12 +229,16 @@ class RemovalSettings:
     ``z * k * SE(f0)`` and added to that harmonic's removal width."""
     low_hz: float = 3.0
     high_hz: float = 95.0
-    background_half_width_hz: float = 4.6296
-    """Half-width of the running-median window a bin's local background is taken from.
+    background_half_width_hz: float = 100.0 / 21.6
+    """Half-width of the window a bin's local background is taken from, in Hz.
 
-    Wide enough that a line cannot raise its own background -- several comb spacings --
-    and narrow enough to follow the 1/f slope. Every prominence in this workflow is
-    measured against it.
+    Wide enough that a line cannot raise its own background -- several comb spacings -- and
+    narrow enough to follow the 1/f slope. Every prominence in this workflow is measured
+    against it, so widening it raises every prominence reported.
+
+    Whatever value you set is used exactly as given: the residual audit selects background
+    bins with a continuous test, so rounding changes which bins qualify at some targets and
+    moves the reported null slightly.
     """
     min_harmonics_for_fit: int = estimators.MIN_HARMONICS_FOR_FIT
     max_harmonic_residual_hz: float = estimators.MAX_HARMONIC_RESIDUAL_HZ
@@ -279,11 +273,48 @@ class RemovalSettings:
     of full scale. A decade of headroom above that distinguishes quantisation from
     corruption.
     """
-    detection_min_prominence_db: float = estimators.LINE_PROMINENCE_FLOOR_DB
-    detection_candidate_prominence_db: float = 6.0
-    """Per-run floor for candidates that still require independent session replication."""
-    detection_block_min_prominence_db: float = 15.0
-    """Run-balanced strength required after scanning many short block spectra."""
+    detection_fdr_alpha: float | None = estimators.DETECTION_FDR_ALPHA
+    """False discovery rate a peak must clear to enter the candidate pool.
+
+    This is what admits a line. Replication across recordings and across non-overlapping
+    windows is then required on top of it, as independent evidence -- but replication is
+    evidence a source is persistent, not evidence a peak is real, and the two jobs need
+    different instruments. See :data:`decomb.estimators.DETECTION_FDR_ALPHA`.
+    """
+    detection_min_prominence_db: float | None = estimators.LINE_PROMINENCE_FLOOR_DB
+    """Optional prominence floor on top of the calibrated test. ``null`` disables it.
+
+    A decibel bar is not invariant to the analysis -- a line gains about 3 dB per doubling
+    of ``estimation_window_s`` -- so one cannot serve as the criterion. Declare one only if
+    your site wants a stated minimum amplitude, and it is recorded in the provenance as the
+    choice it is. It applies wherever a line is looked for, including beside a harmonic.
+    """
+    detection_adjacent_min_prominence_db: float = 10.0
+    """Prominence a summit beside a validated harmonic needs to count as a distinct source.
+
+    A fixed decibel bar, unlike the rest of detection, and a known limitation: prominence is
+    not invariant to window length, so this means something different at every
+    ``estimation_window_s``. Raise it if narrow features of your own sit beside harmonics
+    and are being taken; lower it if a real neighbouring line is being missed.
+
+    A bar cannot separate a narrow source from a narrow noise summit riding on a broad
+    rhythm that happens to cross a harmonic. Where that matters, keep the affected span in
+    ``notch_bands`` so this stage leaves it alone.
+    """
+    support_margin_hz: float = 0.0
+    """Extra spectrum left either side of a peak's measured support when widening a notch.
+
+    Zero by default: the notch then covers exactly the bins the support was observed over.
+    Raise it if your line positions move between the estimation window and the recording it
+    is applied to, and the extra is charged to the band cost the benchmark reports.
+    """
+    support_min_prominence_db: float = 10.0
+    """Prominence a peak needs before its observed extent may widen a target's notch.
+
+    Not a detection setting: it asks how far a peak already being removed reaches, and the
+    answer sets how much spectrum the notch empties. Admitting more peaks here does not find
+    more artifact, it removes more band, so this is deliberately conservative.
+    """
     detection_low_hz: float = 20.0
     detection_high_hz: float = 100.0
     detection_search_hz: float = 0.05
@@ -383,10 +414,13 @@ class RemovalSettings:
             raise ValueError("min_harmonics_for_fit must be at least three.")
         if self.n_seam_controls < 2:
             raise ValueError("n_seam_controls must be at least two.")
-        if self.detection_candidate_prominence_db > self.detection_min_prominence_db:
-            raise ValueError("The candidate prominence floor cannot exceed the confirmation floor.")
-        if self.detection_block_min_prominence_db < self.detection_min_prominence_db:
-            raise ValueError("The block confirmation floor cannot be below the whole-run floor.")
+        if self.detection_fdr_alpha is None and self.detection_min_prominence_db is None:
+            raise ValueError(
+                "Nothing would decide which peaks are lines: set detection_fdr_alpha, "
+                "detection_min_prominence_db, or both."
+            )
+        if self.detection_fdr_alpha is not None and not 0.0 < self.detection_fdr_alpha < 1.0:
+            raise ValueError("detection_fdr_alpha must lie strictly between zero and one.")
         if not 0.0 < self.detection_search_hz < self.line_claim_hz:
             raise ValueError(
                 f"detection_search_hz must lie between zero and line_claim_hz "
@@ -954,6 +988,7 @@ def adaptive_suppression_metrics(
         tuple(window.targets_hz for window in plan.windows),
         widths,
         search_hz=settings.residual_search_hz,
+        max_line_width_hz=settings.max_line_width_hz,
     )
     return metrics
 
@@ -1834,6 +1869,9 @@ def _detection_scaffold(freqs, spectrum_db, prominence, settings: RemovalSetting
         search_hz=settings.search_hz,
         isolated_search_hz=settings.detection_search_hz,
         min_prominence_db=settings.min_prominence_db,
+        min_harmonics=settings.min_harmonics_for_fit,
+        max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
+        max_residual_rms_hz=settings.max_fit_residual_rms_hz,
     )
 
 
@@ -1880,6 +1918,27 @@ def _comb_detection_support(
     return targets, widths
 
 
+def _comb_annulus(
+    frequency_array: np.ndarray,
+    target_array: np.ndarray,
+    covered_reaches: np.ndarray,
+    settings: RemovalSettings,
+) -> np.ndarray:
+    """Where a new source beside the comb could still be found.
+
+    Close enough to a target to be its business, and outside what that target's own notch
+    already covers -- inside the notch there is nothing left to find, because it is already
+    being removed.
+    """
+    inside = (frequency_array >= settings.detection_low_hz) & (frequency_array <= settings.high_hz)
+    distance = np.abs(frequency_array[:, None] - target_array[None, :])
+    return (
+        inside
+        & (distance.min(axis=1) <= settings.residual_search_hz)
+        & np.all(distance > covered_reaches[None, :], axis=1)
+    )
+
+
 def _detect_lines_adjacent_to_targets(
     freqs,
     spectrum_db,
@@ -1916,25 +1975,28 @@ def _detect_lines_adjacent_to_targets(
         & (prominence_array[1:-1] > prominence_array[:-2])
         & (prominence_array[1:-1] >= prominence_array[2:])
     )
-    inside = (frequency_array >= settings.detection_low_hz) & (frequency_array <= settings.high_hz)
+    annulus = _comb_annulus(frequency_array, target_array, covered_reaches, settings)
+    # A decibel floor. See `detection_adjacent_min_prominence_db` for the calibrated test
+    # that was built to replace it, and the measurement that sent it back.
     candidate_indices = np.flatnonzero(
-        summits & inside & (prominence_array >= settings.detection_min_prominence_db)
+        summits & annulus & (prominence_array >= settings.detection_adjacent_min_prominence_db)
     )
 
     candidates = []
     for index in candidate_indices:
-        position_hz = float(frequency_array[index])
-        distances = np.abs(target_array - position_hz)
-        if float(np.min(distances)) > settings.residual_search_hz:
-            continue
         peak_width_hz = estimators._peak_width_hz(frequency_array, prominence_array, int(index))
         if peak_width_hz > settings.max_line_width_hz:
             continue
-        if np.any(distances <= covered_reaches):
-            continue
-        candidates.append((position_hz, float(prominence_array[index])))
+        candidates.append((float(frequency_array[index]), float(prominence_array[index])))
 
-    minimum_separation_hz = spectrum_fit_nominal_resolution_hz(settings.filter_length)
+    # Two summits closer together than a line's own width are one source seen twice, not
+    # two sources -- which is what `line_claim_hz` means and why `detect_isolated_lines`
+    # separates on it. The filter's resolution is a floor under that, not a substitute for
+    # it: it asks whether the transform could separate them, not whether they are distinct.
+    minimum_separation_hz = max(
+        settings.line_claim_hz,
+        spectrum_fit_nominal_resolution_hz(settings.filter_length),
+    )
     accepted = []
     for position_hz, _strength_db in sorted(
         candidates,
@@ -1958,6 +2020,9 @@ def _estimate_spectrum(spectrum, settings: RemovalSettings, isolated_hz) -> esti
         search_hz=settings.search_hz,
         isolated_search_hz=settings.detection_search_hz,
         min_prominence_db=settings.min_prominence_db,
+        min_harmonics=settings.min_harmonics_for_fit,
+        max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
+        max_residual_rms_hz=settings.max_fit_residual_rms_hz,
     )
 
 
@@ -2034,7 +2099,11 @@ def _expand_widths_to_observed_line_support(
     expanded_windows = []
     for window_index, window in enumerate(plan.windows):
         evidence = (spectra.windows[window_index],)
-        expanded_windows.append(_expand_window_to_observed_support(window, evidence, settings))
+        expanded_windows.append(
+            _expand_window_to_observed_support(
+                window, evidence, settings, localization_margin_hz=settings.support_margin_hz
+            )
+        )
     return replace(plan, windows=tuple(expanded_windows))
 
 
@@ -2072,6 +2141,8 @@ def _expand_window_to_observed_support(
         # that bin's full span. Adding one resolution step states exactly the width of the
         # bins observed, and keeps a single-bin support from asking for a zero-width notch.
         resolution_hz = float(frequency_array[1] - frequency_array[0])
+        # A decibel floor, and the one place in the workflow that still has one. See
+        # `support_min_prominence_db` for what was tried instead and what it measured.
         summits = np.zeros(prominence_array.shape, dtype=bool)
         summits[1:-1] = (
             np.isfinite(prominence_array[1:-1])
@@ -2079,7 +2150,7 @@ def _expand_window_to_observed_support(
             & (prominence_array[1:-1] >= prominence_array[2:])
         )
         candidate_indices = np.flatnonzero(
-            summits & (prominence_array >= settings.detection_min_prominence_db)
+            summits & (prominence_array >= settings.support_min_prominence_db)
         )
         for index in candidate_indices:
             if (
@@ -2090,6 +2161,9 @@ def _expand_window_to_observed_support(
             position_hz = float(frequency_array[index])
             target_index = int(np.argmin(np.abs(targets - position_hz)))
             target_hz = float(targets[target_index])
+            # Only peaks a target is answerable for. Without this a summit anywhere in the
+            # band gets its own notch, half a hertz from the nearest harmonic, and the
+            # widening stops being widening.
             if abs(target_hz - position_hz) > settings.residual_search_hz:
                 continue
             left_hz, right_hz = estimators._peak_support_bounds_hz(
@@ -2820,10 +2894,13 @@ def _line_observations(
                 prominence,
                 fundamental_hz=scaffold.fundamental_hz,
                 harmonic_range=settings.removal_harmonic_range,
-                min_prominence_db=settings.detection_candidate_prominence_db,
+                fdr_alpha=settings.detection_fdr_alpha,
+                min_prominence_db=settings.detection_min_prominence_db,
                 low_hz=settings.detection_low_hz,
                 high_hz=settings.detection_high_hz,
                 comb_clearance_hz=settings.residual_search_hz,
+                claim_hz=settings.line_claim_hz,
+                max_line_width_hz=settings.max_line_width_hz,
                 excluded_bands_hz=settings.protected_bands_hz,
             )
             for position in positions:
@@ -3029,11 +3106,12 @@ def _whole_line_support(
 ) -> tuple[_LineObservation, ...]:
     whole_observations = tuple(item for item in cluster.observations if item.bounds is None)
     whole_runs = {item.run_index for item in whole_observations}
-    if (
-        len(whole_runs) >= settings.min_runs_per_line
-        and max(item.prominence_db for item in whole_observations)
-        >= settings.detection_min_prominence_db
-    ):
+    # Replication alone, because every observation in the cluster already cleared the
+    # calibrated detector in its own recording. Requiring one of them to also reach a fixed
+    # decibel bar made the same physical line removable for one participant and not another
+    # -- measured across five participants, eleven replicated positions were refused that
+    # way, including one present in six recordings of six.
+    if len(whole_runs) >= settings.min_runs_per_line:
         return whole_observations
     return ()
 
@@ -3042,17 +3120,13 @@ def _block_line_support(
     cluster: _LineCluster,
     settings: RemovalSettings,
 ) -> tuple[_LineObservation, ...]:
-    block_observations = tuple(item for item in cluster.observations if item.bounds is not None)
-    run_indices = sorted({item.run_index for item in block_observations})
-    strong_runs = {
-        run_index
-        for run_index in run_indices
-        if max(item.prominence_db for item in block_observations if item.run_index == run_index)
-        >= settings.detection_block_min_prominence_db
-    }
-    supported = tuple(item for item in block_observations if item.run_index in strong_runs)
+    supported = tuple(item for item in cluster.observations if item.bounds is not None)
+    runs = {item.run_index for item in supported}
+    # A block scan makes many more comparisons than a whole-recording scan. That is handled
+    # where it arises -- Benjamini-Hochberg counts the bins each scan actually searched --
+    # rather than by a higher decibel bar standing in for the correction.
     if (
-        len(strong_runs) >= settings.min_runs_per_block_line
+        len(runs) >= settings.min_runs_per_block_line
         and _independent_window_count(supported) >= settings.min_independent_windows_per_line
     ):
         return supported
@@ -3071,11 +3145,6 @@ def _single_run_block_support(
         if item.run_index == run_index and item.bounds is not None
     )
     if not observations:
-        return ()
-    if (
-        max(item.prominence_db for item in observations)
-        < settings.detection_block_min_prominence_db
-    ):
         return ()
     if _independent_window_count(observations) < settings.min_independent_windows_per_line:
         return ()

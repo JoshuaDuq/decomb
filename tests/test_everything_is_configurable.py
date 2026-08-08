@@ -11,7 +11,7 @@ Three separate claims, tested separately.
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 
 import pytest
 import yaml
@@ -51,9 +51,11 @@ REMOVAL_OVERRIDES = {
     "seam_alpha": 0.01,
     "n_seam_controls": 20,
     "roundtrip_relative_tolerance": 1.0e-5,
+    "detection_fdr_alpha": 0.01,
     "detection_min_prominence_db": 12.0,
-    "detection_candidate_prominence_db": 7.0,
-    "detection_block_min_prominence_db": 18.0,
+    "detection_adjacent_min_prominence_db": 11.0,
+    "support_margin_hz": 0.02,
+    "support_min_prominence_db": 11.0,
     "detection_low_hz": 15.0,
     "detection_high_hz": 90.0,
     "detection_search_hz": 0.06,
@@ -77,6 +79,7 @@ DETECTION_OVERRIDES = {
     "min_subharmonic_gain": 0.3,
     "spacing_search_fraction": 0.01,
     "bootstrap_resamples": 500,
+    "bootstrap_alpha": 0.1,
     "bootstrap_seed": 7,
 }
 
@@ -99,6 +102,22 @@ BENCHMARK_OVERRIDES = {
         "max_intrinsic_energy_ratio": 1.2,
     },
 }
+
+
+def _flat_run_spectra():
+    """One recording's spectra: a comb on a signed background, enough to plan from."""
+    import numpy as np
+
+    freqs = np.arange(1.0, 100.0, 0.002)
+    spectrum = np.zeros_like(freqs)
+    sigma = 0.109 / 2.355
+    for harmonic in range(24, 80):
+        spectrum[:] = np.maximum(
+            spectrum, 14.0 * np.exp(-0.5 * ((freqs - harmonic * 1.2) / sigma) ** 2)
+        )
+    spectrum += np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
+    whole = (freqs, spectrum, spectrum.copy())
+    return remove.SessionRunSpectra(whole=whole, windows=(whole,), bounds=((0, 100),))
 
 
 def _config(tmp_path, document):
@@ -277,3 +296,65 @@ def test_no_settings_dataclass_holds_a_mutable_default():
         assert is_dataclass(kind)
         for entry in fields(kind):
             assert not isinstance(entry.default, (list, dict, set)), f"{kind.__name__}.{entry.name}"
+
+
+def _captured(monkeypatch, module, name):
+    """Record the keyword arguments a function is called with, and call through."""
+    seen: list[dict] = []
+    original = getattr(module, name)
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, spy)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "setting,parameter",
+    (
+        ("line_claim_hz", "claim_hz"),
+        ("max_line_width_hz", "max_line_width_hz"),
+        ("detection_low_hz", "low_hz"),
+        ("detection_high_hz", "high_hz"),
+        ("detection_fdr_alpha", "fdr_alpha"),
+    ),
+)
+def test_a_detection_setting_reaches_the_detector(monkeypatch, setting, parameter):
+    """A setting the config accepts but nobody passes on is worse than no setting.
+
+    It reads as a knob, it is recorded in the provenance as though it were in force, and it
+    does nothing. This asks the question by watching what the estimator was actually
+    called with, which is the only thing that decides behaviour.
+    """
+    from decomb import estimators
+
+    settings = replace(remove.RemovalSettings(), **{setting: REMOVAL_OVERRIDES[setting]})
+    seen = _captured(monkeypatch, estimators, "detect_isolated_lines")
+
+    remove.automatic_line_plans([_flat_run_spectra()], settings)
+
+    assert seen, "detect_isolated_lines was never called"
+    assert all(call[parameter] == REMOVAL_OVERRIDES[setting] for call in seen)
+
+
+@pytest.mark.parametrize(
+    "setting,parameter",
+    (
+        ("min_harmonics_for_fit", "min_harmonics"),
+        ("max_harmonic_residual_hz", "max_harmonic_residual_hz"),
+        ("max_fit_residual_rms_hz", "max_residual_rms_hz"),
+        ("search_hz", "search_hz"),
+    ),
+)
+def test_a_comb_fit_setting_reaches_the_estimator(monkeypatch, setting, parameter):
+    from decomb import estimators
+
+    settings = replace(remove.RemovalSettings(), **{setting: REMOVAL_OVERRIDES[setting]})
+    seen = _captured(monkeypatch, estimators, "estimate_comb")
+
+    remove.automatic_line_plans([_flat_run_spectra()], settings)
+
+    assert seen, "estimate_comb was never called"
+    assert all(call[parameter] == REMOVAL_OVERRIDES[setting] for call in seen)

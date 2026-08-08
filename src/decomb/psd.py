@@ -8,9 +8,9 @@ source and on each derivative in turn: an overview of the whole band, the same d
 into readable spans, and one panel per recording.
 
 The tiled figure exists because the overview cannot answer the second question. Drawing
-1-100 Hz on one axis puts several frequency bins in every pixel, so a comb line 1.2 Hz from
-its neighbour is sub-pixel: the overview shows that the lines went, and cannot show whether
-they went surgically or took their surroundings with them.
+the whole band on one axis puts several frequency bins in every pixel, so a comb line is
+sub-pixel from its neighbour: the overview shows that the lines went, and cannot show
+whether they went surgically or took their surroundings with them.
 
 Runs on whatever exists. After ``apply`` it compares the source against the line-cleaned
 copy; after ``notch`` it adds the notched copy as a third trace, so the two transforms can
@@ -50,21 +50,22 @@ class PsdSettings:
     """How the spectra are computed. One set of values for every arm of the comparison."""
 
     window_s: float = 54.0
-    """Welch segment length. Sets the resolution: 54 s gives 18.5 mHz bins.
+    """Welch segment length, in seconds. Sets the resolution to ``1 / window_s``.
 
-    Defaults to the removal's own estimation window, so the figure resolves what the fit
-    resolved. A comb at 1.2 Hz spacing needs far less; a line pair 26 mHz apart needs this.
+    Match it to the removal's estimation window so the figure resolves what the fit
+    resolved. Resolving the comb spacing needs far less; resolving a close line pair needs
+    all of it.
     """
     overlap: float = 0.5
     band_hz: tuple[float, float] = BAND_HZ
     panel_span_hz: float = 10.0
     """Width of each panel in the tiled figure.
 
-    The overview draws the whole band on one axis, where 5347 bins share about 1900 pixels
-    and a comb line 1.2 Hz from its neighbour is sub-pixel -- so it shows that lines went
-    and cannot show whether they went surgically. Tiling the same data into consecutive
-    spans of this width puts roughly one bin per pixel, which is what it takes to see the
-    shape of an individual notch.
+    The overview draws the whole band on one axis, where many bins share each pixel and a
+    comb line is sub-pixel from its neighbour -- so it shows that lines went and cannot show
+    whether they went surgically. Tiling the same data into consecutive spans of this width
+    brings it towards one bin per pixel, which is what it takes to see the shape of an
+    individual notch.
     """
 
     def __post_init__(self) -> None:
@@ -207,10 +208,10 @@ def figure_band_panels(
 ) -> None:
     """The same spectra tiled into readable spans, one panel per range.
 
-    The overview cannot show the shape of a notch: at 1.2 Hz line spacing and 18.5 mHz bins
-    it draws several bins per pixel. Here each panel spans ``panel_span_hz``, which brings
-    it to about one bin per pixel, and autoscales on its own contents so a deep notch in one
-    span does not flatten the spectrum in another.
+    The overview cannot show the shape of a notch, because it draws several bins per pixel.
+    Here each panel spans ``panel_span_hz``, which brings it towards one bin per pixel, and
+    autoscales on its own contents so a deep notch in one span does not flatten the spectrum
+    in another.
     """
     edges = panel_edges((float(freqs[0]), float(freqs[-1])), settings.panel_span_hz)
     figure, axes = plt.subplots(len(edges), 1, figsize=(13, 1.9 * len(edges)), squeeze=False)

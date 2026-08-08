@@ -19,11 +19,17 @@ import pytest
 from decomb import estimators
 
 
-def _spectrum(peaks=(), *, rhythms=(), f0=1.2, harmonics=(), df=0.002, high=100.0):
-    """A flat-background spectrum in dB with narrow lines and/or broad rhythms added.
+def _spectrum(
+    peaks=(), *, rhythms=(), f0=1.2, harmonics=(), df=0.002, high=100.0, noise_db=0.4, seed=0
+):
+    """A noisy-background spectrum in dB with narrow lines and/or broad rhythms added.
 
     ``peaks`` and ``harmonics`` are (frequency, prominence_db); ``rhythms`` are
     (frequency, prominence_db, width_hz).
+
+    The background is not flat, because the detector fits its threshold to the background's
+    own spread and a flat one has none. It is signed, as prominence is: a bin below its own
+    local background is negative, and the null's scale comes from that lower half.
     """
     freqs = np.arange(1.0, high, df)
     spectrum = np.zeros_like(freqs)
@@ -38,6 +44,9 @@ def _spectrum(peaks=(), *, rhythms=(), f0=1.2, harmonics=(), df=0.002, high=100.
         add(harmonic * f0, height, line_width)
     for centre, height, width in rhythms:
         add(centre, height, width / 2.355)
+    # Added after the peaks: `np.maximum` against a zero-floored profile would clip every
+    # negative bin away, leaving no lower tail to fit a null from.
+    spectrum += np.random.default_rng(seed).normal(0.0, noise_db, freqs.size)
     return freqs, spectrum, spectrum.copy()
 
 
@@ -45,9 +54,12 @@ def _detect(freqs, spectrum, prominence, **kwargs):
     options = dict(
         fundamental_hz=1.2,
         harmonic_range=(22, 83),
-        min_prominence_db=6.0,
         low_hz=20.0,
         high_hz=100.0,
+        # What `_line_observations` passes. The membership tolerance is about which peaks
+        # belong to the arithmetic grid; suppressing a strong harmonic's skirt is a
+        # different question and needs the estimate's frequency-uncertainty scale.
+        comb_clearance_hz=estimators.RESIDUAL_SEARCH_HZ,
     )
     options.update(kwargs)
     return estimators.detect_isolated_lines(freqs, spectrum, prominence, **options)
@@ -83,7 +95,11 @@ def test_a_resolved_peak_just_off_the_comb_is_exposed_to_session_replication():
     near = 60 * 1.2 + 0.12
     beneath = _spectrum(harmonics=[(60, 25.0)], peaks=[(near, 19.0)])
 
-    assert any(abs(f - near) < 0.02 for f in _detect(*beneath))
+    # At the membership tolerance, which is what this exclusion delegates to. Production
+    # passes the wider frequency-uncertainty scale instead, so a peak this close to a
+    # harmonic is left to the comb pass there.
+    found = _detect(*beneath, comb_clearance_hz=estimators.COMB_CLEARANCE_HZ)
+    assert any(abs(f - near) < 0.02 for f in found), found
 
 
 def test_a_neural_rhythm_is_not_taken_as_a_line():
@@ -151,9 +167,27 @@ def test_a_comb_position_outside_the_removal_range_is_still_not_a_line():
     assert found == (), f"harmonic 17 at 20.400 Hz was offered as an isolated line: {found}"
 
 
-def test_the_prominence_floor_is_the_predeclared_conservative_setting():
-    """Eligible-only calibration returned 2-6 candidates per run at this floor."""
-    assert estimators.LINE_PROMINENCE_FLOOR_DB == 10.0
+def test_admission_is_calibrated_rather_than_a_decibel_constant():
+    """A fixed dB floor is not invariant to the analysis, so it cannot be the criterion.
+
+    A sinusoid's spectral peak integrates coherently with window length while the
+    background does not, so the same physical line gains about 3 dB per doubling of the
+    estimation window. A bar set for one window means something else at another, and
+    carries no error rate either way.
+    """
+    assert estimators.LINE_PROMINENCE_FLOOR_DB is None, (
+        "a decibel floor is back in charge of admission"
+    )
+    assert 0.0 < estimators.DETECTION_FDR_ALPHA < 1.0
+
+
+def test_the_same_line_is_admitted_at_any_window_length():
+    """The calibrated test means the same thing whatever resolution it is run at."""
+    admitted = []
+    for df in (0.002, 0.004, 0.008):
+        freqs, spec, prom = _spectrum(peaks=[(94.3453, 12.0)], df=df)
+        admitted.append(any(abs(f - 94.3453) < 0.05 for f in _detect(freqs, spec, prom)))
+    assert all(admitted), admitted
 
 
 def test_a_line_stronger_than_the_harmonic_beside_it_is_taken():
@@ -209,7 +243,9 @@ def test_a_resolved_peak_outside_the_comb_membership_tolerance_is_exposed():
     near = 23 * f0 - 0.095
     freqs, spec, prom = _spectrum(peaks=[(near, 17.0)], f0=f0)
 
-    found = _detect(freqs, spec, prom, fundamental_hz=f0)
+    found = _detect(
+        freqs, spec, prom, fundamental_hz=f0, comb_clearance_hz=estimators.COMB_CLEARANCE_HZ
+    )
 
     assert any(abs(f - near) < 0.02 for f in found), found
 
@@ -230,7 +266,7 @@ def test_production_detection_is_not_blind_at_the_probe_frequencies():
     probe = estimators.Probe()
     tones = probe.sinusoid_hz + (probe.burst_hz,)
     freqs = np.arange(1.0, 100.0, 0.002)
-    spectrum = np.zeros_like(freqs)
+    spectrum = np.random.default_rng(0).normal(0.0, 0.4, freqs.size)
     sigma = 0.109 / 2.355
     for tone in tones:
         spectrum[:] = np.maximum(spectrum, 30.0 * np.exp(-0.5 * ((freqs - tone) / sigma) ** 2))

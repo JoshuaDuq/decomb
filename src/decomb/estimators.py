@@ -34,13 +34,13 @@ from functools import lru_cache
 
 import numpy as np
 
-from decomb.spectral import refine_peak_frequency
+from decomb.spectral import fdr_bh, refine_peak_frequency, upper_tail_pvalues
 
 NOMINAL_FUNDAMENTAL_HZ = 1.2
 """Where the comb search starts. A seed only -- every recording is measured.
 
-This describes one room and means nothing for another site. Run ``decomb diagnose`` to
-find the fundamental in your own data and set this to what it reports.
+Run ``decomb diagnose`` to find the fundamental in your own data and set this to what it
+reports.
 """
 COMB_HARMONIC_RANGE = (24, 79)
 """Harmonics used to fit the fundamental.
@@ -86,9 +86,8 @@ authorising a broad removal. The residual-RMS and uncertainty checks apply on to
 MAX_HARMONIC_RESIDUAL_HZ = 0.06
 """Largest deviation a peak may have from the fitted grid and still count as a member.
 
-Wide enough to hold a real comb -- residuals on one are a few millihertz, several times
-finer than the 18.5 mHz bins a 54 s window resolves -- and narrow enough to exclude an
-independent line that happens to sit near a harmonic.
+Wide enough to hold a real comb, whose residuals run well inside one bin, and narrow
+enough to exclude an independent line that happens to sit near a harmonic.
 """
 
 MAX_FIT_RESIDUAL_RMS_HZ = 0.04
@@ -105,9 +104,13 @@ inconsistent set of peaks forced onto a grid.
 #: target that missed, and a missed line then sits just outside what the notch claimed --
 #: precisely where the claimed width cannot see. This is the frequency-uncertainty scale of
 #: the estimate instead: comb harmonics wander with the fundamental times the harmonic
-#: index, and the isolated lines are searched over the same 0.15 Hz. Kept well inside the
-#: 0.6 Hz half-spacing so one target is never charged with the next harmonic's line.
+#: index. Keep it well inside half the comb spacing, so one target is never charged with
+#: the next harmonic's line.
 RESIDUAL_SEARCH_HZ = 0.15
+
+MIN_BINS_FOR_NULL = 32
+"""Fewest bins a null can be fitted from; :func:`decomb.spectral.robust_null`'s own
+requirement."""
 
 
 @lru_cache(maxsize=32)
@@ -520,11 +523,10 @@ class PreservationGate:
 
     Derive this from the instrument rather than reading it off a result. A Gaussian burst
     of duration sigma at frequency f spans roughly ``4 / (2*pi*sigma)`` hertz, crossing
-    ``span / spacing`` comb lines, each subtracted over ``freq / notch_width_ratio``. The
-    expected loss is the product over the span -- for a 50 ms burst at 40 Hz against a
-    1.2 Hz comb at ``freq/450``, about 7.5%. The default floor is twice that expected
-    loss: headroom for a transient that lands less favourably, while still failing
-    anything that loses a sixth of its energy.
+    ``span / spacing`` comb lines, each subtracted over ``freq / notch_width_ratio``; the
+    expected loss is the product over the span. Set the floor to about twice that, leaving
+    headroom for a transient that lands less favourably while still failing anything that
+    loses a large share of its energy.
     """
     max_intrinsic_energy_ratio: float = 1.05
     """Most of it that may come back. A removal that *adds* energy where the transient was
@@ -925,9 +927,10 @@ LINE_WIDTH_CEILING_HZ = 0.25
 """Widest a peak may be, measured 3 dB down from its own summit, to count as a line.
 
 This is what keeps a tall alpha or beta rhythm from being removed as an artifact. A
-monochromatic source is as narrow as the window allows -- around a tenth of a hertz at
-54 s -- while a biological resonance is whole hertz wide. The two differ by more than an
-order of magnitude, so the threshold does not need to be delicate; it needs to exist.
+monochromatic source is as narrow as the window allows, while a biological resonance is
+whole hertz wide. The two differ by more than an order of magnitude, so the threshold does
+not need to be delicate; it needs to exist. Set it above the width your own window gives a
+pure tone and below the narrowest rhythm you mean to keep.
 """
 
 COMB_CLEARANCE_HZ = MAX_HARMONIC_RESIDUAL_HZ
@@ -948,16 +951,72 @@ blind spots in delivered data. ``check_probe_clearance`` is the guard that matte
 real line does sit on a probe tone it raises, which says move the probe, not stop looking.
 """
 
-LINE_PROMINENCE_FLOOR_DB = 10.0
-"""Prominence a peak needs before it is treated as a line.
+DETECTION_FDR_ALPHA = 0.05
+"""False discovery rate a peak must clear before it is treated as a line.
 
-Below about 10 dB, local maxima in an ordinary short-window spectrum are a noise
-population rather than lines: they are numerous, they sit just above the floor, and they
-do not recur at the same frequency across recordings. Above it, what survives clusters on
-frequencies that repeat across participants to within a couple of tens of millihertz --
-which noise does not do. Check this against your own data with ``decomb diagnose``, which
-reports each detection's prominence and how many subjects carry it.
+A rate rather than a decibel threshold, because prominence is not invariant to the
+analysis: a sinusoid's peak integrates coherently with window length while the background
+does not, so the same line gains about 3 dB per doubling of ``estimation_window_s``, and a
+fixed bar means something different at every window and on every channel.
+
+The test is a null fitted to the lower tail of the recording's own prominence spectrum,
+one-sided p-values against it, and Benjamini-Hochberg over the bins searched. It calibrates
+itself to each recording's noise and states the rate at which it is wrong.
 """
+
+LINE_PROMINENCE_FLOOR_DB: float | None = None
+"""Optional additional prominence floor, in dB. ``None`` disables it, which is the default.
+
+The calibrated test above decides admission. A site that wants a stated minimum amplitude
+on top of it can declare one, and that declaration is then its own explicit choice --
+recorded in the derivative's provenance -- rather than an unexamined constant deciding what
+gets removed from everyone's data.
+"""
+
+
+def admitted_summits(
+    prominence: np.ndarray,
+    summits: np.ndarray,
+    searched: np.ndarray,
+    *,
+    fdr_alpha: float | None = DETECTION_FDR_ALPHA,
+    min_prominence_db: float | None = LINE_PROMINENCE_FLOOR_DB,
+) -> np.ndarray:
+    """Which summits are lines: FDR against a null fitted to line-free spectrum.
+
+    ``searched`` is both where the caller looked -- which sets the multiplicity, since
+    testing more bins is more chances to be wrong -- and where the null is fitted from.
+    That identity holds only while the search covers spectrum that is mostly line-free,
+    which is what makes this the rule for the isolated-line search and not for a search
+    aimed deliberately at a harmonic's neighbourhood -- there, "louder than empty spectrum"
+    is not the question, and `RemovalSettings.detection_adjacent_min_prominence_db` records
+    what is used instead and what it would take to calibrate it.
+
+    A spectrum with no dispersion at all has no null to fit; that is a degenerate input
+    rather than a result, and it raises.
+    """
+    if prominence.shape != summits.shape or prominence.shape != searched.shape:
+        raise ValueError("prominence, summits and searched must have the same shape.")
+    if fdr_alpha is None and min_prominence_db is None:
+        raise ValueError("Nothing decides admission: set fdr_alpha, min_prominence_db, or both.")
+
+    admitted = summits.copy()
+    if fdr_alpha is not None:
+        if not np.isfinite(fdr_alpha) or not 0.0 < fdr_alpha < 1.0:
+            raise ValueError("fdr_alpha must lie strictly between zero and one.")
+        tested = np.flatnonzero(searched & np.isfinite(prominence))
+        if tested.size < MIN_BINS_FOR_NULL:
+            raise ValueError(
+                f"Only {tested.size} bins were searchable, fewer than the "
+                f"{MIN_BINS_FOR_NULL} a null can be fitted from. Widen the detection band, "
+                "or set removal.detection_fdr_alpha to null and declare a prominence floor."
+            )
+        significant = np.zeros(prominence.shape, dtype=bool)
+        significant[tested] = fdr_bh(upper_tail_pvalues(prominence[tested])) < fdr_alpha
+        admitted &= significant
+    if min_prominence_db is not None:
+        admitted &= prominence >= min_prominence_db
+    return admitted
 
 
 def detect_isolated_lines(
@@ -967,7 +1026,8 @@ def detect_isolated_lines(
     *,
     fundamental_hz: float,
     harmonic_range: tuple[int, int],
-    min_prominence_db: float = LINE_PROMINENCE_FLOOR_DB,
+    fdr_alpha: float | None = DETECTION_FDR_ALPHA,
+    min_prominence_db: float | None = LINE_PROMINENCE_FLOOR_DB,
     low_hz: float = 20.0,
     high_hz: float = 100.0,
     comb_clearance_hz: float = COMB_CLEARANCE_HZ,
@@ -984,6 +1044,11 @@ def detect_isolated_lines(
     catch one participant's line reaches the wrong peak in another's, and one narrow
     enough to be safe misses it entirely in a third. Reading each run's own spectrum
     removes the class of error instead of adding seeds until it is covered.
+
+    Admission is by ``fdr_alpha`` against a null fitted to this spectrum's own lower tail,
+    over exactly the bins the search is allowed to reach -- so the multiplicity counted is
+    the multiplicity incurred. ``min_prominence_db`` is an optional extra floor and is off
+    by default; see :data:`DETECTION_FDR_ALPHA` for why a decibel bar cannot do this job.
 
     The detector is deliberately conservative, because its failure mode is removing signal:
 
@@ -1043,22 +1108,31 @@ def detect_isolated_lines(
         prominence_array[1:-1] >= prominence_array[2:]
     )
 
-    inside = (frequency_array >= low_hz) & (frequency_array <= high_hz)
-    candidate = (
-        summit & inside & np.isfinite(prominence_array) & (prominence_array >= min_prominence_db)
-    )
+    # Bins the search may reach. The null is fitted on these and the multiplicity counted
+    # over these, so the test is calibrated against exactly the search that was made --
+    # not against a wider band the detector was never allowed to look at.
+    eligible = (frequency_array >= low_hz) & (frequency_array <= high_hz)
+    eligible &= np.isfinite(prominence_array)
     if comb_positions.size:
         distance = np.abs(frequency_array[:, None] - comb_positions[None, :])
-        candidate &= distance.min(axis=1) > comb_clearance_hz
+        eligible &= distance.min(axis=1) > comb_clearance_hz
     if protected.size:
         near_probe = (
             np.abs(frequency_array[:, None] - protected[None, :]).min(axis=1) <= probe_clearance_hz
         )
-        candidate &= ~near_probe
+        eligible &= ~near_probe
     for start, stop in excluded_bands_hz:
         if not np.isfinite((start, stop)).all() or start >= stop:
             raise ValueError(f"excluded_bands_hz must hold increasing bands; got {(start, stop)}.")
-        candidate &= ~((frequency_array >= start) & (frequency_array <= stop))
+        eligible &= ~((frequency_array >= start) & (frequency_array <= stop))
+
+    candidate = admitted_summits(
+        prominence_array,
+        summit & eligible,
+        eligible,
+        fdr_alpha=fdr_alpha,
+        min_prominence_db=min_prominence_db,
+    )
 
     indices = np.flatnonzero(candidate)
     if indices.size == 0:
@@ -1252,6 +1326,7 @@ def adaptive_line_suppression(
     targets: Sequence[Sequence[float]],
     widths: Sequence[Sequence[float]],
     search_hz: float = RESIDUAL_SEARCH_HZ,
+    max_line_width_hz: float = LINE_WIDTH_CEILING_HZ,
 ) -> dict[str, float]:
     """How far the targeted lines fell, across every window, against one matched null.
 
@@ -1300,6 +1375,7 @@ def adaptive_line_suppression(
             np.asarray(window_targets, dtype=float),
             np.asarray(window_widths, dtype=float),
             search_hz,
+            max_line_width_hz,
         )
         row_groups.append(values)
         null_groups.append(null_maxima)
@@ -1328,14 +1404,15 @@ def _suppression_components(
     targets: np.ndarray,
     widths: np.ndarray,
     search_hz: float,
+    max_line_width_hz: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if before.shape != frequency_array.shape or after.shape != frequency_array.shape:
         raise ValueError("Prominence arrays must match the frequency grid.")
     if widths.shape != targets.shape:
         raise ValueError("targets and widths must have the same shape.")
-    narrow_candidates = _narrow_peak_mask(frequency_array, before) | _narrow_peak_mask(
-        frequency_array, after
-    )
+    narrow_candidates = _narrow_peak_mask(
+        frequency_array, before, max_line_width_hz=max_line_width_hz
+    ) | _narrow_peak_mask(frequency_array, after, max_line_width_hz=max_line_width_hz)
     rows = []
     reaches = []
     usable_targets = []
