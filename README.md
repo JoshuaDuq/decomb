@@ -24,17 +24,17 @@ R peak, an optimal basis set, or ICA.
 
 **What both leave behind.** Any source that is periodic but *not* locked to the imaging
 sequence or the heartbeat is untouched by either step. It averages toward zero in every
-template and stays in the data at full amplitude. The environment of an MR suite is full of
-such sources, and the physics that makes EEG-fMRI hard is what makes them visible: a
+template and stays in the data at full amplitude. An MR suite is full of such sources, and
+the physics that makes EEG-fMRI hard is what makes them visible: a
 conductor moving in a strong static field induces a voltage proportional to `B₀` and to the
 rate of change of the loop area. Millimetre vibrations that would be invisible outside the
 bore become measurable EEG.
 
 The usual sources are mechanical and run continuously:
 
-- **The cold head and helium compressor.** The cryocooler that reliquefies helium cycles
-  continuously and vibrates the magnet and the bore. On many systems it can be switched off
-  for the duration of an acquisition, which is the cleanest fix and worth trying first.
+- **The cold head and helium compressor.** The cryocooler that reliquefies helium vibrates
+  the magnet and the bore. On many systems it can be switched off for the duration of an
+  acquisition — the cleanest fix, and worth trying first.
 - **The bore ventilation fan.** A constant-speed fan puts energy at its rotation rate and
   at the blade-pass frequency. Also often switchable.
 - **Room plant.** Chillers, pumps, and HVAC, coupled through the floor and the gantry.
@@ -78,10 +78,10 @@ of a hertz per line rather than a band.
 ![Power spectra before and after removal](docs/psd_before_after.png)
 
 Three 300 s synthetic recordings: pink background, a 1.2 Hz comb over harmonics 24-79
-standing 12 dB above it, and a rhythm planted on one of those harmonics. The figure is
-produced by [`docs/make_figure.py`](docs/make_figure.py), which builds the data, runs
-`diagnose`, `benchmark` and `apply` through their ordinary entry points, and prints every
-number below as it measures it — so the claims can be checked and regenerated.
+standing 12 dB above it, and a rhythm planted on one of those harmonics. Produced by
+[`docs/make_figure.py`](docs/make_figure.py), which builds the data, runs `diagnose`,
+`benchmark` and `apply` through their ordinary entry points, and prints every number below
+as it measures it.
 
 Delta, theta and alpha are untouched: not one bin moves by 1 dB. Across the removed span
 the 55 targeted harmonics fall from 12.3 dB above background to 1.1 dB, and outside the
@@ -98,21 +98,18 @@ Two features survive, and both are the tool declining to act:
 
 ## What makes it different
 
-**It refuses.** `apply` will not run without a passing `benchmark` for the same data and
-the same settings. The benchmark injects known signals, removes the lines, and measures
-what came back. Its criteria are stated before the measurement is taken.
+**It refuses.** `apply` will not run without a passing `benchmark` for the same data and the
+same settings, and the criteria are stated before the measurement is taken.
 
-**It measures its own cost.** A broadband probe goes through the identical transform, so
-the reported band cost is what a signal occupying the band actually loses, not what the
-plan asked for. That figure is written into the output dataset's `GeneratedBy` provenance,
-so the cost travels with the data.
+**It measures its own cost.** A broadband probe goes through the identical transform, so the
+reported band cost is what a signal occupying the band actually loses, not what the plan
+asked for. That figure travels with the data, in the output's `GeneratedBy` provenance.
 
-**It verifies against a detector that doesn't know the answer.** `verify` re-sweeps the
-cleaned data under FDR control with no knowledge of where the targets were, so it can find
-a line the removal never aimed at.
+**It verifies blind.** `verify` re-sweeps the cleaned data under FDR control knowing nothing
+about where the targets were, so it can find a line the removal never aimed at.
 
-**It reads no events.** A resting or baseline acquisition, or any continuous recording, is
-a valid input. Nothing here requires a task, a trigger channel, or an epoch structure.
+**It reads no events.** Any continuous recording is a valid input — no task, no trigger
+channel, no epoch structure.
 
 ## Install
 
@@ -121,14 +118,12 @@ pip install -e .
 ```
 
 Python 3.11+. Depends on MNE, MNE-BIDS, pybv, NumPy, SciPy, pandas, matplotlib, joblib and
-PyYAML. `pip install -e ".[dev]"` adds pytest and ruff.
-
-`decomb --version` confirms the install, and `decomb --help` lists the stages.
+PyYAML; `pip install -e ".[dev]"` adds pytest and ruff. `decomb --help` lists the stages and
+options.
 
 ## Quickstart
 
-Point `decomb` at a BIDS root and ask what is in it. Nothing is written to your data until
-`apply`, and `apply` will not run until `benchmark` has passed.
+Point `decomb` at a BIDS root and ask what is in it. Nothing is written until `apply`.
 
 ```bash
 decomb diagnose --bids-root data/bids --output-dir outputs/diagnosis
@@ -148,11 +143,10 @@ share of each band that is line artifact (median over subjects):
   gamma         21.00%  (worst subject 21.62%, 38 line(s) inside)
 ```
 
-Two numbers decide whether to go on. The **fundamental and its harmonic span** go into your
-config, because every later stage measures against the grid they define. The **share of each
-band** is what says whether removal is worth doing at all — here a fifth of gamma is line
-artifact and delta through alpha are untouched by it, so only the high bands have anything
-to gain.
+Two numbers decide whether to go on. The **fundamental and its harmonic span** define the
+grid every later stage measures against. The **share of each band** says whether removal is
+worth doing at all: here a fifth of gamma is line artifact and delta through alpha are
+untouched by it, so only the high bands have anything to gain.
 
 Copy the packaged [`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml`, set what
 `diagnose` just reported, then run the rest against that one file:
@@ -173,8 +167,7 @@ passed 3/3 runs
   in-band probe survival           median 0.002, worst 0.000 (measurement, not a criterion)
 ```
 
-`benchmark` injects known signals into your own recordings, removes the lines, and measures
-what came back. Only then will the write run:
+Only then will the write run:
 
 ```bash
 decomb apply --config decomb.yaml
@@ -187,15 +180,12 @@ median suppression 10.1 dB; worst residual line 12.31 dB
   declared data/bids_decombed/dataset_description.json a derivative of data/bids
 ```
 
-`apply` refuses unless a `benchmark` recorded under the same settings passed on the same
-recordings — the fingerprint is checked, so loosening a criterion and re-running invalidates
-the certificate rather than inheriting it. `verify` then re-sweeps what was written under
-FDR control, knowing nothing about where the targets were.
+The settings fingerprint is what ties the two together, so loosening a criterion and
+re-running invalidates the certificate rather than inheriting it.
 
-The transcripts above are real, from three 300 s synthetic recordings carrying a known
-1.2 Hz comb, with the paths shortened. [`docs/make_figure.py`](docs/make_figure.py) builds
-that dataset and runs these same stages, so the whole sequence is reproducible without any
-data of your own:
+These transcripts are real, from three 300 s synthetic recordings carrying a known 1.2 Hz
+comb, paths shortened. [`docs/make_figure.py`](docs/make_figure.py) builds that dataset and
+runs these same stages, so the sequence is reproducible without data of your own:
 
 ```bash
 python docs/make_figure.py --keep /tmp/decomb-demo
@@ -213,18 +203,18 @@ decomb notch        # optional: wide notch over cluster bands
 decomb psd          # before-and-after spectra
 ```
 
-Every stage reads the same config file and takes the same options, so a run is described by
-one file and the few overrides you gave it:
+Every stage takes the same options, so a run is described by one config and the few
+overrides you gave it:
 
-- `--config PATH` — which config to read. Defaults to `./decomb.yaml`, then the packaged
-  defaults; `DECOMB_CONFIG` does the same thing.
+- `--config PATH` — defaults to `./decomb.yaml`, then the packaged defaults. `DECOMB_CONFIG`
+  does the same.
 - `--bids-root PATH` — the source root, without editing the config.
 - `--output-root PATH` — where `apply` puts the cleaned copy.
-- `--output-dir PATH` and `--report-dir PATH` — where the catalogue and the tables go.
-- `--filter-length` and `--mt-bandwidth` — override the removal geometry for one run.
+- `--output-dir PATH`, `--report-dir PATH` — where the catalogue and the tables go.
+- `--filter-length`, `--mt-bandwidth` — override the removal geometry for one run.
 
 `--subjects sub-01 sub-02` restricts `diagnose` and `psd` to a subset, and is refused by
-`benchmark`, `apply`, `verify` and `notch` on purpose. Their criteria are decided over the
+`benchmark`, `apply`, `verify` and `notch` on purpose: their criteria are decided over the
 recordings jointly, so a subset could neither certify a dataset nor leave the output root in
 a state the provenance describes.
 
@@ -234,48 +224,43 @@ from one only `notch` can.
 ## What each stage writes
 
 Everything is TSV, so every number a stage decided on can be read without the tool that
-wrote it. Locations come from `paths` in the config; `diagnosis_dir` and `removal_dir`
-default to `outputs/diagnosis` and `outputs/removal`.
+wrote it. Locations come from `paths`; `diagnosis_dir` and `removal_dir` default to
+`outputs/diagnosis` and `outputs/removal`.
 
-**`diagnose`** fills the diagnosis directory. `lines.tsv` carries one row per detection: its
-refined frequency, its prominence with the bootstrap interval, its half-power width, the
-q-value that admitted it, how many subjects it appeared in, which comb harmonic it is, and
-where it falls on the `k/TR` grid. `comb.tsv` holds the fitted fundamental and spacing, the
-harmonics supporting them, and the scatter about the fitted grid. `lines_per_band.tsv` and
-`band_impact.tsv` are the per-band counts and the share of each band that is line artifact —
-the numbers printed at the end of the run. `spectra.npz` keeps the spectra the sweep saw.
+**`diagnose`** writes `lines.tsv`, one row per detection: refined frequency, prominence with
+its bootstrap interval, half-power width, the q-value that admitted it, how many subjects
+carried it, its comb harmonic, and where it falls on the `k/TR` grid. `comb.tsv` holds the
+fitted fundamental and spacing, the supporting harmonics, and the scatter about the grid.
+`lines_per_band.tsv` and `band_impact.tsv` are the per-band counts and artifact shares
+printed at the end of the run; `spectra.npz` keeps the spectra the sweep saw.
 
-**`benchmark`** writes `benchmark.tsv` into the removal directory: one row per recording,
-carrying every criterion, the control it was measured against, its p-value, and the settings
-fingerprint that a later `apply` has to match.
+**`benchmark`** writes `benchmark.tsv`: one row per recording with every criterion, the
+control it was measured against, its p-value, and the settings fingerprint.
 
-**`apply`** writes the cleaned BIDS copy to `output_root`, with the `.eeg` binaries rewritten
-and every sidecar byte-identical to the source. Its `dataset_description.json` carries the
-`GeneratedBy` provenance — version, settings fingerprint, the full parameter set, and the
-measured band cost. `removal_manifest.tsv` records one row per recording: the fundamental
-used, the target counts, the suppression and residual statistics, the read-back check, and
-the digests tying the write to its benchmark.
+**`apply`** writes the cleaned copy to `output_root`, `.eeg` binaries rewritten and every
+sidecar byte-identical. Its `dataset_description.json` carries the `GeneratedBy` provenance —
+version, fingerprint, full parameter set, measured band cost. `removal_manifest.tsv` records
+per recording the fundamental used, the target counts, the suppression and residual
+statistics, the read-back check, and the digests tying the write to its benchmark.
 
-**`verify`** writes `verification.tsv`, the blind re-sweep of what was written set beside the
-same sweep of the original, with the verdict, and `verification_spectra.npz` beside it.
+**`verify`** writes `verification.tsv`, the blind re-sweep set beside the same sweep of the
+original, plus `verification_spectra.npz`.
 
 **`report`** writes `band_outcomes.tsv` (artifact share per band, before and after),
-`per_subject_line_residual.tsv` (what survived at each target, per subject) and the summary
-figure `removal_before_after.png`. **`psd`** writes overall, tiled and per-recording spectra;
-**`notch`**, if you ran it, writes `notch_manifest.tsv` for the bands taken wholesale.
+`per_subject_line_residual.tsv` (what survived at each target, per subject) and
+`removal_before_after.png`. **`psd`** writes overall, tiled and per-recording spectra;
+**`notch`** writes `notch_manifest.tsv`.
 
-`apply` stages the whole derivative in a hidden directory and moves it into place only after
-every recording has been written and read back within
-`removal.roundtrip_relative_tolerance`, so an interrupted run cannot leave a half-cleaned
-dataset behind. `removal_manifest.tsv` is written into both `removal_dir` and the output
-root, so the cleaned copy always carries its own record of what was done to it.
+`apply` stages the derivative in a hidden directory and moves it into place only once every
+recording has been written and read back within `removal.roundtrip_relative_tolerance`, so
+an interrupted run cannot leave a half-cleaned dataset. `removal_manifest.tsv` goes to both
+`removal_dir` and the output root, so the copy carries its own record of what was done to it.
 
 ## Configuration
 
 One file, and it holds everything. Copy the packaged
-[`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml` in your working directory and
-change what you need — your file is merged over the defaults, so it only has to contain the
-keys you are changing. Use `--config PATH` or `DECOMB_CONFIG` to put it elsewhere.
+[`defaults.yaml`](src/decomb/defaults.yaml) to `decomb.yaml` and change what you need — your
+file is merged over the defaults, so it only has to contain the keys you are changing.
 
 Every parameter the workflow uses appears in that file: the detector's band and FDR level,
 the comb fit's tolerances, the removal geometry, the injected probe, the acceptance
@@ -537,9 +522,9 @@ is not: a control displaced from the real targets subtracts almost nothing and l
 nothing, while leakage from the real transform scales with the power it removed, so the
 real transform "fails" against it simply for having removed something.
 
-Both are therefore reported beside their controls and nothing is decided from either. The
-numbers are still worth reading — they typically sit orders of magnitude below any
-threshold one would be tempted to set — but they are measurements, not passes.
+Both are therefore reported beside their controls and decided from neither. The numbers are
+worth reading — they typically sit orders of magnitude below any threshold one would be
+tempted to set — but they are measurements, not passes.
 
 **One derived bound.** `transient_preserved` comes from the instrument and the transform,
 not from the data: a Gaussian burst of duration σ spans about `4/(2πσ)` hertz, crossing a
