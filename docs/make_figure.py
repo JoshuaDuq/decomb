@@ -75,9 +75,9 @@ PANELS = (
     ("alpha", 8.0, 12.9),
     ("beta", 13.0, 30.0),
     ("gamma", 30.1, 80.0),
-    ("above the analysed bands", 80.0, 99.0),
+    ("", 80.0, 99.0),
 )
-"""One panel per analysed band, plus the span the removal reaches past them.
+"""One panel per analysed band, plus the unnamed span the removal reaches past them.
 
 Drawing 1-100 Hz on a single axis puts several frequency bins in every pixel, so a comb
 line 1.2 Hz from its neighbour is sub-pixel: such a figure can show that the lines went
@@ -85,6 +85,36 @@ and cannot show whether they went surgically. A panel per band is about one bin 
 which is what it takes to see the shape of an individual notch -- and it puts the result
 in the units the analyses are actually reported in.
 """
+
+BEFORE_COLOR = "#EF8F6C"
+AFTER_COLOR = "#2A78D6"
+"""Two hues, checked for separation under protanopia and deuteranopia rather than chosen.
+
+Weight carries the same distinction a second time: the before trace is thick and sits
+underneath, the after trace is thin and sits on top, so the pair reads as one line emerging
+from another even where colour does not survive -- printing, projection, a colourblind
+reader.
+"""
+
+TITLE_INK = "#111827"
+MUTED_INK = "#6B7280"
+FAINT_INK = "#9CA3AF"
+AXIS_INK = "#D1D5DB"
+GRID = "#E9EBEF"
+
+CALLOUT_INK = "#334155"
+CALLOUT_FILL = "#F8FAFC"
+CALLOUT_EDGE = "#94A3B8"
+"""Slate, not red. These two peaks are the removal behaving correctly, and a warning colour
+would say the opposite of what the annotation says."""
+
+LABEL_STRIP = 0.55
+"""Headroom added above the data, as a fraction of the panel's own span, on panels that
+carry a callout. It buys a clear strip across the top of the panel that no trace enters."""
+
+LABEL_Y = 0.81
+"""Where the callouts sit, in axes fractions. Inside the strip ``LABEL_STRIP`` opens: with
+that headroom the data reaches 0.66, and a two-line box centred here spans 0.70 to 0.92."""
 
 
 def _background(rng, times):
@@ -272,92 +302,116 @@ def draw(freqs, before, after, path: Path) -> dict[str, tuple[float, float]]:
         "mains": prominence_at(freqs, after_db, background_db, MAINS_HZ),
     }
 
-    figure, axes = plt.subplots(3, 2, figsize=(13.5, 8.6), layout="constrained")
+    figure, axes = plt.subplots(3, 2, figsize=(13.5, 8.8), layout="constrained")
     flat = axes.ravel()
 
     for axis, (name, low_hz, high_hz) in zip(flat, PANELS):
         inside = (freqs >= low_hz) & (freqs <= high_hz)
-        axis.plot(freqs[inside], before_db[inside], color="#F3A28E", lw=2.4)
-        axis.plot(freqs[inside], after_db[inside], color="#111827", lw=0.7)
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", color=GRID, lw=0.6)
+        for side, spine in axis.spines.items():
+            spine.set_visible(side in ("left", "bottom"))
+            spine.set_color(AXIS_INK)
+        axis.plot(
+            freqs[inside], before_db[inside], color=BEFORE_COLOR, lw=2.6, solid_capstyle="round"
+        )
+        axis.plot(freqs[inside], after_db[inside], color=AFTER_COLOR, lw=0.9)
         axis.set_xlim(low_hz, high_hz)
-        axis.tick_params(labelsize=8)
+        axis.tick_params(labelsize=8, colors=MUTED_INK, length=3, width=0.8)
 
-        # Headroom for the labels, so they never sit on top of the trace.
+        # Where a survivor is labelled the panel gets a clear strip above the data, wide
+        # enough that the box sits entirely inside it: nothing is drawn over the trace.
+        labelled = [key for key, (hz, _) in survivors.items() if low_hz <= hz <= high_hz]
         low_db = float(np.nanmin(after_db[inside]))
         high_db = float(np.nanmax(before_db[inside]))
-        # Extra headroom where a survivor is labelled, so the box never sits on the data.
-        headroom = 0.42 if any(low_hz <= hz <= high_hz for hz, _ in survivors.values()) else 0.16
-        axis.set_ylim(low_db - 0.04 * (high_db - low_db), high_db + headroom * (high_db - low_db))
+        span = high_db - low_db
+        headroom = LABEL_STRIP if labelled else 0.12
+        axis.set_ylim(low_db - 0.05 * span, high_db + headroom * span)
 
-        axis.text(
-            0.012,
-            0.965,
-            f"{name}   {low_hz:g}-{high_hz:g} Hz",
-            transform=axis.transAxes,
-            fontsize=9,
-            va="top",
-            color="#374151",
+        # Band name and change count ride above the frame rather than inside it, so no
+        # panel has text competing with its own trace for the same pixels.
+        axis.set_title(
+            f"{name}   {low_hz:g}–{high_hz:g} Hz" if name else f"{low_hz:g}–{high_hz:g} Hz",
+            loc="left",
+            fontsize=9.5,
+            color=TITLE_INK,
+            pad=6,
         )
         touched = np.abs(before_db[inside] - after_db[inside]) > 1.0
-        axis.text(
-            0.988,
-            0.965,
+        axis.set_title(
             "unchanged" if not touched.any() else f"{int(touched.sum())} bins moved >1 dB",
-            transform=axis.transAxes,
+            loc="right",
             fontsize=8,
-            ha="right",
-            va="top",
-            color="#6B7280",
+            color=FAINT_INK,
+            pad=7,
         )
 
         # The annotations are the point of the figure: a tool that removes everything it
         # can find is easy to write and impossible to trust. Both survivors sit in gamma.
         # The text is placed in axes coordinates and the arrow tip in data coordinates, so
-        # a label can never escape its panel and push the layout around.
-        for key, text, x_frac, y_frac in (
+        # a label can never escape its panel and push the layout around; the two boxes are
+        # given halves of the strip, which is what keeps them off each other.
+        for key, text, x_frac in (
             (
                 "rhythm",
                 f"a rhythm {2.355 * RHYTHM_SD_HZ:.1f} Hz wide on harmonic "
-                f"{round(RHYTHM_HZ / FUNDAMENTAL_HZ)}:\nthe line inside it went, "
-                "the rhythm did not\n(too broad to be a line)",
-                0.27,
-                0.78,
+                f"{round(RHYTHM_HZ / FUNDAMENTAL_HZ)}\n"
+                "the line inside it went, the rhythm did not",
+                0.24,
             ),
             (
                 "mains",
-                f"{survivors['mains'][0]:.2f} Hz, +{survivors['mains'][1]:.1f} dB\n"
-                "inside the mains band,\nwhich `notch` takes whole",
-                0.75,
-                0.78,
+                f"{survivors['mains'][0]:.2f} Hz, +{survivors['mains'][1]:.1f} dB, "
+                "inside the mains band\nwhich `notch` takes whole",
+                0.70,
             ),
         ):
-            peak_hz, _ = survivors[key]
-            if not low_hz <= peak_hz <= high_hz:
+            if key not in labelled:
                 continue
+            peak_hz, _ = survivors[key]
             peak_db = float(after_db[int(np.argmin(np.abs(freqs - peak_hz)))])
             axis.annotate(
                 text,
                 xy=(peak_hz, peak_db),
                 xycoords="data",
-                xytext=(x_frac, y_frac),
+                xytext=(x_frac, LABEL_Y),
                 textcoords="axes fraction",
                 fontsize=7.5,
-                color="#7F1D1D",
+                color=CALLOUT_INK,
                 ha="center",
                 va="center",
-                bbox=dict(boxstyle="round,pad=0.3", fc="#FEF2F2", ec="#FCA5A5", lw=0.7),
-                arrowprops=dict(arrowstyle="->", color="#B91C1C", lw=1.0, shrinkB=4),
+                linespacing=1.5,
+                bbox=dict(boxstyle="round,pad=0.45", fc=CALLOUT_FILL, ec=CALLOUT_EDGE, lw=0.7),
+                arrowprops=dict(
+                    arrowstyle="-|>",
+                    color=CALLOUT_EDGE,
+                    lw=0.9,
+                    shrinkB=5,
+                    patchA=None,
+                ),
             )
 
-    flat[0].plot([], [], color="#F3A28E", lw=2.4, label="before removal")
-    flat[0].plot([], [], color="#111827", lw=0.7, label="after removal")
-    flat[0].legend(loc="lower left", fontsize=8, framealpha=0.9)
-    figure.supxlabel("frequency (Hz)", fontsize=10)
-    figure.supylabel("median PSD (dB re 1 V²/Hz)", fontsize=10)
+    # Inside the first panel rather than beside the title: an outside legend competes with
+    # the suptitle for the same strip, and the delta panel's lower left is empty in every
+    # spectrum this figure can produce -- the trace falls left to right.
+    flat[0].legend(
+        handles=[
+            plt.Line2D([], [], color=BEFORE_COLOR, lw=2.6, label="before removal"),
+            plt.Line2D([], [], color=AFTER_COLOR, lw=1.4, label="after removal"),
+        ],
+        loc="lower left",
+        frameon=False,
+        fontsize=8.5,
+        labelcolor=TITLE_INK,
+        handlelength=2.2,
+    )
+    figure.supxlabel("frequency (Hz)", fontsize=10, color=TITLE_INK)
+    figure.supylabel("median PSD (dB re 1 V²/Hz)", fontsize=10, color=TITLE_INK)
     figure.suptitle(
         f"A {FUNDAMENTAL_HZ} Hz comb removed from three synthetic recordings, "
         "one panel per analysed band. Two peaks are left standing on purpose.",
-        fontsize=11,
+        fontsize=11.5,
+        color=TITLE_INK,
     )
 
     change = after_db - before_db
