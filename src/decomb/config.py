@@ -20,6 +20,7 @@ to the working directory.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,19 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
+        elif value is None and isinstance(merged.get(key), dict):
+            # `benchmark:\n  probe:` followed by nothing but comments reads as null, and
+            # replacing the block with it would discard every default underneath while
+            # looking, in the file, like a section the author had deliberately left alone.
+            # The settings then in force would be the dataclass defaults rather than the
+            # ones the config appears to describe. Refuse instead: an empty block is always
+            # a mistake, because deleting the key does the same thing and says so.
+            raise ValueError(
+                f"`{key}` is empty in the config file. An empty block is read as null and "
+                f"would replace the {len(merged[key])} default(s) under `{key}` rather "
+                "than leaving them in place. Delete the key to inherit them, or give it "
+                "the settings you meant to change."
+            )
         else:
             merged[key] = value
     return merged
@@ -53,6 +67,16 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def _read_yaml(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
+
+
+def _dotted_keys(document: Mapping[str, Any], prefix: str = "") -> Iterator[str]:
+    """Every leaf of a nested mapping, as ``removal.estimation_window_s``."""
+    for key, value in document.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, Mapping) and value:
+            yield from _dotted_keys(value, f"{path}.")
+        else:
+            yield path
 
 
 def resolve_config_path(config_path: str | Path | None = None) -> Path | None:
@@ -80,6 +104,26 @@ class DecombConfig:
 
     source: Path | None
     data: dict[str, Any] = field(default_factory=dict)
+    overridden: frozenset[str] = frozenset()
+    """Dotted keys the user's file set, as opposed to inheriting from the packaged defaults.
+
+    Kept so a run can say where each value came from. A config file shows what someone
+    changed; it does not show what is in force, because most of what is in force was never
+    written down anywhere the user looked.
+    """
+
+    def provenance(self, key: str) -> str:
+        """Where the value at a dotted key came from."""
+        if key in self.overridden:
+            return str(self.source) if self.source else "config"
+        return "packaged defaults"
+
+    def effective(self) -> list[tuple[str, Any, str]]:
+        """Every setting in force, with its value and where it came from."""
+        return [
+            (key, self.get(key), self.provenance(key))
+            for key in sorted(_dotted_keys(self.data))
+        ]
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read a dotted key, e.g. ``removal.estimation_window_s``."""
@@ -112,6 +156,9 @@ def load_config(config_path: str | Path | None = None) -> DecombConfig:
     """Load the packaged defaults and merge the user's file over them."""
     data = _read_yaml(DEFAULTS_PATH)
     source = resolve_config_path(config_path)
+    overridden: frozenset[str] = frozenset()
     if source is not None:
-        data = _deep_merge(data, _read_yaml(source))
-    return DecombConfig(source=source, data=data)
+        user = _read_yaml(source)
+        overridden = frozenset(_dotted_keys(user))
+        data = _deep_merge(data, user)
+    return DecombConfig(source=source, data=data, overridden=overridden)

@@ -3725,10 +3725,22 @@ def run(args: argparse.Namespace) -> None:
         overrides["mt_bandwidth"] = args.mt_bandwidth
     if overrides:
         settings = replace(settings, **overrides)
-    print(f"settings: {settings}")
-
     runs = discover_runs(args.bids_root, subjects=None, task=settings.task)
     args.report_dir.mkdir(parents=True, exist_ok=True)
+
+    # A repr of the settings object was the whole record of what a run used. It omits every
+    # value the workflow computes, and it says nothing about which of the rest the user
+    # chose and which they inherited without knowing. Both belong in the outputs.
+    from decomb import effective
+
+    written = effective.write(
+        config,
+        settings,
+        args.report_dir / f"effective_config_{args.stage}.txt",
+        stage=args.stage,
+    )
+    print(effective.summarise(config, settings))
+    print(f"  wrote {written}")
 
     if args.stage == "verify":
         print(f"Verifying all {len(runs)} runs")

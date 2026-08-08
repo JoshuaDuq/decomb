@@ -109,6 +109,19 @@ def run(args: argparse.Namespace) -> None:
 
     settings = remove.RemovalSettings.from_config(config)
     detection = catalogue.DetectionSettings.from_config(config)
+
+    from decomb import effective
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written = effective.write(
+        config,
+        settings,
+        output_dir / "effective_config_diagnose.txt",
+        stage="diagnose",
+    )
+    print(effective.summarise(config, settings))
+    print(f"  wrote {written}")
+
     dataset = config.get("dataset") or {}
     tr_seconds = dataset.get("tr_seconds")
     tr_seconds = None if tr_seconds is None else float(tr_seconds)
