@@ -99,8 +99,6 @@ BENCHMARK_OVERRIDES = {
     },
     "gate": {
         "min_burst_correlation": 0.95,
-        "min_intrinsic_energy_ratio": 0.7,
-        "max_intrinsic_energy_ratio": 1.2,
     },
 }
 
@@ -188,7 +186,7 @@ def test_the_probe_and_the_gate_are_configurable(tmp_path):
     assert benchmark.broadband_probe_channels == 2
     assert benchmark.probe.sinusoid_hz == (30.0, 50.0)
     assert benchmark.probe.burst_hz == 45.0
-    assert benchmark.gate.min_intrinsic_energy_ratio == 0.7
+    assert benchmark.gate.min_burst_correlation == 0.95
 
 
 def test_the_notch_stage_reads_its_own_parameters(tmp_path):
@@ -279,7 +277,7 @@ def test_the_benchmark_criteria_are_inside_the_settings_fingerprint(tmp_path):
     """A benchmark run under looser criteria must not be able to certify an apply."""
     strict = remove.RemovalSettings.from_config(_config(tmp_path, {}))
     loose = remove.RemovalSettings.from_config(
-        _config(tmp_path, {"benchmark": {"gate": {"min_intrinsic_energy_ratio": 0.1}}})
+        _config(tmp_path, {"benchmark": {"gate": {"min_burst_correlation": 0.5}}})
     )
 
     assert remove.settings_fingerprint(strict) != remove.settings_fingerprint(loose)

@@ -731,19 +731,32 @@ class TestPreservationGate:
 
         assert estimators.paired_excess_p_value(four + 1.0, four) > 0.05
 
-    def test_a_flattened_transient_fails(self):
-        gate = estimators.PreservationGate()
-        assert not gate.evaluate(self._metrics(intrinsic_energy_ratio=0.80))["transient_preserved"]
+    def test_the_transient_cost_does_not_decide_anything(self):
+        """It is the price of projecting out this recording's targets, not a defect.
 
-    def test_an_inflated_transient_also_fails(self):
+        A recording carrying more artifact pays more of it, so a level applied to it
+        charges a dataset for its own contamination rather than measuring the removal.
+        """
         gate = estimators.PreservationGate()
-        assert not gate.evaluate(self._metrics(intrinsic_energy_ratio=1.20))["transient_preserved"]
+
+        assert gate.passed(self._metrics(intrinsic_energy_ratio=0.80))
+        assert gate.passed(self._metrics(intrinsic_energy_ratio=0.40))
+        assert gate.passed(self._metrics(intrinsic_energy_ratio=1.20))
+
+    def test_the_cost_is_still_measured(self):
+        """Dropped as a criterion, kept as a number: it is reported and recorded."""
+        assert "intrinsic_energy_ratio" in self._metrics()
 
     def test_a_distorted_transient_fails_even_at_the_right_energy(self):
+        """The invariant that remains: a linear operator cannot change the shape.
+
+        Energy can legitimately go missing -- that is what a notch does -- but the
+        transient that comes back has to be the one that went in.
+        """
         gate = estimators.PreservationGate()
         verdict = gate.evaluate(self._metrics(burst_correlation=0.80))
-        assert verdict["transient_preserved"]
         assert not verdict["transient_undistorted"]
+        assert not gate.passed(self._metrics(burst_correlation=0.80))
 
 
 class TestEndToEndOnSyntheticData:

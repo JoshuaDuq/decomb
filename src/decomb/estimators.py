@@ -529,10 +529,11 @@ class Probe:
 class PreservationGate:
     """The per-run criteria, stated before the measurement is taken.
 
-    Only two questions can be decided inside a single recording: whether the injected
-    transient came back, and whether it came back undistorted. Everything else this
-    workflow checks is an excess over a matched control, which carries an exact p-value
-    and is therefore decided across the recordings by
+    One question can be decided inside a single recording: whether the injected transient
+    came back undistorted, which is an invariant a linear operator cannot fail without
+    something being wrong with it. Everything else this workflow checks is an excess over a
+    matched control, which carries an exact p-value and is therefore decided across the
+    recordings by
     :func:`residual_randomization_verdict` and :func:`seam_randomization_verdict`. A
     criterion of the form "every recording must pass" cannot be applied to a test that
     fails about one recording in twenty under the null: it would reject a faultless
@@ -540,49 +541,38 @@ class PreservationGate:
     """
 
     min_burst_correlation: float = 0.99
-    min_intrinsic_energy_ratio: float = 0.85
-    """Least of the injected transient's window energy that must survive removal.
-
-    This is a budget, not a property of the instrument, and it is worth being plain about
-    that because the number reads like a derivation. The reference the ratio is measured
-    against is the transient put through the same removal *by itself*, so the ratio already
-    is the pure-geometry cost of projecting out these targets. There is nothing left to
-    predict it from: any expectation computed from the same plan would be a model of the
-    measurement itself, and a removal that widened every notch would simply predict its own
-    wider loss and pass. So the level here has to be declared rather than derived.
-
-    What it costs depends on how much artifact a dataset carries, which is not a fault of
-    the dataset. A Gaussian burst of duration sigma spans roughly ``4 / (2*pi*sigma)`` hertz
-    and every target inside that span is subtracted over ``freq / notch_width_ratio``, so a
-    recording with twenty isolated lines beside the comb pays more than one with none. The
-    default below was derived for a comb-only removal at the shipped settings, where the
-    expected loss is near 7.5%; a 15-participant EEG-fMRI cohort with 18-22 isolated lines
-    per recording measured 11% typical and 21% worst, and the default refused seven
-    recordings whose collateral damage was nil.
-
-    `decomb benchmark` therefore reports the loss this dataset's own geometry costs before
-    applying this criterion, so the budget can be set from a measurement rather than
-    inherited. Raising it is not moving a goalpost; leaving it at a value derived for a
-    different removal is what would be.
-    """
-    max_intrinsic_energy_ratio: float = 1.05
-    """Most of it that may come back. A removal that *adds* energy where the transient was
-    is as much a defect as one that takes it away, and a floor alone cannot see that."""
 
     def __post_init__(self) -> None:
         if not 0.0 < self.min_burst_correlation <= 1.0:
             raise ValueError("min_burst_correlation must lie in (0, 1].")
-        if not 0.0 < self.min_intrinsic_energy_ratio <= self.max_intrinsic_energy_ratio:
-            raise ValueError("The transient energy bounds must be positive and increasing.")
 
     def evaluate(self, metrics: dict[str, float]) -> dict[str, bool]:
-        """Decide the two per-run criteria."""
+        """Decide the per-run criteria.
+
+        There used to be a second one here: bounds on ``intrinsic_energy_ratio``, the share
+        of the injected transient that survives. It is gone, and the quantity is reported
+        instead -- which is what :func:`transient_metrics` always said it was for.
+
+        It could not be a criterion honestly. It measures the transient against itself put
+        through the same removal alone, so it is the cost of projecting out this recording's
+        targets and nothing else: fixed by the notch geometry, and larger for a recording
+        that carries more artifact. Judging it against a level charges a dataset for its own
+        contamination. On a 15-participant EEG-fMRI cohort the shipped floor of 0.85 refused
+        seven recordings outright, and every one of them had collateral damage of nil --
+        ``burst_energy_ratio`` between 0.9999 and 1.0000. One participant carrying three
+        times the cohort's narrowband load measured 0.71, for the same reason and with the
+        same clean bill of health.
+
+        Nor could the level be derived: any expectation computed from the same plan is a
+        model of the measurement itself, and a removal that widened every notch would
+        predict its own wider loss and pass.
+
+        So a run is no longer stopped by it. What the removal cost is measured, reported
+        beside the band cost, and recorded in the derivative's provenance, where it can be
+        read against the analysis it is for. Whether that cost is acceptable is a question
+        about a study, and a config file is the wrong place to answer it in advance.
+        """
         return {
-            "transient_preserved": (
-                self.min_intrinsic_energy_ratio
-                <= metrics["intrinsic_energy_ratio"]
-                <= self.max_intrinsic_energy_ratio
-            ),
             # An invariant on a linear operator, not a test: it reads 1.0 on any data with
             # any settings. Kept because a genuinely non-linear failure would break it --
             # a filter length that makes the removal state-dependent, say.

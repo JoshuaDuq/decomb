@@ -3618,50 +3618,33 @@ def _resolve_probe_placement(
     )
 
 
-def _explain_transient_budget(frame: pd.DataFrame, settings: RemovalSettings) -> None:
-    """Say what the transient criterion cost this dataset, and what to do when it refuses.
+def _report_transient_cost(frame: pd.DataFrame) -> None:
+    """Report what the removal cost the injected transient, and which part of it is a defect.
 
-    ``min_intrinsic_energy_ratio`` is the one criterion whose right value depends on how
-    much artifact a dataset carries rather than on the removal being correct, so a refusal
-    here does not mean the same thing as a refusal anywhere else. Reporting only "3/89
-    passed" leaves a user to discover that themselves, and the obvious reading -- that the
-    removal damaged their data -- is the wrong one when the loss is what projecting out
-    their own targets costs.
+    Two different losses, and only one of them means anything is wrong. The share that does
+    not survive is the price of projecting out this recording's targets, and it rises with
+    how much artifact the recording carries. The departure of the recovered transient from
+    the same transient cleaned alone is what the removal did by interacting with the data,
+    and that is the part that would be a fault.
+
+    Reporting them together is the point: a large cost beside a collateral figure of 1.0
+    means the recording had a lot of artifact, not that the removal misbehaved, and the two
+    numbers are what distinguish those cases.
     """
     ratios = frame["intrinsic_energy_ratio"]
-    floor = settings.benchmark.gate.min_intrinsic_energy_ratio
-    failing = frame.loc[~frame["gate_transient_preserved"].astype(bool)]
-
-    print(
-        f"  {'transient cost (geometry)':32s} "
-        f"median {1 - ratios.median():.1%} of the burst lost, worst {1 - ratios.min():.1%}; "
-        f"budget allows {1 - floor:.1%}"
-    )
-    if failing.empty:
-        return
-
+    collateral = frame["burst_energy_ratio"]
     lines = frame["n_isolated_sources"]
+
     print(
-        f"\n{len(failing)} of {len(frame)} recording(s) exceeded the transient budget.\n"
-        f"  This criterion is a declared budget, not a measurement of correctness: the\n"
-        f"  transient is compared against itself put through the same removal alone, so\n"
-        f"  the figure is what projecting out this dataset's targets costs. Recordings\n"
-        f"  here carry {lines.min()}-{lines.max()} isolated lines beside the comb, and every\n"
-        f"  one inside the burst's band takes a share of it.\n"
-        f"  Worst recording keeps {failing['intrinsic_energy_ratio'].min():.3f} against a "
-        f"floor of {floor:.3f}.\n"
-        f"  Check `burst_energy_ratio` in benchmark.tsv before changing anything: it\n"
-        f"  compares the transient recovered from the recording against that same\n"
-        f"  reference, so it isolates damage the removal did by interacting with the\n"
-        f"  data. Here it reads "
-        f"{frame['burst_energy_ratio'].min():.4f}-{frame['burst_energy_ratio'].max():.4f}.\n"
-        f"  If that is at 1.0 the removal is behaving; the budget is the thing that does\n"
-        f"  not fit this dataset, and belongs in your config as an explicit choice:\n"
-        f"    benchmark:\n"
-        f"      gate:\n"
-        f"        min_intrinsic_energy_ratio: {np.floor(ratios.min() * 100) / 100:.2f}\n"
-        f"  If it is below 1.0 the removal is losing signal it should not, and the floor\n"
-        f"  is not the problem."
+        f"  {'transient cost (measurement)':32s} "
+        f"median {1 - ratios.median():.1%} of the burst lost to the notches, "
+        f"worst {1 - ratios.min():.1%} "
+        f"({lines.min()}-{lines.max()} isolated lines per recording)"
+    )
+    print(
+        f"  {'collateral damage (measurement)':32s} "
+        f"recovered/reference {collateral.min():.4f}-{collateral.max():.4f}; "
+        f"1.0 is a removal that took only what its notches specify"
     )
 
 
@@ -3823,7 +3806,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"\npassed {int(frame.gate_passed.sum())}/{len(frame)} runs")
         for column in gate_columns:
             print(f"  {column:32s} {int(frame[column].sum())}/{len(frame)}")
-        _explain_transient_budget(frame, settings)
+        _report_transient_cost(frame)
         seam = estimators.seam_randomization_verdict(
             _seam_evidence_from_frame(frame), alpha=settings.seam_alpha
         )

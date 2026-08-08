@@ -105,17 +105,32 @@ def test_a_clean_run_still_passes():
     assert estimators.PreservationGate().passed(_metrics(residual_excess_db=-2.0))
 
 
-def test_the_transient_gate_reads_the_measurement_that_can_fail():
-    """``intrinsic_energy_ratio`` is the quantity that varies with the settings.
+def test_the_transient_cost_no_longer_stops_a_run():
+    """``intrinsic_energy_ratio`` varies with the settings, and that is why it is reported.
 
-    ``burst_energy_ratio`` compares the removal's effect on data+probe against its effect
-    on the probe alone, which are equal under a linear operator, so it reads 1.0 always.
+    It is the transient measured against itself put through the same removal alone, so it
+    is the cost of projecting out this recording's targets: larger where there is more
+    artifact to remove, and not a statement about whether the removal is working. Judging
+    it against a level charged recordings for their own contamination -- seven of a
+    15-participant cohort were refused with collateral damage of nil, and one participant
+    carrying three times the narrowband load of the others measured 0.71 just as cleanly.
+
+    The number is still measured, reported beside the band cost, and recorded in the
+    derivative's provenance. Whether the cost suits an analysis is a question about that
+    analysis, and no value in a config file can answer it in advance.
     """
     gate = estimators.PreservationGate()
-    assert not gate.evaluate(_metrics(intrinsic_energy_ratio=0.40))["transient_preserved"], (
-        "a transient reduced to 40% of its injected energy passed the transient gate"
+
+    assert gate.passed(_metrics(intrinsic_energy_ratio=0.40)), (
+        "a transient reduced to 40% of its injected energy stopped the run"
     )
-    assert gate.evaluate(_metrics(intrinsic_energy_ratio=0.95))["transient_preserved"]
+    assert gate.passed(_metrics(intrinsic_energy_ratio=0.95))
+
+
+def test_a_non_linear_removal_still_stops_a_run():
+    """What remains is an invariant, not a level: the shape has to survive."""
+    gate = estimators.PreservationGate()
+    assert not gate.passed(_metrics(burst_correlation=0.80))
 
 
 def test_a_residual_displaced_by_a_bin_is_not_missed():

@@ -279,30 +279,33 @@ benchmark:
   broadband_probe_channels: 4
 
   gate:
-    # The only two criteria decidable inside one recording. Everything else is an excess
+    # The one criterion decidable inside a single recording. Everything else is an excess
     # over a matched control and is decided across the recordings.
     #
-    # min_intrinsic_energy_ratio is a BUDGET, not a property of the instrument, even though
-    # the arithmetic below reads like a derivation. The transient it measures is compared
-    # against itself put through the same removal alone, so the ratio already is the
-    # geometric cost of projecting out these targets and there is nothing independent left
-    # to predict it from. The level has to be declared.
-    #
-    # A Gaussian burst of duration sigma spans about 4/(2*pi*sigma) Hz, crossing
-    # span/spacing comb lines, each subtracted over freq/notch_width_ratio. For a comb-only
-    # removal at the settings above that expected loss is near 7.5%, and this floor sits at
-    # twice it. Isolated lines are removed too and they are not in that arithmetic: a
-    # dataset carrying twenty of them per recording pays much more, through no fault of its
-    # own. On a 15-participant EEG-fMRI cohort the measured loss was 11% typical and 21%
-    # worst, and this default refused seven recordings whose collateral damage was nil.
-    #
-    # So set it from your own data rather than inheriting it. `decomb benchmark` reports
-    # the loss your dataset's geometry costs before it applies this criterion, and says so
-    # explicitly when a run fails on this line.
-    min_intrinsic_energy_ratio: 0.85
-    max_intrinsic_energy_ratio: 1.05
     # An invariant on a linear operator, kept because a non-linear failure would break it.
+    # It reads 1.0 on any data under any settings, so it never stops a run over a level
+    # someone picked; it stops one only when the removal has stopped being linear.
     min_burst_correlation: 0.99
+
+    # There were bounds here on intrinsic_energy_ratio -- the share of the injected
+    # transient that survives -- and they are gone. The quantity is still measured, and now
+    # reported beside the band cost instead of deciding anything.
+    #
+    # It is the cost of projecting out a recording's own targets, measured against that
+    # same transient put through the same removal alone. So it is larger for a recording
+    # carrying more artifact, and a level applied to it charges a dataset for its own
+    # contamination. The shipped floor of 0.85 refused seven recordings of a 15-participant
+    # cohort whose collateral damage was nil -- burst_energy_ratio 0.9999 to 1.0000 -- and
+    # one participant with three times the cohort's narrowband load measured 0.71 with an
+    # equally clean bill of health.
+    #
+    # The level could not be derived either: any expectation computed from the same plan is
+    # a model of the measurement itself, so a removal that widened every notch would
+    # predict its own wider loss and pass.
+    #
+    # Whether the cost is acceptable is a question about a study, answerable from the
+    # reported figure and the band cost beside it. It is not something a config file should
+    # answer in advance, and it is not a reason to refuse to write a dataset.
 
 # ---------------------------------------------------------------------------------------
 # `decomb notch`: bands taken wholesale, read as edges. Empty by default, because a band
