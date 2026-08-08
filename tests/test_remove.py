@@ -173,6 +173,7 @@ def test_continuous_refinement_encodes_an_unmasked_focal_line(monkeypatch):
             statistic[0, np.argmin(np.abs(freqs - 27.7))] = 20.0
         return freqs, statistic, 10.0, np.where(statistic > 10.0, 1e-9, 0.5)
 
+    monkeypatch.setattr(remove, "_authorize_channel_targets", _authorize_every_channel)
     monkeypatch.setattr(remove.estimators, "thomson_f_statistics", fake_statistics)
     monkeypatch.setattr(
         remove,
@@ -243,6 +244,33 @@ def _flat_f_statistics(_data, **_kwargs):
     return freqs, np.zeros((2, freqs.size)), 10.0, np.full((2, freqs.size), 0.5)
 
 
+def _authorize_every_channel(raw, plan, _settings):
+    """Stand in for authorization, which these tests are not about.
+
+    Residual planning runs after a plan has been authorized per channel. Which targets
+    survive that step is decided elsewhere and tested there; here it only has to have
+    happened, or there is no first pass for a residual to be left over from.
+    """
+    import dataclasses
+
+    import mne
+
+    n_channels = len(mne.pick_types(raw.info, eeg=True, exclude=()))
+    return dataclasses.replace(
+        plan,
+        windows=tuple(
+            dataclasses.replace(
+                window,
+                channel_targets_hz=tuple(window.targets_hz for _ in range(n_channels)),
+                channel_target_widths_hz=tuple(
+                    window.notch_widths_hz for _ in range(n_channels)
+                ),
+            )
+            for window in plan.windows
+        ),
+    )
+
+
 def test_residual_planning_never_consults_the_preservation_gate(monkeypatch):
     """The gate judges the removal, so it must not also choose what the removal takes.
 
@@ -262,6 +290,7 @@ def test_residual_planning_never_consults_the_preservation_gate(monkeypatch):
         verbose="ERROR",
     )
     plan = _single_window_plan(200)
+    monkeypatch.setattr(remove, "_authorize_channel_targets", _authorize_every_channel)
     monkeypatch.setattr(remove.estimators, "thomson_f_statistics", _flat_f_statistics)
     monkeypatch.setattr(remove.estimators, "PreservationGate", ForbiddenGate)
     monkeypatch.setattr(remove, "_clean_planned_segment", lambda data, *a, **k: np.asarray(data))
@@ -295,6 +324,7 @@ def test_residual_planning_leaves_power_without_a_significant_sinusoid(monkeypat
         verbose="ERROR",
     )
     plan = _single_window_plan(n_times)
+    monkeypatch.setattr(remove, "_authorize_channel_targets", _authorize_every_channel)
     monkeypatch.setattr(remove.estimators, "thomson_f_statistics", _flat_f_statistics)
     monkeypatch.setattr(
         remove, "_clean_planned_segment", lambda data, *a, **k: np.asarray(data) + bump
@@ -328,6 +358,7 @@ def test_residual_removal_never_reaches_a_channel_without_evidence(monkeypatch):
         statistic[:, np.argmin(np.abs(freqs - 27.7))] = 20.0
         return freqs, statistic, 10.0, np.where(statistic > 10.0, 1e-9, 0.5)
 
+    monkeypatch.setattr(remove, "_authorize_channel_targets", _authorize_every_channel)
     monkeypatch.setattr(remove.estimators, "thomson_f_statistics", shared_statistics)
     monkeypatch.setattr(remove, "_clean_planned_segment", lambda data, *a, **k: np.asarray(data))
 
@@ -379,44 +410,110 @@ def test_continuous_residual_support_reaches_every_overlapping_synthesis_window(
     assert routed.windows[2].channel_residual_targets_hz[0] == ()
 
 
-def _comb_window_plan(n_times: int) -> remove.RunRemovalPlan:
-    """One window carrying the whole fitted comb as its candidate targets."""
+def _comb_window_plan(n_times: int, n_windows: int = 1) -> remove.RunRemovalPlan:
+    """Non-overlapping windows, each carrying the whole fitted comb as candidate targets."""
     estimate = _estimate_for_study_test()
     targets = estimate.harmonic_positions_hz
+    span = n_times // n_windows
     return remove.RunRemovalPlan(
         model=None,
-        windows=(
+        windows=tuple(
             remove.AdaptiveWindowRemovalPlan(
-                bounds=(0, n_times),
+                bounds=(index * span, (index + 1) * span),
                 estimate=estimate,
                 targets_hz=targets,
                 notch_widths_hz=tuple(0.2 for _ in targets),
                 narrow_targets_hz=(),
-            ),
+            )
+            for index in range(n_windows)
         ),
     )
 
 
-def test_channel_authorization_asks_only_about_the_targets_it_was_given():
-    """A line the comb fit already planned must not need whole-grid significance.
+def _comb_recording(n_windows, window_s, *, comb_windows, comb_channels, n_channels=2):
+    """Pink background on every channel; the comb only where it is asked for."""
+    import mne
 
-    The multiplicity of this test is the target list, not the spectrum: the fit has
-    already said where to look, and each target's neighbourhood is one test because the
-    multitaper bandwidth is wider than the reach searched around it. Corrected against
-    every bin instead, a real line an order of magnitude over the noise is dropped, and
-    the plan quietly stops removing what it planned to remove.
+    sampling_frequency_hz = 250.0
+    span = int(sampling_frequency_hz * window_s)
+    n_times = span * n_windows
+    times = np.arange(n_times) / sampling_frequency_hz
+
+    rng = np.random.default_rng(11)
+    spectrum = np.fft.rfft(rng.normal(size=(n_channels, n_times)), axis=-1)
+    frequencies = np.fft.rfftfreq(n_times, 1.0 / sampling_frequency_hz)
+    frequencies[0] = frequencies[1]
+    data = np.fft.irfft(spectrum / np.sqrt(frequencies), n=n_times, axis=-1) * 3e-8
+
+    live = np.zeros(n_times, dtype=bool)
+    for index in comb_windows:
+        live[index * span : (index + 1) * span] = True
+    for harmonic in range(24, 80):
+        tone = 3.281e-10 * np.sin(2.0 * np.pi * 1.2 * harmonic * times + harmonic)
+        for channel in comb_channels:
+            data[channel] += tone * live
+
+    raw = mne.io.RawArray(
+        data,
+        mne.create_info([f"EEG{i:02d}" for i in range(n_channels)], sampling_frequency_hz, "eeg"),
+        verbose="ERROR",
+    )
+    return raw, n_times
+
+
+def test_authorization_is_channel_specific_and_not_decided_window_by_window():
+    """A channel that carries the comb keeps it; a channel that does not gets nothing.
+
+    Channel specificity is the whole reason this stage exists, and it is the axis a
+    54-second window has least power on. Deciding per window discards the run's evidence
+    and leaves the comb's weaker harmonics standing in the channels that do carry them.
+    """
+    raw, n_times = _comb_recording(3, 54.0, comb_windows=range(3), comb_channels=[0])
+
+    authorized = remove._authorize_channel_targets(
+        raw, _comb_window_plan(n_times, n_windows=3), remove.RemovalSettings()
+    )
+
+    for window in authorized.windows:
+        assert len(window.channel_targets_hz[0]) >= 50
+        assert window.channel_targets_hz[1] == ()
+
+
+def test_authorization_follows_a_comb_that_switches_on_partway_through():
+    """The window a comb is absent from must subtract nothing, without a mode to select.
+
+    Presence in time and presence in a channel are different questions. One generator
+    drives every harmonic, so whether the comb is running in a window is answerable by
+    pooling across harmonics -- with far more power than testing each harmonic alone.
+    """
+    raw, n_times = _comb_recording(3, 54.0, comb_windows=[1, 2], comb_channels=[0, 1])
+
+    authorized = remove._authorize_channel_targets(
+        raw, _comb_window_plan(n_times, n_windows=3), remove.RemovalSettings()
+    )
+
+    assert all(targets == () for targets in authorized.windows[0].channel_targets_hz)
+    for window in authorized.windows[1:]:
+        assert all(len(targets) >= 50 for targets in window.channel_targets_hz)
+
+
+def test_a_comb_the_recording_does_not_carry_authorizes_nothing():
+    """One line where a comb was planned is not a comb, and nothing is subtracted for it.
+
+    The plan can only name these targets because at least `min_harmonics_for_fit`
+    harmonics were mutually consistent across the run, so a window showing one line and
+    fifty-five bins of noise is a window the generator was not running in. Deciding that
+    per harmonic could never see it; pooling the harmonics against each other does.
     """
     import mne
 
     sampling_frequency_hz = 250.0
     n_times = int(sampling_frequency_hz * 54.0)
     times = np.arange(n_times) / sampling_frequency_hz
-    planted_hz = 40.8
-    quiet_hz = 55.2
 
     rng = np.random.default_rng(7)
     data = rng.normal(size=(2, n_times)) * 1e-6
-    data += 6e-8 * np.sin(2.0 * np.pi * planted_hz * times)
+    data += 6e-8 * np.sin(2.0 * np.pi * 40.8 * times)
     raw = mne.io.RawArray(
         data,
         mne.create_info(["Cz", "Pz"], sampling_frequency_hz, "eeg"),
@@ -426,10 +523,8 @@ def test_channel_authorization_asks_only_about_the_targets_it_was_given():
     authorized = remove._authorize_channel_targets(
         raw, _comb_window_plan(n_times), remove.RemovalSettings()
     )
-    window = authorized.windows[0]
 
-    assert all(planted_hz in targets for targets in window.channel_targets_hz)
-    assert not any(quiet_hz in targets for targets in window.channel_targets_hz)
+    assert all(targets == () for targets in authorized.windows[0].channel_targets_hz)
 
 
 def _estimate_for_study_test():

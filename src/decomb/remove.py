@@ -2403,7 +2403,13 @@ def _refine_window_residual_plan(
     What licenses a subtraction here is ``estimators.ResidualDetection`` -- Thomson's F test on
     the first pass's own output -- and never the tolerance the benchmark will judge the
     result by. See that class for why the two have to stay apart.
+
+    A window that authorized nothing is returned untouched. A residual is what a subtraction
+    left behind, so a window that subtracted nothing has none to find, and searching its
+    neighbourhoods would be searching around targets that were never taken.
     """
+    if not window.targets_hz:
+        return window
     sampling_frequency_hz = float(picked_info["sfreq"])
     residual_width_hz = 2.0 * max(
         sampling_frequency_hz / original.shape[1],
@@ -2615,77 +2621,194 @@ def _route_continuous_residual_support(plan: RunRemovalPlan) -> RunRemovalPlan:
     return replace(plan, windows=tuple(routed))
 
 
+def _grid_accuracy_note(plan: RunRemovalPlan, settings: RemovalSettings) -> str:
+    """Say so when the fit places its harmonics less precisely than a bin.
+
+    Authorization tests the one bin a target names, which is exact only while the target is
+    where the fit says it is. The fit already measures how far its worst harmonic sits from
+    the grid it derived, so the case where that assumption weakens is knowable in advance
+    rather than after a line survives. It is reported, not acted on: whether a fit this
+    loose should still be used is a question about a recording, and nothing here can answer
+    it by refusing.
+    """
+    residuals = [
+        float(window.estimate.max_abs_residual_hz)
+        for window in plan.windows
+        if window.estimate is not None and np.isfinite(window.estimate.max_abs_residual_hz)
+    ]
+    if not residuals:
+        return ""
+    worst = max(residuals)
+    resolution = spectral.hann_resolution_hz(settings.estimation_window_s)
+    if worst <= resolution:
+        return ""
+    return (
+        f", fit places harmonics to {worst * 1e3:.0f} mHz against a "
+        f"{resolution * 1e3:.0f} mHz resolution -- targets that far off carry no evidence "
+        "at the bin they name"
+    )
+
+
+def _independent_window_indices(windows: Sequence[AdaptiveWindowRemovalPlan]) -> tuple[int, ...]:
+    """A maximal set of windows that share no samples, by the same rule line support uses.
+
+    `estimation_window_s` windows advance by half their length, so consecutive windows hold
+    the same data twice and their statistics are not two observations of it. Pooling needs
+    the subset that is.
+    """
+    chosen: list[int] = []
+    previous_stop = -1
+    for index in sorted(range(len(windows)), key=lambda item: windows[item].bounds[1]):
+        start, stop = windows[index].bounds
+        if start >= previous_stop:
+            chosen.append(index)
+            previous_stop = stop
+    return tuple(sorted(chosen))
+
+
+def _canonical_targets(
+    plan: RunRemovalPlan,
+    settings: RemovalSettings,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One entry per line the run plans against, and whether it is a comb member.
+
+    Each window fits its own estimate, so the same physical line is named at slightly
+    different frequencies from window to window. Grouping them within `line_claim_hz` --
+    the spectrum a resolved line already claims for itself -- is what lets a line's evidence
+    be pooled across the windows at all.
+    """
+    entries = sorted(
+        (float(target), target in window.narrow_targets_hz)
+        for window in plan.windows
+        for target in window.targets_hz
+    )
+    centres: list[float] = []
+    narrow: list[bool] = []
+    group: list[float] = []
+    group_narrow = False
+    for frequency, is_narrow in (*entries, (np.inf, False)):
+        if group and frequency - group[0] > settings.line_claim_hz:
+            centres.append(float(np.mean(group)))
+            narrow.append(group_narrow)
+            group, group_narrow = [], False
+        if np.isfinite(frequency):
+            group.append(frequency)
+            group_narrow = group_narrow or is_narrow
+    return np.asarray(centres, dtype=float), np.asarray(narrow, dtype=bool)
+
+
 def _authorize_channel_targets(
     raw,
     plan: RunRemovalPlan,
     settings: RemovalSettings,
 ) -> RunRemovalPlan:
-    """Authorize candidate targets independently in every EEG channel and window.
+    """Decide, per channel, which planned lines to subtract and in which windows.
 
-    The question here is not the one MNE's automatic detector asks. That detector sweeps a
-    whole spectrum for lines nobody named, so its family is every frequency it might have
-    stopped at, and the critical value `thomson_f_statistics` returns carries that
-    correction. This function is handed a target list the comb fit has already produced:
-    it asks, of each named frequency, whether this channel carries a line there. The family
-    is that list.
+    Two questions live here and they are not the same question. Whether a channel carries a
+    line is a property of the run; whether the artifact was running at all is a property of
+    a window. Asked together, in one test per (window x channel) cell, both are asked where
+    the data has least power -- and a real 12 dB comb loses half its harmonics to windows
+    that named them and then vetoed them.
 
-    The gap between the two is not a detail. The shipped correction is Bonferroni over one
-    sample per time point -- 13500 of them in a 54 s window at 250 Hz -- against 56 comb
-    harmonics actually being asked about, and it costs about a factor of two in the
-    critical value. Applied to a 1.2 Hz comb standing 12 dB over its background, it
-    authorised roughly half of the (window x channel) decisions and left the rest of the
-    comb in the recording: the plan named the harmonic, the window vetoed it, and the
-    residual criterion in `apply` then refused the whole cohort over lines the removal had
-    been asked to take.
+    They are separate marginals of one array of statistics, so each is asked where its
+    evidence is:
 
-    Each target counts once rather than once per bin, because the reach searched around it
-    is narrower than the multitaper bandwidth: `residual_search_hz` spans 0.3 Hz against a
-    0.6 Hz bandwidth, so the statistics inside a reach are one test seen several times, not
-    several tests.
+    * a window's verdict pools across the comb's harmonics. One generator drives all of
+      them, which is the premise the comb fit already rests on, so a window carries dozens
+      of observations of whether the artifact is running. A comb that starts partway
+      through a recording is found by this and by nothing else here.
+    * a line's verdict pools across the windows the artifact was running in, per channel.
+
+    Ordering them is what makes a channel that carries nothing authorize nothing: no window
+    of such a channel passes the first test, so there is nothing left to pool and no
+    threshold is asked to notice.
+
+    The statistic is the probability at the single bin the target names, and that is not a
+    matter of taste. `thomson_f_statistics` gives an exact probability per bin; taking the
+    smallest over a reach turns 16 near-independent bins into one number and inflates the
+    false-positive rate 13x, measured on three recordings of a 63-channel EEG-fMRI cohort.
+    A per-window threshold can absorb that. Pooling cannot: the bias compounds once per
+    window while a Bonferroni correction divides once, so a widened reach places notches on
+    demonstrably empty spectrum -- 160 of 423 such places at a three-bin reach against none
+    at one bin. Refining the target first is the same error moved upstream, and doubles the
+    null rate.
+
+    What this gives up is lines that sit further from where the fit places them than one
+    bin can reach: 0.3% of the lines standing 10 dB or more over background on that cohort.
+    What it buys is that the places carrying nothing are left alone -- 102, 170 and 156
+    notches on sub-threshold spectrum, per recording, become 0, 0 and 5.
     """
     import mne
+    from scipy.stats import chi2
 
     picks = mne.pick_types(raw.info, eeg=True, exclude=())
     if len(picks) == 0:
         raise ValueError("Channel target authorization requires at least one EEG channel.")
     sampling_frequency_hz = float(raw.info["sfreq"])
-    authorized_windows = []
-    for window in plan.windows:
+    n_channels = len(picks)
+    n_windows = len(plan.windows)
+    centres, is_narrow = _canonical_targets(plan, settings)
+    alpha = settings.residual_family_alpha
+
+    # [window, line, channel], at the one bin each line names.
+    probabilities = np.ones((n_windows, centres.size, n_channels), dtype=float)
+    for index, window in enumerate(plan.windows):
         start, stop = window.bounds
         data = raw.get_data(picks=picks, start=start, stop=stop)
-        frequencies, _, _, probabilities = estimators.thomson_f_statistics(
+        frequencies, _, _, per_bin = estimators.thomson_f_statistics(
             data,
             sampling_frequency_hz=sampling_frequency_hz,
             bandwidth_hz=settings.mt_bandwidth,
-            family_alpha=settings.residual_family_alpha,
+            family_alpha=alpha,
         )
-        level = settings.residual_family_alpha / max(len(window.targets_hz), 1)
+        bins = [int(np.argmin(np.abs(frequencies - centre))) for centre in centres]
+        probabilities[index] = per_bin[:, bins].T
+    probabilities = np.clip(probabilities, np.finfo(float).tiny, 1.0)
+
+    def fisher(values: np.ndarray, axis: int) -> np.ndarray:
+        """Combined probability of independent tests, ordered as the remaining axes."""
+        return chi2.sf(-2.0 * np.log(values).sum(axis=axis), 2 * values.shape[axis])
+
+    # A window carries the comb if its harmonics say so together. Isolated lines are left
+    # out: one of them standing is no evidence that the comb generator is running.
+    comb = ~is_narrow if int((~is_narrow).sum()) >= 2 else np.ones(centres.size, dtype=bool)
+    running = fisher(probabilities[:, comb, :], axis=1) < alpha / max(n_windows * n_channels, 1)
+
+    # Pool only windows that share no samples, and only those the comb was running in.
+    independent = set(_independent_window_indices(plan.windows))
+    carries = np.zeros((centres.size, n_channels), dtype=bool)
+    for channel in range(n_channels):
+        live = [index for index in np.flatnonzero(running[:, channel]) if index in independent]
+        if not live:
+            continue
+        pooled = fisher(probabilities[live][:, :, channel], axis=0)
+        carries[:, channel] = pooled < alpha / max(centres.size, 1)
+
+    authorized_windows = []
+    for index, window in enumerate(plan.windows):
+        lines = [int(np.argmin(np.abs(centres - target))) for target in window.targets_hz]
         channel_targets = []
         channel_widths = []
-        for channel_index in range(data.shape[0]):
-            targets = []
-            widths = []
-            for target, width in zip(window.targets_hz, window.notch_widths_hz):
-                reach = max(float(width) / 2.0, settings.residual_search_hz)
-                inside = np.abs(frequencies - target) <= reach
-                if np.any(probabilities[channel_index, inside] < level):
-                    targets.append(float(target))
-                    widths.append(float(width))
-            channel_targets.append(tuple(targets))
-            channel_widths.append(tuple(widths))
+        for channel in range(n_channels):
+            # An isolated line is not the comb's to switch off: it answers to its own
+            # evidence across the run and to nothing the comb generator does.
+            keep = [
+                (float(target), float(width))
+                for target, width, line in zip(window.targets_hz, window.notch_widths_hz, lines)
+                if carries[line, channel] and (is_narrow[line] or running[index, channel])
+            ]
+            channel_targets.append(tuple(target for target, _ in keep))
+            channel_widths.append(tuple(width for _, width in keep))
         active_widths = {
-            float(target): float(width)
+            target: width
             for targets, widths in zip(channel_targets, channel_widths)
             for target, width in zip(targets, widths)
         }
         authorized_windows.append(
             replace(
                 window,
-                targets_hz=tuple(sorted(active_widths)) or window.targets_hz,
-                notch_widths_hz=(
-                    tuple(active_widths[target] for target in sorted(active_widths))
-                    or window.notch_widths_hz
-                ),
+                targets_hz=tuple(sorted(active_widths)),
+                notch_widths_hz=tuple(active_widths[target] for target in sorted(active_widths)),
                 channel_targets_hz=tuple(channel_targets),
                 channel_target_widths_hz=tuple(channel_widths),
             )
@@ -2779,7 +2902,8 @@ def build_run_plans(runs: list[Path], settings: RemovalSettings) -> dict[str, Ru
             print(
                 f"  {vhdr.stem}: {len(plan.windows)} adaptive windows, "
                 f"f0 range={plan.model.fundamental_range_hz * 1e6:.0f} uHz, "
-                f"max step={plan.model.max_adjacent_shift_hz * 1e6:.0f} uHz",
+                f"max step={plan.model.max_adjacent_shift_hz * 1e6:.0f} uHz"
+                f"{_grid_accuracy_note(plan, settings)}",
                 flush=True,
             )
     return plans
