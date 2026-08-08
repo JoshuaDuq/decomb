@@ -124,6 +124,18 @@ def test_measured_band_attenuation_counts_what_the_transform_did():
     assert attenuation["measured_band_attenuated_3db"] == pytest.approx(10 / freqs.size)
 
 
+def test_measured_band_attenuation_uses_the_worst_channel_for_safety():
+    freqs = np.arange(28.0, 95.0, 0.5)
+    before = np.zeros((4, freqs.size))
+    after = before.copy()
+    after[0, :10] = -2.0
+
+    attenuation = estimators.measured_band_attenuation(freqs, before, after)
+
+    assert attenuation["measured_band_attenuated_1db"] == pytest.approx(10 / freqs.size)
+    assert attenuation["measured_band_attenuated_1db_median"] == 0.0
+
+
 def test_measured_band_attenuation_ignores_gain_outside_the_band():
     freqs = np.arange(10.0, 120.0, 0.5)
     before = np.zeros((1, freqs.size))

@@ -210,6 +210,8 @@ def test_planned_segment_cleaning_leaves_the_callers_array_untouched():
         targets_hz=(57.25,),
         notch_widths_hz=(0.06,),
         narrow_targets_hz=(),
+        channel_targets_hz=((57.25,), (57.25,)),
+        channel_target_widths_hz=((0.06,), (0.06,)),
     )
 
     cleaned = remove._clean_planned_segment(data, info, window, remove.RemovalSettings())
@@ -1291,3 +1293,42 @@ def test_detected_lines_always_clear_the_estimator_guard():
     assert settings.detection_search_hz < estimators.LINE_CLAIM_HZ, (
         "a line the detector admits could still be refused by estimate_comb"
     )
+
+
+def test_sessioned_runs_are_grouped_by_participant(monkeypatch, tmp_path):
+    """Cohort spectra use BIDS participants, not session directory names."""
+    from decomb import diagnose
+
+    runs = []
+    for session, _value in (("ses-01", 0.0), ("ses-02", 10.0)):
+        directory = tmp_path / "sub-0001" / session / "eeg"
+        directory.mkdir(parents=True)
+        runs.append(directory / f"sub-0001_{session}_task-rest_eeg.vhdr")
+
+    values = {runs[0].name: 0.0, runs[1].name: 10.0}
+    monkeypatch.setattr(diagnose.remove, "read_bids_raw", lambda path: path)
+    freqs = np.array([1.0, 2.0])
+    monkeypatch.setattr(
+        diagnose.remove,
+        "run_spectrum",
+        lambda raw, settings: (
+            freqs,
+            np.array([values[raw.name], values[raw.name]]),
+            np.array([0.0, 0.0]),
+        ),
+    )
+
+    _, spectra, subjects = diagnose.subject_spectra(runs, remove.RemovalSettings())
+
+    assert subjects == ["sub-0001"]
+    assert spectra.shape == (1, 2)
+    assert spectra[0, 0] == pytest.approx((1.0 + 10.0) / 2.0)
+
+
+def test_verification_excludes_bands_owned_by_another_stage():
+    settings = remove.RemovalSettings(mains_notch_hz=(49.5, 50.5), exclude_mains=True)
+
+    assert remove.detection_exclusion_hz(settings) == (49.5, 50.5)
+    assert remove.detection_exclusion_hz(
+        remove.RemovalSettings(mains_notch_hz=(49.5, 50.5), exclude_mains=False)
+    ) is None

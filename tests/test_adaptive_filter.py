@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -130,6 +132,17 @@ def test_adaptive_cleaning_filters_each_window_plan_and_preserves_non_eeg(monkey
         settings=remove.RemovalSettings(),
     )
 
+    plan = replace(
+        plan,
+        windows=tuple(
+            replace(
+                window,
+                channel_targets_hz=(window.targets_hz,),
+                channel_target_widths_hz=(window.notch_widths_hz,),
+            )
+            for window in plan.windows
+        ),
+    )
     offsets = iter((1.0, 3.0))
 
     def fake_clean(segment, targets, **settings):
@@ -148,3 +161,44 @@ def test_adaptive_cleaning_filters_each_window_plan_and_preserves_non_eeg(monkey
     )[0]
     assert np.allclose(cleaned.get_data(picks=["Cz"])[0], expected_eeg)
     assert np.array_equal(cleaned.get_data(picks=["STI"])[0], data[1])
+
+
+def test_common_targets_are_authorized_per_channel():
+
+    import mne
+
+    sfreq = 100.0
+    n_times = 2_000
+    times = np.arange(n_times) / sfreq
+    line = 5e-6 * np.sin(2.0 * np.pi * 20.0 * times)
+    raw = mne.io.RawArray(
+        np.vstack((line, line)),
+        mne.create_info(["artifact", "neural"], sfreq, ["eeg", "eeg"]),
+        verbose="ERROR",
+    )
+    model = estimators.build_adaptive_comb_model(
+        _estimate(1.2),
+        (_estimate(1.2), _estimate(1.2)),
+    )
+    windows = tuple(
+        remove.AdaptiveWindowRemovalPlan(
+            bounds=bounds,
+            estimate=_estimate(1.2),
+            targets_hz=(20.0,),
+            notch_widths_hz=(0.1,),
+            narrow_targets_hz=(),
+            channel_targets_hz=((20.0,), ()),
+            channel_target_widths_hz=((0.1,), ()),
+        )
+        for bounds in ((0, 1_000), (1_000, 2_000))
+    )
+    plan = remove.RunRemovalPlan(model=model, windows=windows)
+
+    cleaned = remove.clean_continuous_raw(
+        raw,
+        plan,
+        remove.RemovalSettings(filter_length="5s", mt_bandwidth=0.6),
+    ).get_data()
+
+    assert np.sqrt(np.mean(cleaned[0] ** 2)) < 0.2 * np.sqrt(np.mean(line**2))
+    assert np.sqrt(np.mean(cleaned[1] ** 2)) > 0.9 * np.sqrt(np.mean(line**2))

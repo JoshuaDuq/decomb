@@ -27,10 +27,13 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from decomb import catalogue, estimators, spectral  # noqa: E402
-from decomb.remove import RemovalSettings, _write_tsv_atomic  # noqa: E402
-
-LINE_HALF_WIDTH_HZ = 0.15
-"""How much spectrum around a target counts as belonging to it, when charging a band."""
+from decomb.remove import (  # noqa: E402
+    RemovalSettings,
+    _write_tsv_atomic,
+    discover_runs,
+    settings_fingerprint,
+    source_input_digests,
+)
 
 
 def _artifact_frequencies(cell) -> tuple[float, ...]:
@@ -113,6 +116,7 @@ def artifact_share_by_subject(
     subject_targets: dict[str, tuple[float, ...]],
     subjects: tuple[str, ...],
     half_width_bins: int,
+    line_half_width_hz: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Line-excess share using each participant's own detected target set."""
     if psd.shape[0] != len(subjects):
@@ -132,7 +136,7 @@ def artifact_share_by_subject(
                 high_hz=band[1],
                 line_freqs=lines,
                 half_width_bins=half_width_bins,
-                line_half_width_hz=LINE_HALF_WIDTH_HZ,
+                line_half_width_hz=line_half_width_hz,
             )
             if lines
             else 0.0
@@ -178,6 +182,7 @@ def _per_subject_residuals(
 
 def build_report(
     removal_dir: Path,
+    source_root: Path,
     settings: RemovalSettings,
     bands: Mapping[str, Sequence[float]],
 ) -> dict:
@@ -186,7 +191,22 @@ def build_report(
         original = handle["original"]
         cleaned = handle["cleaned"]
         subjects = tuple(str(value) for value in handle["subjects"])
+        recorded_fingerprint = str(handle["settings_fingerprint"].item())
+        recorded_source_digest = str(handle["source_digest"].item())
+    expected_fingerprint = settings_fingerprint(settings)
+    if recorded_fingerprint != expected_fingerprint:
+        raise ValueError(
+            "Verification spectra were produced under different settings; rerun `verify`."
+        )
+    runs = discover_runs(source_root, subjects=None, task=settings.task)
+    input_digests, source_digest = source_input_digests(runs, source_root)
+    if recorded_source_digest != source_digest:
+        raise ValueError("Verification spectra are stale for the current BIDS source dataset.")
     manifest = pd.read_csv(removal_dir / "removal_manifest.tsv", sep="\t")
+    if set(manifest.get("settings_fingerprint", ())) != {expected_fingerprint}:
+        raise ValueError("Removal manifest does not match the current settings.")
+    if set(manifest.get("input_digest", ())) != set(input_digests.values()):
+        raise ValueError("Removal manifest does not match the verified BIDS source dataset.")
     subject_targets = subject_artifact_targets(manifest, subjects, settings)
 
     half_width = catalogue.half_width_bins(freqs, settings.background_half_width_hz)
@@ -194,10 +214,22 @@ def build_report(
     for name, (low, high) in sorted(bands.items(), key=lambda item: item[1][0]):
         band = (float(low), float(high))
         before, counts = artifact_share_by_subject(
-            freqs, original, band, subject_targets, subjects, half_width
+            freqs,
+            original,
+            band,
+            subject_targets,
+            subjects,
+            half_width,
+            settings.line_claim_hz,
         )
         after, _ = artifact_share_by_subject(
-            freqs, cleaned, band, subject_targets, subjects, half_width
+            freqs,
+            cleaned,
+            band,
+            subject_targets,
+            subjects,
+            half_width,
+            settings.line_claim_hz,
         )
         rows.append(
             {
@@ -294,12 +326,13 @@ def run(args: argparse.Namespace) -> None:
 
     config = load_config(getattr(args, "config", None))
     args.removal_dir = config.path("removal_dir", override=args.removal_dir)
+    source_root = config.path("bids_root")
 
     settings = RemovalSettings.from_config(config)
     bands = config.get("frequency_bands") or {}
     if not bands:
         raise ValueError("`frequency_bands` is empty, so there is nothing to report against.")
-    report = build_report(args.removal_dir, settings, bands)
+    report = build_report(args.removal_dir, source_root, settings, bands)
     _write_tsv_atomic(report["bands"], args.removal_dir / "band_outcomes.tsv")
     _write_tsv_atomic(
         report["per_subject_lines"], args.removal_dir / "per_subject_line_residual.tsv"

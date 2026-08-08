@@ -90,6 +90,7 @@ def test_artifact_share_uses_each_subjects_own_targets():
         {"sub-0001": (47.0,), "sub-0002": (94.0,)},
         ("sub-0001", "sub-0002"),
         half_width_bins=10,
+        line_half_width_hz=0.15,
     )
 
     assert np.all(shares > 0.0)

@@ -34,7 +34,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from decomb.spectral import fdr_bh, refine_peak_frequency, upper_tail_pvalues
+from decomb.spectral import fdr_by, refine_peak_frequency, upper_tail_pvalues
 
 NOMINAL_FUNDAMENTAL_HZ = 1.2
 """Where the comb search starts. A seed only -- every recording is measured.
@@ -107,11 +107,6 @@ inconsistent set of peaks forced onto a grid.
 #: index. Keep it well inside half the comb spacing, so one target is never charged with
 #: the next harmonic's line.
 RESIDUAL_SEARCH_HZ = 0.15
-
-MIN_BINS_FOR_NULL = 32
-"""Fewest bins a null can be fitted from; :func:`decomb.spectral.robust_null`'s own
-requirement."""
-
 
 @lru_cache(maxsize=32)
 def _thomson_tapers(
@@ -605,17 +600,11 @@ class BenchmarkSettings:
     These measure the opposite quantity to the others: how much of a narrowband signal
     coinciding with an artifact does not survive. Always reported, never gated.
     """
-    broadband_probe_channels: int = 4
-    """Channels of independent broadband noise put through the identical transform, which
-    is what the reported band cost is measured on."""
-
     def __post_init__(self) -> None:
         if not np.isfinite(self.min_probe_separation_hz) or self.min_probe_separation_hz <= 0.0:
             raise ValueError("min_probe_separation_hz must be finite and positive.")
         if self.in_band_probe_count < 1:
             raise ValueError("in_band_probe_count must be at least one.")
-        if self.broadband_probe_channels < 1:
-            raise ValueError("broadband_probe_channels must be at least one.")
 
     @classmethod
     def from_config(cls, block) -> BenchmarkSettings:
@@ -922,6 +911,14 @@ def build_adaptive_comb_model(
                 f"harmonics; at least {min_harmonics} are required."
             )
 
+    for index, estimate in enumerate(estimates):
+        if not (
+            np.isfinite(estimate.fundamental_hz)
+            and np.isfinite(estimate.fundamental_jackknife_se_hz)
+            and estimate.fundamental_jackknife_se_hz > 0.0
+        ):
+            raise ValueError(f"Adaptive window {index} has an invalid fundamental or uncertainty.")
+
     # Inheriting has to be the exception, or a recording whose comb is invisible throughout
     # would be removed from on a grid no window ever confirmed. The bound is that inherited
     # windows may not outnumber independently supported ones -- a majority, which needs no
@@ -936,13 +933,6 @@ def build_adaptive_comb_model(
             "own spectrum. A recording whose grid is this hard to see in its own windows "
             "is not one this removal should be trusted on."
         )
-        if not (
-            np.isfinite(estimate.fundamental_hz)
-            and np.isfinite(estimate.fundamental_jackknife_se_hz)
-            and estimate.fundamental_jackknife_se_hz > 0.0
-        ):
-            raise ValueError(f"Adaptive window {index} has an invalid fundamental or uncertainty.")
-
     frequencies = np.asarray(
         [estimate.fundamental_hz for estimate in estimates],
         dtype=float,
@@ -1072,6 +1062,8 @@ def admitted_summits(
     *,
     fdr_alpha: float | None = DETECTION_FDR_ALPHA,
     min_prominence_db: float | None = LINE_PROMINENCE_FLOOR_DB,
+    null_min_bins: int = 32,
+    null_lower_percentile: float = 15.865525393145702,
 ) -> np.ndarray:
     """Which summits are lines: FDR against a null fitted to line-free spectrum.
 
@@ -1096,14 +1088,23 @@ def admitted_summits(
         if not np.isfinite(fdr_alpha) or not 0.0 < fdr_alpha < 1.0:
             raise ValueError("fdr_alpha must lie strictly between zero and one.")
         tested = np.flatnonzero(searched & np.isfinite(prominence))
-        if tested.size < MIN_BINS_FOR_NULL:
+        if tested.size < null_min_bins:
             raise ValueError(
                 f"Only {tested.size} bins were searchable, fewer than the "
-                f"{MIN_BINS_FOR_NULL} a null can be fitted from. Widen the detection band, "
+                f"{null_min_bins} a null can be fitted from. Widen the detection band, "
                 "or set removal.detection_fdr_alpha to null and declare a prominence floor."
             )
         significant = np.zeros(prominence.shape, dtype=bool)
-        significant[tested] = fdr_bh(upper_tail_pvalues(prominence[tested])) < fdr_alpha
+        significant[tested] = (
+            fdr_by(
+                upper_tail_pvalues(
+                    prominence[tested],
+                    min_bins=null_min_bins,
+                    lower_percentile=null_lower_percentile,
+                )
+            )
+            < fdr_alpha
+        )
         admitted &= significant
     if min_prominence_db is not None:
         admitted &= prominence >= min_prominence_db
@@ -1127,6 +1128,8 @@ def detect_isolated_lines(
     max_line_width_hz: float = LINE_WIDTH_CEILING_HZ,
     claim_hz: float = LINE_CLAIM_HZ,
     excluded_bands_hz: Iterable[tuple[float, float]] = (),
+    null_min_bins: int = 32,
+    null_lower_percentile: float = 15.865525393145702,
 ) -> tuple[float, ...]:
     """Find this run's isolated lines in its own spectrum, without a cohort list.
 
@@ -1223,6 +1226,8 @@ def detect_isolated_lines(
         eligible,
         fdr_alpha=fdr_alpha,
         min_prominence_db=min_prominence_db,
+        null_min_bins=null_min_bins,
+        null_lower_percentile=null_lower_percentile,
     )
 
     indices = np.flatnonzero(candidate)
@@ -2007,6 +2012,7 @@ def measured_band_attenuation(
     psd_after: np.ndarray,
     *,
     band_hz: tuple[float, float] = (28.0, 95.0),
+    thresholds_db: tuple[float, float] = (1.0, 3.0),
 ) -> dict[str, float]:
     """Share of the analysis band a broadband probe actually loses to the removal.
 
@@ -2024,14 +2030,23 @@ def measured_band_attenuation(
     after = np.atleast_2d(np.asarray(psd_after, dtype=float))
     if before.shape != after.shape or before.shape[-1] != frequency_array.size:
         raise ValueError("Probe PSD arrays must match each other and the frequency grid.")
+    thresholds = np.asarray(thresholds_db, dtype=float)
+    if thresholds.shape != (2,) or not np.all(np.isfinite(thresholds)) or np.any(thresholds <= 0.0):
+        raise ValueError("thresholds_db must contain two finite positive values.")
+    if thresholds[0] >= thresholds[1]:
+        raise ValueError("thresholds_db must be increasing.")
     band = (frequency_array >= band_hz[0]) & (frequency_array <= band_hz[1])
     if not np.any(band):
         raise ValueError("The analysis band contains no frequency bins.")
-    loss_db = np.mean(before[:, band] - after[:, band], axis=0)
+    loss_db = before[:, band] - after[:, band]
     band_bin_count = int(np.count_nonzero(band))
+    per_channel_1db = np.mean(loss_db > thresholds[0], axis=1)
+    per_channel_3db = np.mean(loss_db > thresholds[1], axis=1)
     return {
-        "measured_band_attenuated_1db": float(np.mean(loss_db > 1.0)),
-        "measured_band_attenuated_3db": float(np.mean(loss_db > 3.0)),
+        "measured_band_attenuated_1db": float(np.max(per_channel_1db)),
+        "measured_band_attenuated_1db_median": float(np.median(per_channel_1db)),
+        "measured_band_attenuated_3db": float(np.max(per_channel_3db)),
+        "measured_band_attenuated_3db_median": float(np.median(per_channel_3db)),
         # A share of bins can only land on multiples of this, so a budget expressed as a
         # continuous fraction needs the same half-bin allowance the planned figure had.
         "measured_band_bin_size": 1.0 / band_bin_count,

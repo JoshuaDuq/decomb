@@ -25,6 +25,7 @@ REMOVAL_OVERRIDES = {
     "estimation_window_s": 61.0,
     "max_band_cost": 0.2,
     "cost_band_hz": [30.0, 90.0],
+    "band_cost_thresholds_db": [1.5, 3.5],
     "mains_notch_hz": [49.5, 50.5],
     "nominal_fundamental_hz": 1.5,
     "harmonic_range": [10, 40],
@@ -52,6 +53,8 @@ REMOVAL_OVERRIDES = {
     "n_seam_controls": 20,
     "roundtrip_relative_tolerance": 1.0e-5,
     "detection_fdr_alpha": 0.01,
+    "detection_null_min_bins": 40,
+    "detection_null_lower_percentile": 12.0,
     "detection_min_prominence_db": 12.0,
     "detection_adjacent_min_prominence_db": 11.0,
     "support_margin_hz": 0.02,
@@ -70,6 +73,10 @@ DETECTION_OVERRIDES = {
     "high_hz": 90.0,
     "background_half_width_hz": 5.5,
     "fdr_alpha": 0.01,
+    "null_min_bins": 40,
+    "null_lower_percentile": 12.0,
+    "comb_chance_sigma": 2.5,
+    "tr_tolerance_bins": 1.5,
     "comb_tolerance_hz": 0.05,
     "max_pair_spacing_hz": 8.0,
     "narrow_linewidth_ratio": 2.5,
@@ -86,7 +93,6 @@ DETECTION_OVERRIDES = {
 BENCHMARK_OVERRIDES = {
     "min_probe_separation_hz": 0.5,
     "in_band_probe_count": 6,
-    "broadband_probe_channels": 2,
     "probe": {
         "sinusoid_hz": [30.0, 50.0],
         "sinusoid_count": 3,
@@ -183,7 +189,6 @@ def test_the_probe_and_the_gate_are_configurable(tmp_path):
 
     assert benchmark.min_probe_separation_hz == 0.5
     assert benchmark.in_band_probe_count == 6
-    assert benchmark.broadband_probe_channels == 2
     assert benchmark.probe.sinusoid_hz == (30.0, 50.0)
     assert benchmark.probe.burst_hz == 45.0
     assert benchmark.gate.min_burst_correlation == 0.95

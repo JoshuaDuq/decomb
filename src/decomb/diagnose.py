@@ -24,9 +24,9 @@ power sits above the local background at the lines, per subject. A comb carrying
 of the gamma band is worth a transform; one carrying a percent of it is not.
 
 With ``dataset.tr_seconds`` set, every line is additionally placed on the ``k / TR`` grid
-of a periodic acquisition running alongside the EEG. A line locked to that grid comes
-from the acquisition; one that is not, does not -- which is what separates an imaging
-artifact from an environmental one.
+of a periodic acquisition running alongside the EEG. Grid alignment is descriptive evidence
+of synchronization, not proof of physical source; attribution still requires acquisition and
+recording context.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def subject_spectra(runs, settings: remove.RemovalSettings) -> tuple[np.ndarray,
     freqs = None
     by_subject: dict[str, list[np.ndarray]] = {}
     for vhdr in runs:
-        subject = vhdr.parent.parent.name
+        subject = remove._subject_of(vhdr)
         raw = remove.read_bids_raw(vhdr)
         run_freqs, spectrum_db, _ = remove.run_spectrum(raw, settings)
         if freqs is None:
@@ -138,7 +138,7 @@ def run(args: argparse.Namespace) -> None:
         lines = catalogue.detect_cohort_lines(
             grid,
             detection,
-            exclude_hz=settings.mains_notch_hz if settings.exclude_mains else None,
+            exclude_hz=remove.detection_exclusion_hz(settings),
             tr_seconds=tr_seconds,
         )
     except catalogue.NoLinesDetected:

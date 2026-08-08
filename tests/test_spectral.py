@@ -106,24 +106,24 @@ class TestRobustNull:
 class TestFdr:
     def test_uniform_pvalues_yield_few_discoveries(self):
         rng = np.random.default_rng(3)
-        qvalues = spectral.fdr_bh(rng.uniform(size=5000))
+        qvalues = spectral.fdr_by(rng.uniform(size=5000))
         assert np.sum(qvalues < 0.05) == 0
 
     def test_strong_signal_survives(self):
         pvalues = np.concatenate([np.full(10, 1e-12), np.linspace(0.05, 1.0, 990)])
-        qvalues = spectral.fdr_bh(pvalues)
+        qvalues = spectral.fdr_by(pvalues)
         assert np.sum(qvalues < 0.05) == 10
 
     def test_monotone_in_the_sorted_order(self):
         rng = np.random.default_rng(4)
         pvalues = rng.uniform(size=200)
-        qvalues = spectral.fdr_bh(pvalues)
+        qvalues = spectral.fdr_by(pvalues)
         order = np.argsort(pvalues)
         assert np.all(np.diff(qvalues[order]) >= -1e-12)
 
     def test_rejects_out_of_range(self):
         with pytest.raises(ValueError, match="inside"):
-            spectral.fdr_bh([0.5, 1.5])
+            spectral.fdr_by([0.5, 1.5])
 
 
 class TestClusterPeaks:

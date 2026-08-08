@@ -48,7 +48,11 @@ class DetectionSettings:
     """Band swept for lines. Set it to the span your analyses read."""
     background_half_width_hz: float = BACKGROUND_HALF_WIDTH_HZ
     fdr_alpha: float = 0.05
-    """False discovery rate the sweep is controlled at."""
+    """Screening level after dependence-robust empirical-null correction."""
+    null_min_bins: int = 32
+    null_lower_percentile: float = 15.865525393145702
+    comb_chance_sigma: float = 2.0
+    tr_tolerance_bins: float = 1.0
     comb_tolerance_hz: float = 0.06
     """How near an integer multiple a line must sit to count as a comb member."""
     max_pair_spacing_hz: float = 12.0
@@ -94,6 +98,9 @@ class DetectionSettings:
             raise ValueError("fdr_alpha must lie strictly between zero and one.")
         for name in (
             "background_half_width_hz",
+            "null_lower_percentile",
+            "comb_chance_sigma",
+            "tr_tolerance_bins",
             "comb_tolerance_hz",
             "max_pair_spacing_hz",
             "narrow_linewidth_ratio",
@@ -107,6 +114,8 @@ class DetectionSettings:
                 raise ValueError(f"detection.{name} must be finite and positive.")
         if self.narrow_linewidth_ratio > self.wide_member_ratio:
             raise ValueError("narrow_linewidth_ratio cannot exceed wide_member_ratio.")
+        if self.null_min_bins < 2:
+            raise ValueError("null_min_bins must be at least two.")
         if self.max_subharmonic_divisor < 1:
             raise ValueError("max_subharmonic_divisor must be at least one.")
         if self.bootstrap_resamples < 2:
@@ -124,7 +133,12 @@ class DetectionSettings:
                 f"Unknown `detection` setting(s): {sorted(unknown)}. Known settings are "
                 f"{sorted(known)}."
             )
-        integers = {"max_subharmonic_divisor", "bootstrap_resamples", "bootstrap_seed"}
+        integers = {
+            "max_subharmonic_divisor",
+            "bootstrap_resamples",
+            "bootstrap_seed",
+            "null_min_bins",
+        }
         return cls(
             **{
                 name: int(value) if name in integers else float(value)
@@ -228,8 +242,12 @@ def detect_cohort_lines(
     cohort = np.full(grid.freqs.size, np.nan)
     cohort[candidates] = grid.subject_prominence[:, candidates].mean(axis=0)
 
-    pvalues = spectral.upper_tail_pvalues(cohort[candidates])
-    qvalues = spectral.fdr_bh(pvalues)
+    pvalues = spectral.upper_tail_pvalues(
+        cohort[candidates],
+        min_bins=settings.null_min_bins,
+        lower_percentile=settings.null_lower_percentile,
+    )
+    qvalues = spectral.fdr_by(pvalues)
     significant = np.zeros(grid.freqs.size, dtype=bool)
     significant[candidates] = qvalues < settings.fdr_alpha
     q_by_bin = np.ones(grid.freqs.size)
@@ -245,7 +263,14 @@ def detect_cohort_lines(
     for index in range(grid.subject_prominence.shape[0]):
         values = grid.subject_prominence[index, candidates]
         subject_significant[index, candidates] = (
-            spectral.fdr_bh(spectral.upper_tail_pvalues(values)) < settings.fdr_alpha
+            spectral.fdr_by(
+                spectral.upper_tail_pvalues(
+                    values,
+                    min_bins=settings.null_min_bins,
+                    lower_percentile=settings.null_lower_percentile,
+                )
+            )
+            < settings.fdr_alpha
         )
 
     # A percentile bootstrap resamples the sampling unit, so a single participant has no
@@ -299,7 +324,12 @@ def detect_cohort_lines(
                 "tr_harmonic": -1 if position is None else position.harmonic_index,
                 "tr_offset_hz": np.nan if position is None else position.offset_hz,
                 "on_tr_comb": (
-                    False if position is None else bool(abs(position.offset_hz) < grid.bin_width_hz)
+                    False
+                    if position is None
+                    else bool(
+                        abs(position.offset_hz)
+                        < settings.tr_tolerance_bins * grid.bin_width_hz
+                    )
                 ),
             }
         )
@@ -350,6 +380,7 @@ def comb_structure(
             max_divisor=settings.max_subharmonic_divisor,
             min_gain=settings.min_subharmonic_gain,
             search_fraction=settings.spacing_search_fraction,
+            chance_sigma=settings.comb_chance_sigma,
         )
 
     if members.sum() >= 3:

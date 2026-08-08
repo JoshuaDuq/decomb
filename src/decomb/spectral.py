@@ -148,7 +148,12 @@ def prominence_db(
     return values - background
 
 
-def robust_null(values: Sequence[float]) -> tuple[float, float]:
+def robust_null(
+    values: Sequence[float],
+    *,
+    min_bins: int = 32,
+    lower_percentile: float = 15.865525393145702,
+) -> tuple[float, float]:
     """Estimate location and scale of a null contaminated only in its upper tail.
 
     Prominence is zero-centred by construction wherever there is no line, so the bulk of
@@ -158,26 +163,39 @@ def robust_null(values: Sequence[float]) -> tuple[float, float]:
     """
     array = np.asarray(values, dtype=float)
     finite = array[np.isfinite(array)]
-    if finite.size < 32:
-        raise ValueError("robust_null needs at least 32 finite values.")
+    if min_bins < 2:
+        raise ValueError("min_bins must be at least two.")
+    if not 0.0 < lower_percentile < 50.0:
+        raise ValueError("lower_percentile must lie between zero and fifty.")
+    if finite.size < min_bins:
+        raise ValueError(f"robust_null needs at least {min_bins} finite values.")
     location = float(np.median(finite))
-    scale = location - float(np.percentile(finite, 15.865525393145702))
+    scale = location - float(np.percentile(finite, lower_percentile))
     if not np.isfinite(scale) or scale <= 0:
         raise ValueError("Could not estimate a positive scale from the lower tail.")
     return location, scale
 
 
-def upper_tail_pvalues(values: Sequence[float]) -> np.ndarray:
-    """One-sided Gaussian p-values against a null fitted to the lower tail."""
+def upper_tail_pvalues(
+    values: Sequence[float],
+    *,
+    min_bins: int = 32,
+    lower_percentile: float = 15.865525393145702,
+) -> np.ndarray:
+    """Empirical-null upper-tail probabilities fitted to the lower tail."""
     array = np.asarray(values, dtype=float)
-    location, scale = robust_null(array)
+    location, scale = robust_null(
+        array,
+        min_bins=min_bins,
+        lower_percentile=lower_percentile,
+    )
     from scipy.stats import norm
 
     return np.asarray(norm.sf((array - location) / scale), dtype=float)
 
 
-def fdr_bh(pvalues: Sequence[float]) -> np.ndarray:
-    """Benjamini-Hochberg q-values, ordered as the input."""
+def fdr_by(pvalues: Sequence[float]) -> np.ndarray:
+    """Dependence-robust Benjamini-Yekutieli q-values, ordered as the input."""
     array = np.asarray(pvalues, dtype=float)
     if array.ndim != 1:
         raise ValueError("pvalues must be one-dimensional.")
@@ -188,7 +206,8 @@ def fdr_bh(pvalues: Sequence[float]) -> np.ndarray:
 
     n = array.size
     order = np.argsort(array)
-    ranked = array[order] * n / np.arange(1, n + 1)
+    dependence_correction = float(np.sum(1.0 / np.arange(1, n + 1)))
+    ranked = array[order] * n * dependence_correction / np.arange(1, n + 1)
     qvalues = np.minimum.accumulate(ranked[::-1])[::-1]
     out = np.empty(n, dtype=float)
     out[order] = np.minimum(qvalues, 1.0)
@@ -436,6 +455,7 @@ def refine_comb_fundamental(
     max_divisor: int = 6,
     min_gain: float = 0.2,
     search_fraction: float = 0.02,
+    chance_sigma: float = 2.0,
 ) -> tuple[float, np.ndarray]:
     """Reduce a repeated spacing to the fundamental that actually generates the comb.
 
@@ -456,6 +476,8 @@ def refine_comb_fundamental(
     would otherwise win just by subdividing.
     """
     array = np.asarray(frequencies, dtype=float)
+    if not np.isfinite(chance_sigma) or chance_sigma <= 0.0:
+        raise ValueError("chance_sigma must be finite and positive.")
     if not np.isfinite(spacing) or spacing <= 0:
         raise ValueError("spacing must be a finite positive number.")
     if max_divisor < 1:
@@ -481,7 +503,7 @@ def refine_comb_fundamental(
     # a spurious family does not.
     covered = min(1.0, 2.0 * tolerance_hz / best)
     deviation = float(np.sqrt(array.size * covered * (1.0 - covered)))
-    if best_excess < 2.0 * deviation:
+    if best_excess < chance_sigma * deviation:
         return float(best), np.zeros(array.size, dtype=bool)
     return float(best), best_members
 

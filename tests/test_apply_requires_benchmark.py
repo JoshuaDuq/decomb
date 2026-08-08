@@ -227,6 +227,22 @@ def test_recording_digest_covers_header_data_and_markers(tmp_path):
     assert remove.recording_digest(vhdr) != original
 
 
+def test_source_input_digest_changes_when_bids_metadata_changes(tmp_path):
+    vhdr = tmp_path / "run.vhdr"
+    vhdr.write_text("DataFile=run.eeg\nMarkerFile=run.vmrk\n", encoding="utf-8")
+    (tmp_path / "run.eeg").write_bytes(b"samples")
+    (tmp_path / "run.vmrk").write_text("markers", encoding="utf-8")
+    channels = tmp_path / "run_channels.tsv"
+    channels.write_text("name\ttype\nCz\tEEG\n", encoding="utf-8")
+
+    original, _ = remove.source_input_digests([vhdr], tmp_path)
+    channels.write_text("name\ttype\nCz\tECG\n", encoding="utf-8")
+
+    changed, _ = remove.source_input_digests([vhdr], tmp_path)
+
+    assert changed != original
+
+
 def _cohort_benchmark(path, fingerprint, seam_observed):
     """A realistic 90-run cohort: 15 sessions of 6, named as the pipeline names them."""
     pd.DataFrame(

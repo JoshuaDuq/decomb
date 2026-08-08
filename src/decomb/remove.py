@@ -205,6 +205,8 @@ class RemovalSettings:
     cost_band_hz: tuple[float, float] = (28.0, 95.0)
     """Band every cost measurement is made over: what a broadband signal loses to the
     removal, and what the removal touched. Set it to the span your analyses use."""
+    band_cost_thresholds_db: tuple[float, float] = (1.0, 3.0)
+    """Loss thresholds reported for the broadband cost measurement, in dB."""
     mains_notch_hz: tuple[float, float] = estimators.MAINS_NOTCH_HZ
     """Band left to a downstream wide notch rather than taken here.
 
@@ -290,13 +292,10 @@ class RemovalSettings:
     corruption.
     """
     detection_fdr_alpha: float | None = estimators.DETECTION_FDR_ALPHA
-    """False discovery rate a peak must clear to enter the candidate pool.
-
-    This is what admits a line. Replication across recordings and across non-overlapping
-    windows is then required on top of it, as independent evidence -- but replication is
-    evidence a source is persistent, not evidence a peak is real, and the two jobs need
-    different instruments. See :data:`decomb.estimators.DETECTION_FDR_ALPHA`.
-    """
+    """Empirical-null screening level a peak must clear to enter the candidate pool."""
+    detection_null_min_bins: int = 32
+    detection_null_lower_percentile: float = 15.865525393145702
+    """Empirical-null fitting geometry for per-recording line screening."""
     detection_min_prominence_db: float | None = estimators.LINE_PROMINENCE_FLOOR_DB
     """Optional prominence floor on top of the calibrated test. ``null`` disables it.
 
@@ -434,6 +433,12 @@ class RemovalSettings:
         low, high = self.cost_band_hz
         if not np.all(np.isfinite((low, high))) or not 0.0 <= low < high:
             raise ValueError("cost_band_hz must be an increasing non-negative band.")
+        if (
+            len(self.band_cost_thresholds_db) != 2
+            or not np.all(np.isfinite(self.band_cost_thresholds_db))
+            or not 0.0 < self.band_cost_thresholds_db[0] < self.band_cost_thresholds_db[1]
+        ):
+            raise ValueError("band_cost_thresholds_db must contain two increasing positives.")
         for name in (
             "uncertainty_confidence_z",
             "background_half_width_hz",
@@ -443,6 +448,7 @@ class RemovalSettings:
             "max_fit_residual_rms_resolutions",
             "max_line_width_resolutions",
             "roundtrip_relative_tolerance",
+            "detection_null_lower_percentile",
         ):
             value = getattr(self, name)
             if not np.isfinite(value) or value <= 0.0:
@@ -453,6 +459,8 @@ class RemovalSettings:
                 raise ValueError(f"{name} must lie strictly between zero and one.")
         if self.min_harmonics_for_fit < 3:
             raise ValueError("min_harmonics_for_fit must be at least three.")
+        if self.detection_null_min_bins < 2:
+            raise ValueError("detection_null_min_bins must be at least two.")
         if self.max_fit_residual_rms_resolutions > self.max_harmonic_residual_resolutions:
             raise ValueError(
                 "max_fit_residual_rms_resolutions cannot exceed "
@@ -538,6 +546,8 @@ class AdaptiveWindowRemovalPlan:
     targets_hz: tuple[float, ...]
     notch_widths_hz: tuple[float, ...]
     narrow_targets_hz: tuple[float, ...]
+    channel_targets_hz: tuple[tuple[float, ...], ...] | None = None
+    channel_target_widths_hz: tuple[tuple[float, ...], ...] | None = None
     aggregate_residual_targets_hz: tuple[float, ...] = ()
     aggregate_residual_widths_hz: tuple[float, ...] = ()
     channel_residual_targets_hz: tuple[tuple[float, ...], ...] = ()
@@ -547,13 +557,56 @@ class AdaptiveWindowRemovalPlan:
         start, stop = self.bounds
         if not 0 <= start < stop:
             raise ValueError("Adaptive-window bounds must be positive and stop-exclusive.")
-        if not self.targets_hz or len(self.targets_hz) != len(self.notch_widths_hz):
-            raise ValueError("An adaptive window requires matching non-empty targets and widths.")
+        if len(self.targets_hz) != len(self.notch_widths_hz):
+            raise ValueError("Adaptive-window targets and widths must match.")
+        if not self.targets_hz and self.channel_targets_hz is None:
+            raise ValueError("An unauthorized adaptive window cannot be cleaned.")
         if not all(np.isfinite(value) for value in (*self.targets_hz, *self.notch_widths_hz)):
             raise ValueError("Adaptive-window targets and widths must be finite.")
         if any(width <= 0.0 for width in self.notch_widths_hz):
             raise ValueError("Adaptive-window notch widths must be positive.")
+        if (self.channel_targets_hz is None) != (self.channel_target_widths_hz is None):
+            raise ValueError("Channel targets and widths must be supplied together.")
+        if self.channel_targets_hz is not None:
+            if len(self.channel_targets_hz) != len(self.channel_target_widths_hz):
+                raise ValueError("Every channel target list requires matching widths.")
+            if any(
+                len(targets) != len(widths)
+                for targets, widths in zip(
+                    self.channel_targets_hz,
+                    self.channel_target_widths_hz,
+                )
+            ):
+                raise ValueError("Channel targets and widths must match.")
+            values = (
+                *(target for channel in self.channel_targets_hz for target in channel),
+                *(width for channel in self.channel_target_widths_hz for width in channel),
+            )
+            if not all(np.isfinite(value) for value in values):
+                raise ValueError("Channel targets and widths must be finite.")
+            if any(
+                width <= 0.0
+                for widths in self.channel_target_widths_hz
+                for width in widths
+            ):
+                raise ValueError("Channel target widths must be positive.")
         _validate_residual_targets(self, "Adaptive-window")
+
+    @property
+    def channel_target_plans(self) -> tuple[tuple[tuple[float, ...], tuple[float, ...]], ...]:
+        """Base target plans in the channel order used by the cleaner."""
+        if self.channel_targets_hz is None:
+            return ((self.targets_hz, self.notch_widths_hz),)
+        return tuple(zip(self.channel_targets_hz, self.channel_target_widths_hz))
+
+    @property
+    def applied_target_spans(self) -> tuple[tuple[float, float], ...]:
+        """Distinct base targets and widest width actually authorized by this window."""
+        spans = {}
+        for targets, widths in self.channel_target_plans:
+            for target, width in zip(targets, widths):
+                spans[float(target)] = max(spans.get(float(target), 0.0), float(width))
+        return tuple((target, spans[target]) for target in sorted(spans))
 
 
 def _validate_residual_targets(window, label: str) -> None:
@@ -597,7 +650,11 @@ class RunRemovalPlan:
         return tuple(
             sorted(
                 {
-                    *(target for window in self.windows for target in window.targets_hz),
+                    *(
+                        target
+                        for window in self.windows
+                        for target, _ in window.applied_target_spans
+                    ),
                     *(
                         target
                         for window in self.windows
@@ -971,12 +1028,27 @@ def spatiotemporal_line_metrics(
         raise ValueError("The adaptive plan window geometry does not match the recording.")
     if not np.array_equal(freqs, after_freqs):
         raise ValueError("Before and after adaptive spectra use different frequency grids.")
+    target_spans = tuple(window.applied_target_spans for window in plan.windows)
+    active = np.array([bool(spans) for spans in target_spans], dtype=bool)
+    if not np.any(active):
+        return {
+            "max_channel_block_residual_prominence_db": 0.0,
+            "p99_channel_block_residual_prominence_db": 0.0,
+            "focal_null_max_95_db": 0.0,
+            "focal_residual_excess_db": 0.0,
+            "focal_residual_null_p": 1.0,
+            "worst_focal_window": -1.0,
+            "worst_focal_channel_index": -1.0,
+            "worst_focal_target_hz": np.nan,
+            "worst_focal_frequency_hz": np.nan,
+        }
+    active_spans = tuple(spans for spans in target_spans if spans)
     metrics = estimators.adaptive_spatiotemporal_suppression(
         freqs,
-        spectral.to_db(before_psd),
-        spectral.to_db(after_psd),
-        tuple(window.targets_hz for window in plan.windows),
-        tuple(window.notch_widths_hz for window in plan.windows),
+        spectral.to_db(before_psd[:, active]),
+        spectral.to_db(after_psd[:, active]),
+        tuple(tuple(target for target, _ in spans) for spans in active_spans),
+        tuple(tuple(width for _, width in spans) for spans in active_spans),
         background_half_width_hz=settings.background_half_width_hz,
         search_hz=settings.residual_search_hz,
     )
@@ -1028,13 +1100,26 @@ def adaptive_suppression_metrics(
     half_width = int(round(settings.background_half_width_hz / float(freqs[1])))
     before = _reference_prominence(before_db, before_db, half_width_bins=half_width)
     after = _reference_prominence(before_db, after_db, half_width_bins=half_width)
-    widths = tuple(window.notch_widths_hz for window in plan.windows)
+    target_spans = tuple(window.applied_target_spans for window in plan.windows)
+    active = np.array([bool(spans) for spans in target_spans], dtype=bool)
+    if not np.any(active):
+        return {
+            "n_targets": 0.0,
+            "median_prominence_before_db": 0.0,
+            "median_residual_prominence_db": 0.0,
+            "max_residual_prominence_db": 0.0,
+            "null_max_95_db": 0.0,
+            "residual_excess_db": 0.0,
+            "residual_null_p": 1.0,
+            "median_suppression_db": 0.0,
+        }
+    active_spans = tuple(spans for spans in target_spans if spans)
     metrics = estimators.adaptive_line_suppression(
         freqs,
-        before,
-        after,
-        tuple(window.targets_hz for window in plan.windows),
-        widths,
+        before[active],
+        after[active],
+        tuple(tuple(target for target, _ in spans) for spans in active_spans),
+        tuple(tuple(width for _, width in spans) for spans in active_spans),
         search_hz=settings.residual_search_hz,
         max_line_width_hz=settings.max_line_width_hz,
     )
@@ -1066,7 +1151,9 @@ def continuous_refinement_metrics(
                 for frequency_hz in targets
             )
     return {
-        "n_continuous_common_targets": sum(len(window.targets_hz) for window in plan.windows),
+        "n_continuous_common_targets": sum(
+            len(window.applied_target_spans) for window in plan.windows
+        ),
         "n_continuous_aggregate_refinement_targets": len(aggregate_details),
         "n_continuous_focal_refinement_targets": len(focal_details),
         "n_continuous_focal_refinement_channel_windows": focal_channel_windows,
@@ -1087,8 +1174,9 @@ def plan_target_spans(
     """
     spans: dict[float, float] = {}
     for window in windows:
+        base_groups = window.channel_target_plans
         groups = (
-            (window.targets_hz, window.notch_widths_hz),
+            *base_groups,
             (window.aggregate_residual_targets_hz, window.aggregate_residual_widths_hz),
             *zip(window.channel_residual_targets_hz, window.channel_residual_widths_hz),
         )
@@ -1175,35 +1263,39 @@ def adaptive_band_metrics(
             )
             for window in plan.windows:
                 for targets, widths in target_width_plans_for(window):
-                    fraction = estimators.removed_band_fraction(
-                        freqs, targets, widths, band_hz=settings.cost_band_hz
-                    )
-                    measurements.append((fraction, 1.0 / band_bin_count))
-        return max(measurements, key=lambda item: (item[0], item[1]))
+                    if len(targets):
+                        fraction = estimators.removed_band_fraction(
+                            freqs, targets, widths, band_hz=settings.cost_band_hz
+                        )
+                        measurements.append((fraction, 1.0 / band_bin_count))
+        return (
+            max(measurements, key=lambda item: (item[0], item[1]))
+            if measurements
+            else (0.0, 1.0 / band_bin_count)
+        )
+
+    def base_plans(window):
+        return window.channel_target_plans
 
     def continuous_plans(window):
-        common_targets = (*window.targets_hz, *window.aggregate_residual_targets_hz)
-        common_widths = (*window.notch_widths_hz, *window.aggregate_residual_widths_hz)
-        focal_targets = window.channel_residual_targets_hz or ((),)
-        focal_widths = window.channel_residual_widths_hz or ((),)
+        focal_targets = window.channel_residual_targets_hz or tuple(
+            () for _ in base_plans(window)
+        )
+        focal_widths = window.channel_residual_widths_hz or tuple(
+            () for _ in base_plans(window)
+        )
         return tuple(
-            ((*common_targets, *targets), (*common_widths, *widths))
-            for targets, widths in zip(focal_targets, focal_widths)
+            (
+                (*base_targets, *window.aggregate_residual_targets_hz, *targets),
+                (*base_widths, *window.aggregate_residual_widths_hz, *widths),
+            )
+            for (base_targets, base_widths), targets, widths in zip(
+                base_plans(window), focal_targets, focal_widths
+            )
         )
 
     expanded_fraction, expanded_bin_size = maximum_fraction(continuous_plans)
-    base_fraction, base_bin_size = maximum_fraction(
-        lambda window: (
-            (
-                window.targets_hz,
-                estimators.notch_widths_for(
-                    window.targets_hz,
-                    ratio=settings.notch_width_ratio,
-                    minimum_hz=settings.notch_width_min_hz,
-                ),
-            ),
-        )
-    )
+    base_fraction, base_bin_size = maximum_fraction(base_plans)
     return {
         "base_removed_band_fraction": base_fraction,
         "base_band_fraction_bin_size": base_bin_size,
@@ -1222,6 +1314,7 @@ def clean_raw(
     filter_jobs: int,
     mt_bandwidth: float,
     notch_widths,
+    picks="eeg",
 ):
     """Project the listed frequencies out of the EEG channels.
 
@@ -1239,7 +1332,7 @@ def clean_raw(
         warnings.filterwarnings("ignore", message=".*matmul", category=RuntimeWarning)
         return raw.notch_filter(
             freqs=list(targets),
-            picks="eeg",
+            picks=picks,
             method="spectrum_fit",
             filter_length=filter_length,
             mt_bandwidth=mt_bandwidth,
@@ -1405,9 +1498,9 @@ def clean_continuous_raw(
     if len(picks) == 0:
         raise ValueError("Adaptive comb removal requires at least one EEG channel.")
     planned_channel_counts = {
-        len(window.channel_residual_targets_hz)
+        len(window.channel_targets_hz)
         for window in plan.windows
-        if window.channel_residual_targets_hz
+        if window.channel_targets_hz is not None
     }
     if len(planned_channel_counts) > 1:
         raise ValueError("Residual plans disagree about the EEG channel count.")
@@ -1470,23 +1563,40 @@ def _clean_planned_segment(
         picked_info.copy(),
         verbose="ERROR",
     )
-    cleaned = clean_raw(
-        segment,
-        window.targets_hz,
-        filter_length=settings.filter_length,
-        filter_jobs=settings.filter_jobs,
-        mt_bandwidth=settings.mt_bandwidth,
-        notch_widths=np.asarray(window.notch_widths_hz),
-    ).get_data()
-    if not window.aggregate_residual_targets_hz and not window.channel_residual_targets_hz:
-        return cleaned
+    if window.channel_targets_hz is None or window.channel_target_widths_hz is None:
+        raise ValueError("The adaptive window has not been authorized per channel.")
     plan_indices = (
-        tuple(range(cleaned.shape[0]))
+        tuple(range(segment.get_data().shape[0]))
         if channel_plan_indices is None
         else tuple(channel_plan_indices)
     )
-    if len(plan_indices) != cleaned.shape[0]:
-        raise ValueError("The residual plan does not map every supplied EEG channel.")
+    if len(plan_indices) != segment.get_data().shape[0]:
+        raise ValueError("The removal plan does not map every supplied EEG channel.")
+    if any(
+        not 0 <= index < len(window.channel_targets_hz)
+        for index in plan_indices
+    ):
+        raise ValueError("The removal plan contains an out-of-range channel index.")
+
+    grouped: dict[tuple[tuple[float, ...], tuple[float, ...]], list[int]] = {}
+    for local_index, plan_index in enumerate(plan_indices):
+        targets = window.channel_targets_hz[plan_index]
+        widths = window.channel_target_widths_hz[plan_index]
+        if targets:
+            grouped.setdefault((targets, widths), []).append(local_index)
+    for (targets, widths), picks in grouped.items():
+        clean_raw(
+            segment,
+            targets,
+            filter_length=settings.filter_length,
+            filter_jobs=settings.filter_jobs,
+            mt_bandwidth=settings.mt_bandwidth,
+            notch_widths=np.asarray(widths),
+            picks=picks,
+        )
+    cleaned = segment.get_data()
+    if not window.aggregate_residual_targets_hz and not window.channel_residual_targets_hz:
+        return cleaned
     channel_plans = []
     for index in plan_indices:
         target_width_pairs = list(
@@ -1621,7 +1731,7 @@ def recording_digest(vhdr: Path) -> str:
 
 
 def dataset_digest(recordings: dict[str, str], source_root: Path) -> str:
-    """Content identity for the recording bytes and every mirrored source sidecar."""
+    """Content identity for recording bytes and every mirrored source sidecar."""
     import hashlib
 
     digest = hashlib.sha256(repr(sorted(recordings.items())).encode("utf-8"))
@@ -1633,6 +1743,19 @@ def dataset_digest(recordings: dict[str, str], source_root: Path) -> str:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+def source_input_digests(
+    runs: Sequence[Path],
+    source_root: Path,
+) -> tuple[dict[str, str], str]:
+    """Bind each recording to its raw bytes and the complete BIDS source metadata."""
+    recording_digests = {run.stem: recording_digest(run) for run in runs}
+    source_digest = dataset_digest(recording_digests, source_root)
+    return {
+        recording: f"{recording_digest}:{source_digest}"
+        for recording, recording_digest in recording_digests.items()
+    }, source_digest
 
 
 def removal_plan_digest(plan: RunRemovalPlan) -> str:
@@ -2492,6 +2615,61 @@ def _route_continuous_residual_support(plan: RunRemovalPlan) -> RunRemovalPlan:
     return replace(plan, windows=tuple(routed))
 
 
+def _authorize_channel_targets(
+    raw,
+    plan: RunRemovalPlan,
+    settings: RemovalSettings,
+) -> RunRemovalPlan:
+    """Authorize candidate targets independently in every EEG channel and window."""
+    import mne
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude=())
+    if len(picks) == 0:
+        raise ValueError("Channel target authorization requires at least one EEG channel.")
+    sampling_frequency_hz = float(raw.info["sfreq"])
+    authorized_windows = []
+    for window in plan.windows:
+        start, stop = window.bounds
+        data = raw.get_data(picks=picks, start=start, stop=stop)
+        frequencies, statistic, threshold, _ = estimators.thomson_f_statistics(
+            data,
+            sampling_frequency_hz=sampling_frequency_hz,
+            bandwidth_hz=settings.mt_bandwidth,
+            family_alpha=settings.residual_family_alpha,
+        )
+        channel_targets = []
+        channel_widths = []
+        for channel_index in range(data.shape[0]):
+            targets = []
+            widths = []
+            for target, width in zip(window.targets_hz, window.notch_widths_hz):
+                reach = max(float(width) / 2.0, settings.residual_search_hz)
+                inside = np.abs(frequencies - target) <= reach
+                if np.any(statistic[channel_index, inside] > threshold):
+                    targets.append(float(target))
+                    widths.append(float(width))
+            channel_targets.append(tuple(targets))
+            channel_widths.append(tuple(widths))
+        active_widths = {
+            float(target): float(width)
+            for targets, widths in zip(channel_targets, channel_widths)
+            for target, width in zip(targets, widths)
+        }
+        authorized_windows.append(
+            replace(
+                window,
+                targets_hz=tuple(sorted(active_widths)) or window.targets_hz,
+                notch_widths_hz=(
+                    tuple(active_widths[target] for target in sorted(active_widths))
+                    or window.notch_widths_hz
+                ),
+                channel_targets_hz=tuple(channel_targets),
+                channel_target_widths_hz=tuple(channel_widths),
+            )
+        )
+    return replace(plan, windows=tuple(authorized_windows))
+
+
 def _refine_continuous_residual_plans(
     raw,
     plan: RunRemovalPlan,
@@ -2504,6 +2682,7 @@ def _refine_continuous_residual_plans(
     if len(picks) == 0:
         raise ValueError("Continuous residual refinement requires at least one EEG channel.")
     picked_info = mne.pick_info(raw.info, picks, copy=True)
+    plan = _authorize_channel_targets(raw, plan, settings)
     base_cleaned = clean_continuous_raw(
         raw.copy(),
         plan,
@@ -2552,7 +2731,7 @@ def build_run_plans(runs: list[Path], settings: RemovalSettings) -> dict[str, Ru
     mne.set_log_level("ERROR")
     by_subject: dict[str, list[Path]] = {}
     for vhdr in runs:
-        by_subject.setdefault(vhdr.parent.parent.name, []).append(vhdr)
+        by_subject.setdefault(_subject_of(vhdr), []).append(vhdr)
 
     plans = {}
     for _subject, subject_runs in by_subject.items():
@@ -2677,6 +2856,15 @@ def matched_control_plan(plan: RunRemovalPlan, settings: RemovalSettings) -> Run
             aggregate_residual_targets_hz=tuple(
                 target + offset_hz for target in window.aggregate_residual_targets_hz
             ),
+            channel_targets_hz=(
+                None
+                if window.channel_targets_hz is None
+                else tuple(
+                    tuple(target + offset_hz for target in channel)
+                    for channel in window.channel_targets_hz
+                )
+            ),
+            channel_target_widths_hz=window.channel_target_widths_hz,
             channel_residual_targets_hz=tuple(
                 tuple(target + offset_hz for target in channel)
                 for channel in window.channel_residual_targets_hz
@@ -2720,19 +2908,17 @@ def benchmark_run(
     times = raw.times
     waveform = probe.waveform(times)
 
+    n_eeg_channels = len(picks)
+    eeg_plan_indices = tuple(range(n_eeg_channels))
+    probe_data = np.broadcast_to(waveform, (n_eeg_channels, waveform.size)).copy()
     probe_only = mne.io.RawArray(
-        waveform[None, :],
-        mne.create_info(
-            ["benchmark_probe"],
-            sfreq=float(raw.info["sfreq"]),
-            ch_types=["eeg"],
-        ),
+        probe_data,
+        mne.pick_info(raw.info, picks, copy=True),
         verbose="ERROR",
     )
-    benchmark_pick = int(picks[0])
     background_probe = mne.io.RawArray(
-        raw.get_data(picks=[benchmark_pick]) + waveform[None, :],
-        mne.pick_info(raw.info, [benchmark_pick], copy=True),
+        raw.get_data(picks=picks) + probe_data,
+        mne.pick_info(raw.info, picks, copy=True),
         verbose="ERROR",
     )
 
@@ -2742,37 +2928,24 @@ def benchmark_run(
     in_band_hz = estimators.in_band_probe_frequencies(
         targets, count=settings.benchmark.in_band_probe_count
     )
+    in_band_waveform = estimators.sinusoid_waveform(
+        times, in_band_hz, probe.sinusoid_amplitude_v
+    )
     in_band_probe = mne.io.RawArray(
-        estimators.sinusoid_waveform(times, in_band_hz, probe.sinusoid_amplitude_v)[None, :],
-        mne.create_info(
-            ["in_band_probe"],
-            sfreq=float(raw.info["sfreq"]),
-            ch_types=["eeg"],
-        ),
+        np.broadcast_to(in_band_waveform, (n_eeg_channels, in_band_waveform.size)).copy(),
+        mne.pick_info(raw.info, picks, copy=True),
         verbose="ERROR",
     )
 
-    # Broadband probe: what the transform costs a signal occupying the whole band, as
-    # opposed to removed_band_fraction, which counts the widths the plan asked for. Four
-    # channels, all carrying the first EEG channel's plan, so the figure covers that
-    # channel's common and channel-local targets; focal targets on other channels are
-    # counted separately and are NOT visible here.
-    #
-    # Seeded from a CRC of the recording name, not ``hash``: PYTHONHASHSEED salts str
-    # hashing per process, so ``hash`` gave a different probe on every invocation and
-    # measured_band_attenuation moved between benchmarks of identical data under identical
-    # settings -- a difference neither settings_fingerprint nor _source_digest can see.
-    broadband_channels = settings.benchmark.broadband_probe_channels
+    # Broadband probe: every EEG channel receives an independent realization and its own
+    # channel-specific removal plan, so a configured band-cost ceiling measures the worst
+    # channel rather than an arbitrary subset or an average over unrelated plans.
     broadband_probe = mne.io.RawArray(
         np.random.default_rng(zlib.crc32(vhdr.stem.encode("utf-8"))).normal(
             scale=probe.sinusoid_amplitude_v,
-            size=(broadband_channels, times.size),
+            size=(n_eeg_channels, times.size),
         ),
-        mne.create_info(
-            [f"broadband_probe_{index}" for index in range(broadband_channels)],
-            sfreq=float(raw.info["sfreq"]),
-            ch_types=["eeg"] * broadband_channels,
-        ),
+        mne.pick_info(raw.info, picks, copy=True),
         verbose="ERROR",
     )
 
@@ -2786,39 +2959,43 @@ def benchmark_run(
         probe_only.copy(),
         control_plan,
         settings,
-        eeg_plan_indices=(0,),
+        eeg_plan_indices=eeg_plan_indices,
     )
     cleaned_background_probe = clean_continuous_raw(
         background_probe,
         plan,
         settings,
-        eeg_plan_indices=(0,),
+        eeg_plan_indices=eeg_plan_indices,
     )
     cleaned_probe = clean_continuous_raw(
         probe_only,
         plan,
         settings,
-        eeg_plan_indices=(0,),
+        eeg_plan_indices=eeg_plan_indices,
     )
     cleaned_in_band_probe = clean_continuous_raw(
         in_band_probe,
         plan,
         settings,
-        eeg_plan_indices=(0,),
+        eeg_plan_indices=eeg_plan_indices,
     )
     cleaned_broadband_probe = clean_continuous_raw(
         broadband_probe,
         plan,
         settings,
-        eeg_plan_indices=(0,) * broadband_channels,
+        eeg_plan_indices=eeg_plan_indices,
     )
 
     freqs, _, _ = run_spectrum(cleaned_bare, settings)
-    _, probe_psd_before = _psd(probe_only, [0], settings)
-    _, probe_psd_after = _psd(cleaned_probe, [0], settings)
-    in_band_freqs, in_band_psd_before = _psd(in_band_probe, [0], settings)
-    _, in_band_psd_after = _psd(cleaned_in_band_probe, [0], settings)
-    broadband_picks = list(range(broadband_channels))
+    _, probe_psd_before = _psd(probe_only, list(range(n_eeg_channels)), settings)
+    _, probe_psd_after = _psd(cleaned_probe, list(range(n_eeg_channels)), settings)
+    in_band_freqs, in_band_psd_before = _psd(
+        in_band_probe, list(range(n_eeg_channels)), settings
+    )
+    _, in_band_psd_after = _psd(
+        cleaned_in_band_probe, list(range(n_eeg_channels)), settings
+    )
+    broadband_picks = list(range(n_eeg_channels))
     broadband_freqs, broadband_psd_before = _psd(broadband_probe, broadband_picks, settings)
     _, broadband_psd_after = _psd(cleaned_broadband_probe, broadband_picks, settings)
     _, data_psd_before = _psd(raw, picks, settings)
@@ -2829,7 +3006,7 @@ def benchmark_run(
 
     recovered = estimators.recover_probe(
         cleaned_background_probe.get_data(),
-        cleaned_bare.get_data(picks=[benchmark_pick]),
+        cleaned_bare.get_data(picks=picks),
     )
     boundaries = _plan_transition_boundaries(plan, raw.n_times)
     metrics = {
@@ -2865,7 +3042,7 @@ def benchmark_run(
             plan=plan,
             settings=settings,
         ),
-        **estimators.probe_recovery(recovered, cleaned_probe.get_data()[0], times, probe),
+        **estimators.probe_recovery(recovered, cleaned_probe.get_data(), times, probe),
         **estimators.in_band_probe_survival(
             in_band_freqs,
             in_band_psd_before,
@@ -2878,6 +3055,7 @@ def benchmark_run(
             spectral.to_db(broadband_psd_before),
             spectral.to_db(broadband_psd_after),
             band_hz=settings.cost_band_hz,
+            thresholds_db=settings.band_cost_thresholds_db,
         ),
     }
     verdict = settings.benchmark.gate.evaluate(metrics)
@@ -2980,6 +3158,8 @@ def _line_observations(
                 claim_hz=settings.line_claim_hz,
                 max_line_width_hz=settings.max_line_width_hz,
                 excluded_bands_hz=settings.protected_bands_hz,
+                null_min_bins=settings.detection_null_min_bins,
+                null_lower_percentile=settings.detection_null_lower_percentile,
             )
             for position in positions:
                 index = int(np.argmin(np.abs(frequency_array - position)))
@@ -3485,7 +3665,7 @@ def verify_cohort(
     spectra = {"original": {}, "cleaned": {}}
     targeted = {"original": [], "cleaned": []}
     for vhdr in runs:
-        subject = vhdr.parent.parent.name
+        subject = _subject_of(vhdr)
         original = read_bids_raw(vhdr)
         cleaned = read_bids_raw(cleaned_root / vhdr.relative_to(bids_root))
         for label, raw in (("original", original), ("cleaned", cleaned)):
@@ -3510,7 +3690,11 @@ def verify_cohort(
     report = []
     for label, grid in grids.items():
         try:
-            lines = catalogue.detect_cohort_lines(grid, detection)
+            lines = catalogue.detect_cohort_lines(
+                grid,
+                detection,
+                exclude_hz=detection_exclusion_hz(settings),
+            )
         except catalogue.NoLinesDetected:
             # A clean stage. Anything else -- no usable window, no usable background --
             # is the analysis failing and must not be written here as zero lines.
@@ -3688,6 +3872,11 @@ def _subject_of(path: Path) -> str:
     raise ValueError(f"{path} does not lie under a BIDS subject directory.")
 
 
+def detection_exclusion_hz(settings: RemovalSettings) -> tuple[float, float] | None:
+    """Return the band owned by a downstream stage, if this pass excludes one."""
+    return settings.mains_notch_hz if settings.exclude_mains else None
+
+
 def _write_tsv_atomic(frame: pd.DataFrame, path: Path) -> None:
     """Publish a complete table or leave the previous table untouched."""
     import os
@@ -3753,12 +3942,15 @@ def run(args: argparse.Namespace) -> None:
         )
         _write_tsv_atomic(report, args.report_dir / "verification.tsv")
         print(report.to_string(index=False))
+        _, source_digest = source_input_digests(runs, args.bids_root)
         np.savez_compressed(
             args.report_dir / "verification_spectra.npz",
             freqs=grids["original"].freqs,
             original=grids["original"].subject_psd,
             cleaned=grids["cleaned"].subject_psd,
-            subjects=np.array(sorted({p.parent.parent.name for p in runs})),
+            subjects=np.array(sorted({_subject_of(path) for path in runs})),
+            settings_fingerprint=settings_fingerprint(settings),
+            source_digest=source_digest,
         )
         print(f"  wrote {args.report_dir / 'verification.tsv'}")
         return
@@ -3766,7 +3958,7 @@ def run(args: argparse.Namespace) -> None:
     if args.stage == "benchmark":
         print(f"Fitting immutable per-run plans for all {len(runs)} recordings")
         plans = build_run_plans(runs, settings)
-        input_digests = {vhdr.stem: recording_digest(vhdr) for vhdr in runs}
+        input_digests, source_digest = source_input_digests(runs, args.bids_root)
         plan_digests = {recording: removal_plan_digest(plan) for recording, plan in plans.items()}
 
         # Fingerprinted before the probes are resolved, and deliberately. The fingerprint
@@ -3865,7 +4057,7 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"Re-fitting all {len(runs)} plans before authorising apply")
     plans = build_run_plans(runs, settings)
-    input_digests = {vhdr.stem: recording_digest(vhdr) for vhdr in runs}
+    input_digests, source_digest = source_input_digests(runs, args.bids_root)
     plan_digests = {recording: removal_plan_digest(plan) for recording, plan in plans.items()}
     benchmark = require_passing_benchmark(
         args.report_dir / "benchmark.tsv",
@@ -3915,7 +4107,7 @@ def run(args: argparse.Namespace) -> None:
         staging,
         args.bids_root,
         settings,
-        dataset_digest(input_digests, args.bids_root),
+        source_digest,
         # From the benchmark, not from this manifest: the measured cost needs the broadband
         # probe, which only the benchmark injects.
         band_cost=measured_band_cost(benchmark),

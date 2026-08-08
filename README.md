@@ -1,5 +1,9 @@
 # decomb
 
+<p align="center">
+  <img src="logo.png" alt="decomb logo" width="420">
+</p>
+
 Audited removal of narrowband line and harmonic-comb artifacts from continuous EEG.
 `decomb` is intended for BIDS BrainVision recordings acquired during or near concurrent
 fMRI, after the usual gradient- and pulse-artifact correction.
@@ -333,17 +337,19 @@ $$
 \hat\sigma = \hat\mu - Q_{0.158655}(P),
 $$
 
-where $Q_\alpha$ is the $\alpha$ quantile. For a Gaussian the gap between the median and
-the 15.87th percentile is exactly $\sigma$. Each searched bin gets a one-sided probability
+where $Q_\alpha$ is the $\alpha$ quantile. The lower-tail Gaussian scale is an empirical-null
+assumption: for a Gaussian the gap between the median and the 15.87th percentile is exactly
+$\sigma$. Each searched bin gets an empirical-null one-sided probability
 
 $$
 p_k \;=\; 1 - \Phi\left( \frac{P(f_k) - \hat\mu}{\hat\sigma} \right),
 $$
 
-For the catalogue, the family is controlled at `fdr_alpha` by the Benjamini-Hochberg
-step-up procedure [[13](#references)] over exactly the bins the search was allowed to reach.
-The per-recording isolated-line search uses the separately configured
-`removal.detection_fdr_alpha`.
+For the catalogue, the empirical-null screening family is controlled at `fdr_alpha` by the
+conservative Benjamini--Yekutieli correction [[27](#references)] over exactly the bins the
+search was allowed to reach. The per-recording isolated-line search uses the separately
+configured `removal.detection_fdr_alpha`. These are screening probabilities whose calibration
+depends on the empirical-null model; they are not unconditional Gaussian p-values.
 
 $$
 q_{(i)} \;=\; \min_{j \ge i} \min\left(1, \frac{n\, p_{(j)}}{j}\right),
@@ -409,7 +415,8 @@ where $\hat f_0^{(-i)}$ is the fundamental refitted with harmonic $i$ left out.
 
 The implementation uses MNE-Python for EEG I/O, multitaper sinusoid fitting, and Welch
 comparison spectra [[23](#references), [26](#references)]. Each target receives an explicit
-width. For the comb
+width and is authorized independently in each EEG channel and adaptive window by a
+channel-specific Thomson statistic. For the comb
 model, a frequency shift $\delta$ in the fundamental moves harmonic $k$ by $k\delta$, so the
 width carries that propagated uncertainty. For a comb harmonic $k$ at $f_k$, with $\rho$ =
 `notch_width_ratio` and $z$ = `uncertainty_confidence_z`,
@@ -423,10 +430,9 @@ $W = \max(f/\rho,\, W_{\min},\, 1/T_{\text{filter}})$.
 
 Inside each width, `decomb` calls MNE's `spectrum_fit` with the explicit target frequencies,
 widths, filter length, and multitaper bandwidth supplied by its removal plan. It does not use
-MNE's automatic target-discovery mode. The MNE implementation fits deterministic
-sinusoidal components on its frequency grid and removes significant components; the exact
-threshold is therefore part of the installed MNE version's `spectrum_fit` behavior. The
-package separately reimplements the Thomson statistic in
+MNE's automatic target-discovery mode. In explicit-target mode MNE fits and subtracts the
+frequency-grid components inside each supplied width; the channel/window authorization occurs
+before this call. The package separately reimplements the Thomson statistic in
 `estimators.thomson_f_statistics` for residual auditing, with a channel-specific
 Bonferroni family over the complete transform grid.
 
@@ -495,9 +501,10 @@ Seams use synchronised shifts. Each recording contributes one observed boundary 
 ratios above one are compared with their shift distributions at `seam_alpha / 2`.
 
 For the broadband probe, the loss per frequency bin is
-$\ell(f) = X_{\mathrm{before}}(f) - X_{\mathrm{after}}(f)$, averaged over channels. The
-reported values are the shares of bins in `cost_band_hz` with loss greater than 1 dB and
-3 dB. This is a measured operator cost, not a prediction from the requested widths.
+$\ell_c(f) = X_{c,\mathrm{before}}(f) - X_{c,\mathrm{after}}(f)$ for every EEG channel
+$c$. The reported cost is the worst channel's share of bins in `cost_band_hz` with loss
+greater than 1 dB and 3 dB; the median channel cost is retained as a descriptive companion.
+This is a measured operator cost, not a prediction from the requested widths.
 
 For the transient, let $b$ be the injection, $\hat r$ the same transient after the removal
 alone, and $r$ the recovered transient after it is added to data and cleaned. Inside the
@@ -656,6 +663,9 @@ runtime are environment-dependent.
 26. Gramfort A, Luessi M, Larson E, et al. (2013). MEG and EEG data analysis with MNE-Python.
     *Frontiers in Neuroscience* 7:267.
     [doi:10.3389/fnins.2013.00267](https://doi.org/10.3389/fnins.2013.00267)
+27. Benjamini Y, Yekutieli D (2001). The control of the false discovery rate in multiple testing
+    under dependency. *The Annals of Statistics* 29(4):1165-1188.
+    [doi:10.1214/aos/1013699998](https://doi.org/10.1214/aos/1013699998)
 
 Implementation reference: MNE-Python,
 [`mne.filter.notch_filter`](https://mne.tools/stable/generated/mne.filter.notch_filter.html),

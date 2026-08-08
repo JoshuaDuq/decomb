@@ -47,8 +47,12 @@ detection:
   # narrow enough to follow the 1/f slope.
   background_half_width_hz: 4.62962962962963
 
-  # False discovery rate the sweep is controlled at.
+  # Empirical-null screening level after dependence-robust correction.
   fdr_alpha: 0.05
+  null_min_bins: 32
+  null_lower_percentile: 15.865525393145702
+  comb_chance_sigma: 2.0
+  tr_tolerance_bins: 1.0
 
   # How near an integer multiple a line must sit to count as a comb member. A real comb
   # holds residuals a few millihertz wide; this is several bins wider than that.
@@ -114,6 +118,7 @@ removal:
   low_hz: 3.0
   high_hz: 99.8
   cost_band_hz: [28.0, 95.0]
+  band_cost_thresholds_db: [1.0, 3.0]
 
   # Search and acceptance geometry for the comb fit.
   search_hz: 0.25          # comb search half-width; keep below half the comb spacing
@@ -172,6 +177,8 @@ removal:
   # error rate. This test calibrates itself to the recording's own noise and states the
   # rate at which it is wrong.
   detection_fdr_alpha: 0.05
+  detection_null_min_bins: 32
+  detection_null_lower_percentile: 15.865525393145702
 
   # Optional prominence floor on top of that test. null disables it, which is the default.
   # Declare one only if your site wants a stated minimum amplitude; it is then recorded in
@@ -273,10 +280,8 @@ benchmark:
 
   # Tones placed ON the plan's own targets, which measure the opposite quantity: how much
   # of a narrowband signal coinciding with an artifact does not survive. Reported, never
-  # gated. And channels of broadband noise put through the identical transform, which is
-  # what the reported band cost is measured on.
+  # gated. The broadband cost probe uses every EEG channel and its channel-specific plan.
   in_band_probe_count: 4
-  broadband_probe_channels: 4
 
   gate:
     # The one criterion decidable inside a single recording. Everything else is an excess
