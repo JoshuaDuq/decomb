@@ -242,7 +242,11 @@ def draw(measured, path: Path, label: str, band_hz) -> None:
     freqs = measured["freqs"]
     targets = measured["targets"]
     middle = float(np.median(targets))
+    # 7.5 Hz around the median target holds six or so harmonics of a 1.19 Hz comb, which is
+    # enough to read the shapes without the lines crowding. The half-widths are unequal only
+    # to sit the peaks off the panel edges; nothing downstream depends on where it lands.
     zoom = (middle - 3.6, middle + 3.9)
+    shown = int(((targets >= zoom[0]) & (targets <= zoom[1])).sum())
 
     # Detail above, aggregate below, each the full width of the page. Side by side, the
     # whole-band panel holds 57 lines in the space of a column and reads as noise.
@@ -258,7 +262,7 @@ def draw(measured, path: Path, label: str, band_hz) -> None:
         freqs[inside], to_db(measured["notch_comb"])[inside], color=NOTCH_COLOR, lw=1.1, ls="--"
     )
     top.set_title(
-        f"six harmonics, magnified   ({zoom[0]:.0f}–{zoom[1]:.0f} Hz)",
+        f"{shown} harmonics, magnified   ({zoom[0]:.1f}–{zoom[1]:.1f} Hz)",
         loc="left",
         fontsize=10,
         color=TITLE_INK,
@@ -418,17 +422,20 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(args.config)
     settings = remove.RemovalSettings.from_config(config.data)
     root = Path(config.data["paths"]["bids_root"])
+    # `discover_runs` matches the `sub-` directory name while `BIDSPath` wants the bare label,
+    # so take either spelling here and hand each side the one it asks for.
+    label = args.subject.removeprefix("sub-") if args.subject else None
     if args.vhdr is not None:
-        if not args.subject:
+        if not label:
             raise SystemExit("--vhdr needs --subject: a staged recording has to be labelled")
         stage_root = args.stage_root or args.vhdr.parent / "_staged_bids"
         print(f"staging {args.vhdr.name} into {stage_root}", flush=True)
-        runs = [stage_as_bids(args.vhdr, stage_root, args.subject, args.stage_task)]
+        runs = [stage_as_bids(args.vhdr, stage_root, label, args.stage_task)]
     else:
         runs = list(
             remove.discover_runs(
                 root,
-                subjects=[args.subject] if args.subject else None,
+                subjects=[f"sub-{label}"] if label else None,
                 task=settings.task,
             )
         )
