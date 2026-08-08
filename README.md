@@ -1,13 +1,13 @@
 # decomb
 
-Audited removal of narrowband line and comb artifacts from continuous EEG, with the
-concurrent-fMRI case in mind.
+Removal of narrowband line and comb artifacts from continuous EEG, written for recordings
+made during concurrent fMRI.
 
-`decomb` measures each contaminating line's frequency in each recording, subtracts a
-sinusoid at that frequency, and — before it will write anything — measures what the
-subtraction cost and refuses if the answer fails criteria fixed in advance.
+`decomb` measures each line's frequency in each recording and subtracts a sinusoid at that
+frequency. Before writing, it runs the same removal over injected test signals and stops if
+the result falls outside criteria declared in the config.
 
-## Why simultaneous EEG-fMRI needs this
+## The artifact, and why the usual corrections miss it
 
 EEG recorded inside a scanner is corrected in two large steps, and a third class of
 artifact is left behind by both.
@@ -56,24 +56,24 @@ spare; a phase-stable line shared across electrodes inflates coherence between e
 carrying it, so it reads as global connectivity at that frequency; and because its power is
 concentrated into a few millihertz rather than spread over the band, a line that is small
 in microvolts can still be most of that band's power. `decomb diagnose` measures that share
-directly, per band and per participant, so the decision to remove anything at all rests on
-a number rather than on an impression.
+per band and per participant, which is the number to decide on rather than an impression of
+the spectrum.
 
-One diagnostic separates the cases. Given `dataset.tr_seconds`, every detected line is
-placed on the `k/TR` grid of the acquisition. A line **on** that grid is residual gradient
-artifact, and says your gradient correction needs attention rather than this tool. A line
-**off** it is the room, and no template locked to the acquisition will ever reach it. That
-distinction is what this workflow is built around.
+Given `dataset.tr_seconds`, every detected line is also placed on the `k/TR` grid of the
+acquisition. A line **on** that grid is residual gradient artifact, and points back to the
+gradient correction rather than to this tool. A line **off** it comes from the room, and no
+template locked to the acquisition will reach it. The rest of the workflow assumes that
+distinction has been made.
 
-## Why a notch filter is the wrong instrument
+## Why not a notch filter
 
-A comb is not what a notch filter is for. Fifty FIR notches take the surrounding band with
-them; one wide notch takes far more than the lines occupy. Both destroy the spectrum they
-are deployed to clean.
+Fifty FIR notches take the surrounding band with them; one wide notch takes far more
+spectrum than the lines occupy. Either way the cost falls on the band the filter was meant
+to clean.
 
-The lines are monochromatic and their frequencies are measurable, so the right operation is
-a projection onto sinusoids at those measured frequencies. `decomb` costs a few hundredths
-of a hertz per line rather than a band.
+The lines are monochromatic and their frequencies are measurable, so they can instead be
+projected out at those measured frequencies, which costs a few hundredths of a hertz per
+line rather than a band.
 
 ![Power spectra before and after removal](docs/psd_before_after.png)
 
@@ -87,29 +87,30 @@ Delta, theta and alpha are untouched: not one bin moves by 1 dB. Across the remo
 the 55 targeted harmonics fall from 12.3 dB above background to 1.1 dB, and outside the
 lines the spectrum moves by at most 0.06 dB.
 
-Two features survive, and both are the tool declining to act:
+Two features survive, in both cases because the removal did not act on them:
 
 - **42 Hz** carries a 2.8 Hz-wide rhythm sitting exactly on comb harmonic 35. The harmonic
   inside it is removed and the rhythm is not, because a rhythm is whole hertz wide and a
-  line is a tenth of one. This — not any prominence threshold — is what keeps a real
+  line is a tenth of one. Linewidth, rather than any prominence threshold, is what keeps the
   oscillation out of the removal's reach.
 - **60 Hz** is comb harmonic 50, inside the `mains_notch_hz` band that `exclude_mains`
   hands to `notch`. Two stages must not aim at the same spectrum.
 
-## What makes it different
+## Design choices
 
-**It refuses.** `apply` will not run without a passing `benchmark` for the same data and the
-same settings, and the criteria are stated before the measurement is taken.
+**No write without a benchmark.** `apply` will not run unless `benchmark` passed on the same
+data under the same settings, and the criteria are declared in the config before the
+measurement is taken.
 
-**It measures its own cost.** A broadband probe goes through the identical transform, so the
-reported band cost is what a signal occupying the band actually loses, not what the plan
-asked for. That figure travels with the data, in the output's `GeneratedBy` provenance.
+**Band cost is measured rather than assumed.** A broadband probe goes through the identical
+transform, so the reported cost is what a signal occupying the band loses, not what the plan
+predicted. It is recorded in the output's `GeneratedBy` provenance.
 
-**It verifies blind.** `verify` re-sweeps the cleaned data under FDR control knowing nothing
-about where the targets were, so it can find a line the removal never aimed at.
+**Verification is blind.** `verify` re-sweeps the cleaned data under FDR control without
+knowledge of where the targets were, so it can find a line the removal never aimed at.
 
-**It reads no events.** Any continuous recording is a valid input — no task, no trigger
-channel, no epoch structure.
+**No events required.** Any continuous recording is a valid input: no task, trigger channel
+or epoch structure.
 
 ## Install
 
@@ -275,9 +276,8 @@ is the important one: `1.2` is a seed for the search, not a fact about your data
 
 - **BIDS**, read at `sub-*/[ses-*/]eeg/*_eeg.vhdr`, with or without `ses-` and `run-`.
 - **BrainVision**, `IEEE_FLOAT_32` and `MULTIPLEXED`. `apply` rewrites the `.eeg` binaries
-  in place and copies every sidecar byte-for-byte, which is what guarantees sampling rate,
-  channel set, length and annotations cannot drift. Other formats are refused rather than
-  silently converted.
+  in place and copies every sidecar byte-for-byte, so sampling rate, channel set, length and
+  annotations cannot drift. Other formats are refused rather than silently converted.
 - **At least one estimation window** per recording — 54 s by default.
 - **Gradient and pulse artifact already corrected.** `decomb` is the step after those, not
   a replacement for either. Run it on data that has been through your usual EEG-fMRI
@@ -434,7 +434,7 @@ number of samples in it. Statistics stay channel-specific, so a line present on 
 electrodes never authorises subtraction from the rest.
 
 Where the test fires, $\hat\mu(f)$ is subtracted; where it does not, the bin is untouched.
-That is the whole reason the cost is a few bins per line rather than a band.
+This is why the cost is a few bins per line rather than a band.
 
 The fundamental is re-fitted in overlapping windows of `estimation_window_s` at a hop of
 half that, because a comb drifts over minutes. Each window is cleaned against its own
@@ -482,7 +482,7 @@ candidate is scaled by the 95th percentile of the others, and both the largest r
 count of ratios above one are compared against their permutation distributions, each at
 $\alpha/2$.
 
-**Band cost** is measured, never asserted. A broadband probe goes through the identical
+**Band cost.** A broadband probe goes through the identical
 transform and the loss per bin is $\ell(f) = X_{\text{before}}(f) - X_{\text{after}}(f)$,
 averaged over channels; the reported figure is the share of bins in `cost_band_hz` with
 $\ell > 1$ dB and with $\ell > 3$ dB.
@@ -523,8 +523,8 @@ nothing, while leakage from the real transform scales with the power it removed,
 real transform "fails" against it simply for having removed something.
 
 Both are therefore reported beside their controls and decided from neither. The numbers are
-worth reading — they typically sit orders of magnitude below any threshold one would be
-tempted to set — but they are measurements, not passes.
+still informative — they typically sit orders of magnitude below any threshold one might set
+— but they are measurements, not passes.
 
 **One derived bound.** `transient_preserved` comes from the instrument and the transform,
 not from the data: a Gaussian burst of duration σ spans about `4/(2πσ)` hertz, crossing a
