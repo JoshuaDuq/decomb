@@ -6,9 +6,7 @@ should be; :func:`comb_structure` then asks whether the narrow ones share a sing
 fundamental, and :func:`classify_lines` labels each detection a comb member, an isolated
 line, or neither.
 
-Nothing here reads a file. The spectra come from :mod:`decomb.remove` -- either from the
-plan it fits, or from its ``verify`` stage, which re-measures written data with this same
-detector so the two answers are comparable.
+Nothing here reads a file. The spectra come from :mod:`decomb.recordings`.
 
 "Cohort" means the units the prominence is averaged over -- participants, sessions, or
 recordings. A single continuous acquisition is a valid input; only the
@@ -25,15 +23,6 @@ import pandas as pd
 
 from decomb import spectral
 
-BACKGROUND_HALF_WIDTH_HZ = 100.0 / 21.6
-"""Default half-width of the window a bin's background is estimated from, in Hz.
-
-Wide enough that a line cannot raise its own background, narrow enough to follow the
-1/f slope. Prominence is measured against the lower half of this window, so a
-neighbouring line does not inflate it either. Overridden by
-``detection.background_half_width_hz``.
-"""
-
 
 @dataclass(frozen=True)
 class DetectionSettings:
@@ -43,22 +32,22 @@ class DetectionSettings:
     sweep that checks whether they went are the same measurement.
     """
 
-    low_hz: float = 3.0
-    high_hz: float = 95.0
+    low_hz: float
+    high_hz: float
     """Band swept for lines. Set it to the span your analyses read."""
-    background_half_width_hz: float = BACKGROUND_HALF_WIDTH_HZ
-    fdr_alpha: float = 0.05
+    background_half_width_hz: float
+    fdr_alpha: float
     """Screening level after dependence-robust empirical-null correction."""
-    null_min_bins: int = 32
-    null_lower_percentile: float = 15.865525393145702
-    comb_chance_sigma: float = 2.0
-    tr_tolerance_bins: float = 1.0
-    comb_tolerance_hz: float = 0.06
+    null_min_bins: int
+    null_lower_percentile: float
+    comb_chance_sigma: float
+    tr_tolerance_bins: float
+    comb_tolerance_hz: float
     """How near an integer multiple a line must sit to count as a comb member."""
-    max_pair_spacing_hz: float = 12.0
+    max_pair_spacing_hz: float
     """Largest gap between two detections that may vote for the comb spacing. Above a few
     times the fundamental the votes are all multiples and add nothing."""
-    narrow_linewidth_ratio: float = 3.0
+    narrow_linewidth_ratio: float
     """Half-power width, in window widths, below which a detection is monochromatic.
 
     This decides only detections that are *not* comb members; see :func:`classify_lines`
@@ -66,7 +55,7 @@ class DetectionSettings:
     1.4382/T, so a true sinusoid measures a little above 1.0 and anything appreciably
     wider is not one.
     """
-    wide_member_ratio: float = 10.0
+    wide_member_ratio: float
     """Comb members wider than this are reported separately and never masked.
 
     A detection this wide sitting on a comb position is having its width set by the
@@ -75,20 +64,20 @@ class DetectionSettings:
     it is kept out of band-power masking, where counting a real rhythm as artifact would
     overstate contamination.
     """
-    line_mask_half_width_hz: float = 0.15
+    line_mask_half_width_hz: float
     """How much spectrum around a line counts as belonging to it, when charging bands."""
-    max_subharmonic_divisor: int = 6
-    min_subharmonic_gain: float = 0.2
+    max_subharmonic_divisor: int
+    min_subharmonic_gain: float
     """Governs :func:`decomb.spectral.refine_comb_fundamental`: how far below the
     commonest gap the true fundamental may lie, and how much more of the comb a divisor
     must explain before it is accepted."""
-    spacing_search_fraction: float = 0.02
+    spacing_search_fraction: float
     """How far either side of a candidate spacing the fundamental is refined. A refinement
     of a measured gap, not a search for a period -- keep it small."""
-    bootstrap_resamples: int = 10_000
-    bootstrap_alpha: float = 0.05
+    bootstrap_resamples: int
+    bootstrap_alpha: float
     """Interval level of the reported bootstrap: 0.05 gives a 95% interval."""
-    bootstrap_seed: int = 42
+    bootstrap_seed: int
     """Percentile bootstrap of each line's prominence across the sampling unit."""
 
     def __post_init__(self) -> None:
@@ -133,6 +122,9 @@ class DetectionSettings:
                 f"Unknown `detection` setting(s): {sorted(unknown)}. Known settings are "
                 f"{sorted(known)}."
             )
+        missing = known - set(block)
+        if missing:
+            raise ValueError(f"Missing `detection` setting(s): {sorted(missing)}.")
         integers = {
             "max_subharmonic_divisor",
             "bootstrap_resamples",
@@ -161,12 +153,14 @@ class Grid:
         return float(self.freqs[1] - self.freqs[0])
 
 
-def half_width_bins(freqs: np.ndarray, half_width_hz: float = BACKGROUND_HALF_WIDTH_HZ) -> int:
+def half_width_bins(freqs: np.ndarray, half_width_hz: float) -> int:
     return int(round(half_width_hz / float(freqs[1] - freqs[0])))
 
 
 def prominence_of(
-    spectrum: np.ndarray, freqs: np.ndarray, half_width_hz: float = BACKGROUND_HALF_WIDTH_HZ
+    spectrum: np.ndarray,
+    freqs: np.ndarray,
+    half_width_hz: float,
 ) -> np.ndarray:
     return spectral.prominence_db(
         spectral.to_db(spectrum), half_width_bins=half_width_bins(freqs, half_width_hz)
@@ -176,7 +170,7 @@ def prominence_of(
 def build_grid(
     freqs: np.ndarray,
     subject_psd: np.ndarray,
-    half_width_hz: float = BACKGROUND_HALF_WIDTH_HZ,
+    half_width_hz: float,
 ) -> Grid:
     prominence = np.stack(
         [prominence_of(spectrum, freqs, half_width_hz) for spectrum in subject_psd]
@@ -198,8 +192,8 @@ class NoLinesDetected(RuntimeError):
 def detection_mask(
     freqs: np.ndarray,
     *,
-    low_hz: float = 3.0,
-    high_hz: float = 95.0,
+    low_hz: float,
+    high_hz: float,
     exclude_hz: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """Bins the detector is allowed to look at.
@@ -216,7 +210,7 @@ def detection_mask(
 
 def detect_cohort_lines(
     grid: Grid,
-    settings: DetectionSettings | None = None,
+    settings: DetectionSettings,
     *,
     exclude_hz: tuple[float, float] | None = None,
     tr_seconds: float | None = None,
@@ -231,7 +225,6 @@ def detect_cohort_lines(
     reports where it sits relative to the ``k / TR`` grid, which separates a line locked
     to a periodic acquisition from one that is not.
     """
-    settings = settings or DetectionSettings()
     mask = detection_mask(
         grid.freqs, low_hz=settings.low_hz, high_hz=settings.high_hz, exclude_hz=exclude_hz
     )
@@ -327,8 +320,7 @@ def detect_cohort_lines(
                     False
                     if position is None
                     else bool(
-                        abs(position.offset_hz)
-                        < settings.tr_tolerance_bins * grid.bin_width_hz
+                        abs(position.offset_hz) < settings.tr_tolerance_bins * grid.bin_width_hz
                     )
                 ),
             }
@@ -338,7 +330,7 @@ def detect_cohort_lines(
 
 def comb_structure(
     lines: pd.DataFrame,
-    settings: DetectionSettings | None = None,
+    settings: DetectionSettings,
     *,
     tr_seconds: float | None = None,
 ) -> pd.DataFrame:
@@ -354,7 +346,6 @@ def comb_structure(
     family's phases on the ``k / TR`` grid are uniform. A small value means the lines are
     locked to the acquisition period rather than merely near it.
     """
-    settings = settings or DetectionSettings()
     tolerance_hz = settings.comb_tolerance_hz
     narrow = lines.loc[lines["is_narrow"], "refined_hz"].to_numpy()
     rows: list[dict] = []
@@ -448,7 +439,7 @@ def comb_structure(
 def classify_lines(
     lines: pd.DataFrame,
     structure: pd.DataFrame,
-    settings: DetectionSettings | None = None,
+    settings: DetectionSettings,
 ) -> pd.DataFrame:
     """Label every detection: comb member, isolated narrow line, or other.
 
@@ -463,7 +454,6 @@ def classify_lines(
     strongly anticorrelated. Width separates a monochromatic source from a brain rhythm
     only at comparable amplitude.
     """
-    settings = settings or DetectionSettings()
     tolerance_hz = settings.comb_tolerance_hz
     comb = (
         structure.loc[structure["family"] == "narrow_comb"]
@@ -498,7 +488,7 @@ def band_impact(
     subjects: Sequence[str],
     lines: pd.DataFrame,
     bands: Mapping[str, Sequence[float]],
-    settings: DetectionSettings | None = None,
+    settings: DetectionSettings,
 ) -> pd.DataFrame:
     """Fraction of each band's power that is artifact, per subject.
 
@@ -518,7 +508,6 @@ def band_impact(
     background window, say -- is reported as NaN. This is a measurement, and one band it
     cannot answer for must not take the rest of the diagnosis with it.
     """
-    settings = settings or DetectionSettings()
     narrow = lines.loc[lines["kind"].isin(("comb", "isolated"))]
     artifact = list(narrow["refined_hz"])
     rows = []

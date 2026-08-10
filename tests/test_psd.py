@@ -7,12 +7,18 @@ drawing.
 
 from __future__ import annotations
 
+from dataclasses import MISSING, fields, replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from decomb import psd
+from decomb.config import load_config
+
+
+def _settings(**overrides) -> psd.PsdSettings:
+    return replace(psd.PsdSettings.from_config(load_config()), **overrides)
 
 
 def _raw(sfreq=250.0, seconds=120.0, line_hz=57.25, amplitude=5e-6, n_channels=4):
@@ -27,12 +33,9 @@ def _raw(sfreq=250.0, seconds=120.0, line_hz=57.25, amplitude=5e-6, n_channels=4
 
 
 class TestSettings:
-    def test_the_window_defaults_to_the_removals_own(self):
-        class Config:
-            def get(self, key, default=None):
-                return {"removal.estimation_window_s": 32.0}.get(key, default)
-
-        assert psd.PsdSettings.from_config(Config()).window_s == 32.0
+    def test_every_value_comes_from_yaml(self):
+        assert all(entry.default is MISSING for entry in fields(psd.PsdSettings))
+        assert psd.PsdSettings.from_config(load_config()).window_s == 54.0
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -40,17 +43,17 @@ class TestSettings:
     )
     def test_an_impossible_setting_is_refused(self, kwargs):
         with pytest.raises(ValueError):
-            psd.PsdSettings(**kwargs)
+            _settings(**kwargs)
 
     def test_a_reversed_band_is_refused(self):
         with pytest.raises(ValueError, match="band_hz"):
-            psd.PsdSettings(band_hz=(100.0, 1.0))
+            _settings(band_hz=(100.0, 1.0))
 
 
 class TestSpectrum:
     def test_the_resolution_follows_the_window(self):
         raw, _ = _raw()
-        settings = psd.PsdSettings(window_s=20.0)
+        settings = _settings(window_s=20.0)
 
         freqs, _ = psd.channel_median_psd(raw, settings)
 
@@ -59,7 +62,7 @@ class TestSpectrum:
     def test_the_planted_line_lands_where_it_was_put(self):
         raw, _ = _raw(line_hz=57.25)
 
-        freqs, spectrum = psd.channel_median_psd(raw, psd.PsdSettings(window_s=20.0))
+        freqs, spectrum = psd.channel_median_psd(raw, _settings(window_s=20.0))
 
         assert freqs[int(np.argmax(spectrum))] == pytest.approx(57.25, abs=0.05)
 
@@ -76,7 +79,7 @@ class TestSpectrum:
             data, mne.create_info(["Cz", "ECG"], sfreq, ["eeg", "ecg"]), verbose="ERROR"
         )
 
-        _, spectrum = psd.channel_median_psd(raw, psd.PsdSettings(window_s=20.0))
+        _, spectrum = psd.channel_median_psd(raw, _settings(window_s=20.0))
 
         # Within a decade of the EEG channel alone, not of the volt-scale one.
         assert spectrum.max() < 1e-3
@@ -85,12 +88,15 @@ class TestSpectrum:
         raw, _ = _raw(seconds=5.0)
 
         with pytest.raises(ValueError, match="psd.window_s"):
-            psd.channel_median_psd(raw, psd.PsdSettings(window_s=54.0))
+            psd.channel_median_psd(raw, _settings(window_s=54.0))
 
     def test_the_band_bounds_what_is_returned(self):
         raw, _ = _raw()
 
-        freqs, _ = psd.channel_median_psd(raw, psd.PsdSettings(window_s=20.0, band_hz=(10.0, 40.0)))
+        freqs, _ = psd.channel_median_psd(
+            raw,
+            _settings(window_s=20.0, band_hz=(10.0, 40.0)),
+        )
 
         assert freqs.min() >= 10.0 and freqs.max() <= 40.0
 
@@ -110,7 +116,7 @@ class TestComparison:
     def test_a_removed_line_shows_as_a_loss_at_its_frequency(self, tmp_path):
         source = _bids(tmp_path / "src", line_amplitude=5e-6)
         cleaned = _bids(tmp_path / "clean", line_amplitude=0.0)
-        settings = psd.PsdSettings(window_s=20.0)
+        settings = _settings(window_s=20.0)
 
         freqs, arms = psd.compare_recording(source, [("line-cleaned", cleaned)], settings)
 
@@ -123,7 +129,7 @@ class TestComparison:
         cleaned = _bids(tmp_path / "clean", line_amplitude=0.0)
 
         freqs, arms = psd.compare_recording(
-            source, [("line-cleaned", cleaned)], psd.PsdSettings(window_s=20.0)
+            source, [("line-cleaned", cleaned)], _settings(window_s=20.0)
         )
 
         change = psd.to_db(arms["line-cleaned"]) - psd.to_db(arms["source"])
@@ -144,7 +150,11 @@ class TestComparison:
         other = next((tmp_path / "odd").rglob("*_eeg.vhdr"))
 
         with pytest.raises(ValueError, match="channel set differs"):
-            psd.compare_recording(source, [("line-cleaned", other)], psd.PsdSettings(window_s=20.0))
+            psd.compare_recording(
+                source,
+                [("line-cleaned", other)],
+                _settings(window_s=20.0),
+            )
 
     def test_a_derivative_of_a_different_length_is_refused(self, tmp_path):
         import mne
@@ -160,7 +170,11 @@ class TestComparison:
         other = next((tmp_path / "short").rglob("*_eeg.vhdr"))
 
         with pytest.raises(ValueError, match="length differs"):
-            psd.compare_recording(source, [("line-cleaned", other)], psd.PsdSettings(window_s=20.0))
+            psd.compare_recording(
+                source,
+                [("line-cleaned", other)],
+                _settings(window_s=20.0),
+            )
 
 
 class TestFigures:
@@ -201,16 +215,23 @@ def test_the_stage_is_reachable_from_the_cli():
 def test_the_stage_refuses_before_apply_has_run(tmp_path, monkeypatch):
     import argparse
 
+    configured_settings = _settings()
+
     class Config:
         def path(self, name, override=None):
             return tmp_path / name
 
         def get(self, key, default=None):
-            return default
+            return {"task": "*"} if key == "dataset" else default
 
     monkeypatch.setattr(
         "decomb.config.load_config",
         lambda *a, **k: Config(),
+    )
+    monkeypatch.setattr(
+        psd.PsdSettings,
+        "from_config",
+        lambda config: configured_settings,
     )
 
     with pytest.raises(FileNotFoundError, match="Run `decomb apply` first"):

@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import catalogue
+from tests.configured_catalogue import catalogue
 
 
 def test_no_lines_found_is_its_own_exception():

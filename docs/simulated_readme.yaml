@@ -1,0 +1,24 @@
+# Reproducible signals and correction settings for the README figures.
+
+removal:
+  filter_jobs: 1
+  nominal_fundamental_hz: 1.2
+  harmonic_range: [24, 50]
+  removal_harmonic_range: [24, 50]
+  high_hz: 65.0
+
+simulation:
+  sampling_frequency_hz: 250.0
+  duration_s: 120.0
+  n_channels: 4
+  random_seed: 20260810
+  noise_standard_deviation_v: 1.5e-6
+  noise_spectral_exponent: 1.0
+  comb_amplitude_v: 6.0e-6
+  comb_decay_exponent: 0.25
+  test_oscillation_hz: 42.35
+  test_oscillation_amplitude_v: 4.0e-6
+  representative_harmonic: 35
+  analysis_margin_s: 20.0
+  overview_band_hz: [27.0, 61.0]
+  detail_band_hz: [41.65, 42.65]

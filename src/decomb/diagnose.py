@@ -14,10 +14,9 @@ fundamental is what ``removal.nominal_fundamental_hz`` should be set to. Residua
 millihertz level are the evidence; a set of unrelated peaks that merely happen to fall
 near a common spacing does not produce them.
 
-**Which bands are clusters rather than lines?** ``lines_per_band.tsv`` counts detections
-per configured band. A band holding many distinct non-stationary peaks in a narrow span
-cannot be cleared by subtracting sinusoids one at a time and belongs in ``notch_bands``;
-a band holding a few resolvable lines belongs to ``apply``, which costs far less.
+**Where are the detected lines?** ``lines_per_band.tsv`` counts detections per configured
+band. ``apply`` acts only on the harmonics independently supported by each recording; it
+does not convert isolated or merely nearby detections into automatic notches.
 
 ``band_impact.tsv`` then answers whether any of it is worth doing: how much of each band's
 power sits above the local background at the lines, per subject. A comb carrying a third
@@ -36,10 +35,13 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from decomb import catalogue, remove
+from decomb import catalogue, notch, recordings
 
 
-def subject_spectra(runs, settings: remove.RemovalSettings) -> tuple[np.ndarray, np.ndarray, list]:
+def subject_spectra(
+    runs,
+    settings: notch.HarmonicNotchSettings,
+) -> tuple[np.ndarray, np.ndarray, list]:
     """Channel-median whole-recording spectra, one row per subject.
 
     A subject with several recordings contributes their median, so a single long
@@ -53,9 +55,9 @@ def subject_spectra(runs, settings: remove.RemovalSettings) -> tuple[np.ndarray,
     freqs = None
     by_subject: dict[str, list[np.ndarray]] = {}
     for vhdr in runs:
-        subject = remove._subject_of(vhdr)
-        raw = remove.read_bids_raw(vhdr)
-        run_freqs, spectrum_db, _ = remove.run_spectrum(raw, settings)
+        subject = recordings.subject_of(vhdr)
+        raw = recordings.read_bids_raw(vhdr)
+        run_freqs, spectrum_db, _ = recordings.run_spectrum(raw, settings)
         if freqs is None:
             freqs = run_freqs
         elif run_freqs.shape != freqs.shape or not np.allclose(run_freqs, freqs):
@@ -73,11 +75,7 @@ def subject_spectra(runs, settings: remove.RemovalSettings) -> tuple[np.ndarray,
 
 
 def lines_per_band(lines: pd.DataFrame, bands: dict[str, list]) -> pd.DataFrame:
-    """How many detections fall in each configured band, and how much width they occupy.
-
-    The count is what distinguishes a band that ``apply`` can clear from one only a wide
-    notch can. Many detections packed into a narrow span is the signature of a cluster.
-    """
+    """How many detections fall in each configured analysis band."""
     rows = []
     for name, (low_hz, high_hz) in sorted(bands.items(), key=lambda item: item[1][0]):
         inside = lines.loc[(lines["refined_hz"] >= low_hz) & (lines["refined_hz"] <= high_hz)]
@@ -107,7 +105,7 @@ def run(args: argparse.Namespace) -> None:
     bids_root = config.path("bids_root", override=getattr(args, "bids_root", None))
     output_dir = config.path("diagnosis_dir", override=getattr(args, "output_dir", None))
 
-    settings = remove.RemovalSettings.from_config(config)
+    settings = notch.HarmonicNotchSettings.from_config(config)
     detection = catalogue.DetectionSettings.from_config(config)
 
     from decomb import effective
@@ -126,7 +124,7 @@ def run(args: argparse.Namespace) -> None:
     tr_seconds = dataset.get("tr_seconds")
     tr_seconds = None if tr_seconds is None else float(tr_seconds)
 
-    runs = remove.discover_runs(
+    runs = recordings.discover_runs(
         bids_root, subjects=getattr(args, "subjects", None), task=settings.task
     )
     print(f"Measuring {len(runs)} recording(s) under {bids_root}")
@@ -138,14 +136,13 @@ def run(args: argparse.Namespace) -> None:
         lines = catalogue.detect_cohort_lines(
             grid,
             detection,
-            exclude_hz=remove.detection_exclusion_hz(settings),
             tr_seconds=tr_seconds,
         )
     except catalogue.NoLinesDetected:
         # A clean dataset is a result. Report it as one rather than raising.
         print("No line survived FDR control. Nothing to remove.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        remove._write_tsv_atomic(pd.DataFrame(), output_dir / "lines.tsv")
+        recordings.write_tsv_atomic(pd.DataFrame(), output_dir / "lines.tsv")
         return
 
     structure = catalogue.comb_structure(lines, detection, tr_seconds=tr_seconds)
@@ -153,15 +150,15 @@ def run(args: argparse.Namespace) -> None:
     bands = config.get("frequency_bands") or {}
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    remove._write_tsv_atomic(classified, output_dir / "lines.tsv")
-    remove._write_tsv_atomic(structure, output_dir / "comb.tsv")
+    recordings.write_tsv_atomic(classified, output_dir / "lines.tsv")
+    recordings.write_tsv_atomic(structure, output_dir / "comb.tsv")
     impact = pd.DataFrame()
     if bands:
-        remove._write_tsv_atomic(
+        recordings.write_tsv_atomic(
             lines_per_band(classified, bands), output_dir / "lines_per_band.tsv"
         )
         impact = catalogue.band_impact(grid, subjects, classified, bands, detection)
-        remove._write_tsv_atomic(impact, output_dir / "band_impact.tsv")
+        recordings.write_tsv_atomic(impact, output_dir / "band_impact.tsv")
     np.savez_compressed(
         output_dir / "spectra.npz",
         freqs=freqs,

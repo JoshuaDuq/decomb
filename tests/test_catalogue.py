@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import catalogue
+from tests.configured_catalogue import catalogue
 
 TR = 0.9  # an arbitrary acquisition period, supplied explicitly below
 

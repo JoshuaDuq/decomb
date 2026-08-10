@@ -1,9 +1,6 @@
 """A one-participant dataset must be verifiable, because the workflow accepts one.
 
-The README's whole point about needing no events is that a lone continuous acquisition --
-a resting or baseline recording -- is a valid input, and ``benchmark`` and ``apply`` both
-honour that: the acceptance criteria fall back to each recording's own exact test when
-Benjamini-Hochberg has a single row to work with.
+A lone continuous acquisition -- a resting or baseline recording -- is a valid input.
 
 ``verify`` did not. It characterises the lines it finds with a percentile bootstrap over
 the sampling unit, and a bootstrap over one participant has no interval to report, so the
@@ -20,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import catalogue
+from tests.configured_catalogue import catalogue
 
 
 def _grid(n_subjects: int) -> catalogue.Grid:

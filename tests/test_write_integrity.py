@@ -12,13 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import remove
-
-
-def test_nan_defeats_a_bare_tolerance_comparison():
-    """The reason an explicit finiteness check is needed rather than a tighter tolerance."""
-    deviation = np.max(np.abs(np.array([1.0, np.nan]) - np.array([1.0, 1.0])))
-    assert not (deviation > remove.RemovalSettings().roundtrip_relative_tolerance)
+from decomb import recordings
 
 
 def test_writing_a_non_finite_array_raises(brainvision_run, tmp_path):
@@ -26,7 +20,7 @@ def test_writing_a_non_finite_array_raises(brainvision_run, tmp_path):
     data = raw.get_data()
     data[0, 5] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
-        remove.write_eeg_binary(path, tmp_path / "out.eeg", data)
+        recordings.write_eeg_binary(path, tmp_path / "out.eeg", data)
 
 
 def test_writing_an_infinite_array_raises(brainvision_run, tmp_path):
@@ -34,10 +28,10 @@ def test_writing_an_infinite_array_raises(brainvision_run, tmp_path):
     data = raw.get_data()
     data[1, 3] = np.inf
     with pytest.raises(ValueError, match="non-finite"):
-        remove.write_eeg_binary(path, tmp_path / "out.eeg", data)
+        recordings.write_eeg_binary(path, tmp_path / "out.eeg", data)
 
 
 def test_a_finite_array_still_writes(brainvision_run, tmp_path):
     path, raw = brainvision_run
-    remove.write_eeg_binary(path, tmp_path / "out.eeg", raw.get_data())
+    recordings.write_eeg_binary(path, tmp_path / "out.eeg", raw.get_data())
     assert (tmp_path / "out.eeg").exists()

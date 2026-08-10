@@ -32,27 +32,23 @@ ENV_VAR = "DECOMB_CONFIG"
 LOCAL_CONFIG_NAME = "decomb.yaml"
 
 #: Paths another path may refer to with a ``<name>`` placeholder.
-REFERENCEABLE = ("bids_root", "output_root", "notched_root")
+REFERENCEABLE = ("bids_root", "output_root")
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge ``override`` onto ``base``, recursing into nested mappings.
 
-    A scalar or list in ``override`` replaces its counterpart outright. Lists are not
-    concatenated: ``notch_bands`` given in a user's file means those bands and no others,
-    which is the only reading that lets a user turn a default off.
+    A scalar or list in ``override`` replaces its counterpart outright; lists are never
+    concatenated.
     """
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
         elif value is None and isinstance(merged.get(key), dict):
-            # `benchmark:\n  probe:` followed by nothing but comments reads as null, and
-            # replacing the block with it would discard every default underneath while
-            # looking, in the file, like a section the author had deliberately left alone.
-            # The settings then in force would be the dataclass defaults rather than the
-            # ones the config appears to describe. Refuse instead: an empty block is always
-            # a mistake, because deleting the key does the same thing and says so.
+            # A mapping followed by nothing but comments reads as null. Replacing the
+            # block with it would discard every packaged default underneath while looking
+            # like a section the author deliberately left alone. Refuse the ambiguity.
             raise ValueError(
                 f"`{key}` is empty in the config file. An empty block is read as null and "
                 f"would replace the {len(merged[key])} default(s) under `{key}` rather "
@@ -121,8 +117,7 @@ class DecombConfig:
     def effective(self) -> list[tuple[str, Any, str]]:
         """Every setting in force, with its value and where it came from."""
         return [
-            (key, self.get(key), self.provenance(key))
-            for key in sorted(_dotted_keys(self.data))
+            (key, self.get(key), self.provenance(key)) for key in sorted(_dotted_keys(self.data))
         ]
 
     def get(self, key: str, default: Any = None) -> Any:

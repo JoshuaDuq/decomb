@@ -17,7 +17,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from decomb import catalogue, spectral
+from decomb import spectral
+from tests.configured_catalogue import catalogue
 
 
 def _lines(frequencies) -> pd.DataFrame:

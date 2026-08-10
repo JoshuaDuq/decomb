@@ -2,19 +2,16 @@
 
     decomb psd
 
-Answers the question a reader asks first: what did this actually take out, and did it take
-out anything else? Three figures from Welch spectra computed by ``Raw.compute_psd`` on the
-source and on each derivative in turn: an overview of the whole band, the same data tiled
-into readable spans, and one panel per recording.
+Answers the question a reader asks first: what did this actually take out? Three figures
+from Welch spectra computed by ``Raw.compute_psd`` on the source and harmonic-notch
+derivative: an overview, readable frequency tiles, and one panel per recording.
 
 The tiled figure exists because the overview cannot answer the second question. Drawing
 the whole band on one axis puts several frequency bins in every pixel, so a comb line is
 sub-pixel from its neighbour: the overview shows that the lines went, and cannot show
 whether they went surgically or took their surroundings with them.
 
-Runs on whatever exists. After ``apply`` it compares the source against the line-cleaned
-copy; after ``notch`` it adds the notched copy as a third trace, so the two transforms can
-be told apart rather than seen only in combination.
+It runs after ``apply`` and compares the source against the single delivered derivative.
 
 Unlike the stages that transform or certify, this one accepts ``--subjects``: a figure of
 part of a cohort is a smaller figure, not a false claim about the whole one.
@@ -38,27 +35,24 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from decomb import remove  # noqa: E402
+from decomb import recordings  # noqa: E402
 from decomb.spectral import to_db  # noqa: E402
-
-BAND_HZ = (1.0, 100.0)
-"""Frequencies drawn. Wide enough to show that low frequencies were left alone."""
 
 
 @dataclass(frozen=True)
 class PsdSettings:
     """How the spectra are computed. One set of values for every arm of the comparison."""
 
-    window_s: float = 54.0
+    window_s: float
     """Welch segment length, in seconds. Sets the resolution to ``1 / window_s``.
 
     Match it to the removal's estimation window so the figure resolves what the fit
     resolved. Resolving the comb spacing needs far less; resolving a close line pair needs
     all of it.
     """
-    overlap: float = 0.5
-    band_hz: tuple[float, float] = BAND_HZ
-    panel_span_hz: float = 10.0
+    overlap: float
+    band_hz: tuple[float, float]
+    panel_span_hz: float
     """Width of each panel in the tiled figure -- narrow enough for roughly one bin per pixel."""
 
     def __post_init__(self) -> None:
@@ -74,19 +68,20 @@ class PsdSettings:
 
     @classmethod
     def from_config(cls, config) -> PsdSettings:
-        block = config.get("psd") or {}
-        defaults = cls()
-        band = block.get("band_hz", defaults.band_hz)
+        block = dict(config.get("psd") or {})
+        known = {"window_s", "overlap", "band_hz", "panel_span_hz"}
+        unknown = set(block) - known
+        if unknown:
+            raise ValueError(f"Unknown `psd` setting(s): {sorted(unknown)}.")
+        missing = known - set(block)
+        if missing:
+            raise ValueError(f"Missing `psd` setting(s): {sorted(missing)}.")
+        band = block["band_hz"]
         return cls(
-            window_s=float(
-                block.get(
-                    "window_s",
-                    config.get("removal.estimation_window_s", defaults.window_s),
-                )
-            ),
-            overlap=float(block.get("overlap", defaults.overlap)),
+            window_s=float(block["window_s"]),
+            overlap=float(block["overlap"]),
             band_hz=(float(band[0]), float(band[1])),
-            panel_span_hz=float(block.get("panel_span_hz", defaults.panel_span_hz)),
+            panel_span_hz=float(block["panel_span_hz"]),
         )
 
 
@@ -132,11 +127,11 @@ def compare_recording(
     channel set, length or sampling rate is not a comparison, it is two different
     recordings on one axis.
     """
-    source = remove.read_bids_raw(source_vhdr)
+    source = recordings.read_bids_raw(source_vhdr)
     freqs, source_psd = channel_median_psd(source, settings)
     spectra = {"source": source_psd}
     for label, path in derivative_vhdrs:
-        derivative = remove.read_bids_raw(path)
+        derivative = recordings.read_bids_raw(path)
         if derivative.ch_names != source.ch_names:
             raise ValueError(f"{label} {path.name}: channel set differs from the source.")
         if derivative.n_times != source.n_times:
@@ -152,27 +147,18 @@ def compare_recording(
     return freqs, spectra
 
 
-ANALYSIS_BANDS = (
-    ("delta", 1.0, 3.9),
-    ("theta", 4.0, 7.9),
-    ("alpha", 8.0, 12.9),
-    ("beta", 13.0, 30.0),
-    ("gamma", 30.1, 80.0),
-)
-"""Named bands, annotated on each panel so a span can be placed in what gets analysed."""
-
-
 def analysis_bands_from_config(config) -> tuple[tuple[str, float, float], ...]:
     """The study's own bands where it defines them, so the labels match its analyses."""
     defined = config.get("frequency_bands") or {}
     if not isinstance(defined, dict):
-        return ANALYSIS_BANDS
-    named = [
-        (name, float(defined[name][0]), float(defined[name][1]))
-        for name, _, _ in ANALYSIS_BANDS
-        if name in defined
-    ]
-    return tuple(named) or ANALYSIS_BANDS
+        raise ValueError("frequency_bands must be a mapping of name to [low, high].")
+    bands = []
+    for name, edges in defined.items():
+        low_hz, high_hz = (float(value) for value in edges)
+        if high_hz <= low_hz:
+            raise ValueError(f"frequency_bands.{name} must have increasing edges.")
+        bands.append((str(name), low_hz, high_hz))
+    return tuple(bands)
 
 
 def panel_edges(band_hz: tuple[float, float], span_hz: float) -> tuple[tuple[float, float], ...]:
@@ -197,7 +183,7 @@ def figure_band_panels(
     path: Path,
     *,
     settings: PsdSettings,
-    bands=ANALYSIS_BANDS,
+    bands=(),
 ) -> None:
     """The same spectra tiled into readable spans, one panel per range.
 
@@ -247,9 +233,8 @@ ARM_STYLE = {
     # "this line was removed" and "this feature was already here" render identically --
     # which matters wherever the source spectrum already carried structure this pass never
     # aimed at, such as the periodic residue of an upstream gradient correction.
-    "source": ("#F3A28E", "before removal", 2.2),
-    "line-cleaned": ("#111827", "after line removal", 0.7),
-    "notched": ("#2563EB", "after line removal + notch", 0.7),
+    "source": ("#F3A28E", "before correction", 2.2),
+    "harmonic-notched": ("#111827", "after harmonic notches", 0.7),
 }
 DEFAULT_STYLE = ("#6B7280", "", 0.7)
 
@@ -344,15 +329,11 @@ def run(args: argparse.Namespace) -> None:
 
     config = load_config(getattr(args, "config", None))
     settings = PsdSettings.from_config(config)
-    removal = remove.RemovalSettings.from_config(config)
+    task = str((config.get("dataset") or {})["task"])
     source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
 
-    candidates = [("line-cleaned", config.path("output_root"))]
-    try:
-        candidates.append(("notched", config.path("notched_root")))
-    except KeyError:  # a config without the optional notch stage
-        pass
+    candidates = [("harmonic-notched", config.path("output_root"))]
     available = [(label, root) for label, root in candidates if root.is_dir()]
     if not available:
         raise FileNotFoundError(
@@ -360,7 +341,7 @@ def run(args: argparse.Namespace) -> None:
         )
 
     subjects = getattr(args, "subjects", None)
-    runs = remove.discover_runs(source_root, subjects=subjects, task=removal.task)
+    runs = recordings.discover_runs(source_root, subjects=subjects, task=task)
     print(f"Measuring {len(runs)} recordings from {source_root}")
     for label, root in available:
         print(f"  against {label}: {root}")

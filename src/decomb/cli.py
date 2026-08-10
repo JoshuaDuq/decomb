@@ -12,15 +12,12 @@ from pathlib import Path
 
 from decomb import __version__
 
-STAGES = ("diagnose", "benchmark", "apply", "verify", "report", "notch", "psd")
+STAGES = ("diagnose", "apply", "verify", "psd")
 
 STAGE_HELP = {
     "diagnose": "measure which lines exist, whether they form a comb, and what they cost",
-    "benchmark": "check the removal against its preservation criteria -- run this first",
-    "apply": "write the cleaned BIDS copy (refuses without a passing benchmark)",
-    "verify": "re-measure what was written, sweeping the band with no knowledge of the targets",
-    "report": "band-by-band outcome tables and figure",
-    "notch": "optional: wide FIR notch over configured cluster bands",
+    "apply": "detect supported comb harmonics and write the narrowly notched BIDS copy",
+    "verify": "measure harmonic suppression and the exact unavailable frequency intervals",
     "psd": "before-and-after spectra of whatever exists",
 }
 
@@ -58,11 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", type=Path, default=None, help="diagnose: where the catalogue goes"
     )
     parser.add_argument(
-        "--report-dir", type=Path, default=None, help="benchmark/verify/report: where tables go"
-    )
-    parser.add_argument("--filter-length", default=None, help="override the removal filter length")
-    parser.add_argument(
-        "--mt-bandwidth", type=float, default=None, help="override the multitaper bandwidth"
+        "--report-dir", type=Path, default=None, help="apply/verify: where tables go"
     )
     return parser
 
@@ -71,7 +64,7 @@ def run_stage(args: argparse.Namespace) -> None:
     # A subject subset cannot certify or transform a dataset: the gates are decided over
     # the recordings jointly, and a partial write would leave the output root in a state
     # no provenance describes.
-    if args.stage in {"benchmark", "apply", "verify", "notch"} and args.subjects:
+    if args.stage in {"apply", "verify"} and args.subjects:
         raise SystemExit(
             f"decomb {args.stage} must use every recording; --subjects cannot certify or "
             "transform a subset of the dataset."
@@ -81,23 +74,18 @@ def run_stage(args: argparse.Namespace) -> None:
         from decomb import diagnose
 
         diagnose.run(args)
-    elif args.stage == "report":
-        from decomb import report
-
-        args.removal_dir = args.report_dir
-        report.run(args)
-    elif args.stage == "notch":
+    elif args.stage == "apply":
         from decomb import notch
 
         notch.run(args)
+    elif args.stage == "verify":
+        from decomb import notch
+
+        notch.run_verify(args)
     elif args.stage == "psd":
         from decomb import psd
 
         psd.run(args)
-    else:
-        from decomb import remove
-
-        remove.run(args)
 
 
 def main(argv: list[str] | None = None) -> int:

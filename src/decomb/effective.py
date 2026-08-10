@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from decomb.config import DecombConfig
-from decomb.remove import RemovalSettings
 
 #: Settings the workflow computes rather than reads, with the expression that produces
 #: each. These appear in no config file, so without this they are invisible to a reader.
@@ -31,21 +30,24 @@ DERIVED: tuple[tuple[str, str], ...] = (
         "removal.max_fit_residual_rms_hz",
         "max_fit_residual_rms_resolutions * spectral_resolution_hz",
     ),
-    ("removal.max_line_width_hz", "max_line_width_resolutions * spectral_resolution_hz"),
-    ("removal.protected_bands_hz", "notch_bands + mains_notch_hz when exclude_mains"),
+    (
+        "removal.transition_bandwidth_hz",
+        "transition_bandwidth_resolutions * spectral_resolution_hz",
+    ),
+    (
+        "removal.minimum_stopband_width_hz",
+        "minimum_stopband_resolutions * spectral_resolution_hz",
+    ),
 )
 
 
-def _value_of(settings: RemovalSettings, dotted: str) -> Any:
+def _value_of(settings, dotted: str) -> Any:
     return getattr(settings, dotted.split(".", 1)[1])
 
 
-def rows(config: DecombConfig, settings: RemovalSettings) -> list[tuple[str, str, str]]:
+def rows(config: DecombConfig, settings) -> list[tuple[str, str, str]]:
     """Every setting in force: name, value, origin."""
-    table = [
-        (key, _format(value), origin)
-        for key, value, origin in config.effective()
-    ]
+    table = [(key, _format(value), origin) for key, value, origin in config.effective()]
     table.extend(
         (key, _format(_value_of(settings, key)), f"derived: {expression}")
         for key, expression in DERIVED
@@ -65,7 +67,7 @@ def _format(value: Any) -> str:
 
 def write(
     config: DecombConfig,
-    settings: RemovalSettings,
+    settings,
     destination: Path,
     *,
     stage: str,
@@ -92,7 +94,7 @@ def write(
     return destination
 
 
-def summarise(config: DecombConfig, settings: RemovalSettings) -> str:
+def summarise(config: DecombConfig, settings) -> str:
     """A one-line count for a stage's console output."""
     table = rows(config, settings)
     changed = sum(1 for _, _, origin in table if origin not in {"packaged defaults"})

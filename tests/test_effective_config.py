@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from decomb import effective, remove
+from decomb import effective, notch
 from decomb.config import load_config
 
 
@@ -49,19 +49,19 @@ class TestProvenance:
 class TestTheReport:
     def test_it_covers_every_setting_in_force(self, tmp_path):
         config = _config(tmp_path, {})
-        settings = remove.RemovalSettings.from_config(config)
+        settings = notch.HarmonicNotchSettings.from_config(config)
 
         table = effective.rows(config, settings)
         names = {name for name, _, _ in table}
 
         assert "removal.estimation_window_s" in names
         assert "detection.fdr_alpha" in names
-        assert "benchmark.probe.burst_hz" in names
+        assert "frequency_bands.gamma" in names
 
     def test_derived_values_appear_with_the_expression_that_made_them(self, tmp_path):
         """They are in no config file, so without this they are invisible to a reader."""
         config = _config(tmp_path, {})
-        settings = remove.RemovalSettings.from_config(config)
+        settings = notch.HarmonicNotchSettings.from_config(config)
 
         table = {name: (value, origin) for name, value, origin in effective.rows(config, settings)}
 
@@ -72,7 +72,7 @@ class TestTheReport:
 
     def test_a_derived_value_tracks_the_setting_it_derives_from(self, tmp_path):
         config = _config(tmp_path, {"removal": {"estimation_window_s": 108.0}})
-        settings = remove.RemovalSettings.from_config(config)
+        settings = notch.HarmonicNotchSettings.from_config(config)
 
         table = {name: value for name, value, _ in effective.rows(config, settings)}
 
@@ -80,10 +80,10 @@ class TestTheReport:
 
     def test_it_is_written_where_the_outputs_go(self, tmp_path):
         config = _config(tmp_path, {})
-        settings = remove.RemovalSettings.from_config(config)
+        settings = notch.HarmonicNotchSettings.from_config(config)
 
         written = effective.write(
-            config, settings, tmp_path / "out" / "effective.txt", stage="benchmark"
+            config, settings, tmp_path / "out" / "effective.txt", stage="apply"
         )
 
         text = written.read_text(encoding="utf-8")
@@ -94,14 +94,13 @@ class TestTheReport:
 
 class TestAnEmptyBlockIsRefused:
     def test_a_key_with_nothing_under_it_does_not_silently_wipe_the_defaults(self, tmp_path):
-        """`benchmark:\\n  probe:` with only comments beneath reads as null.
+        """A mapping with only comments beneath it reads as null.
 
-        Merging that over the defaults replaced the whole probe block, so every setting
-        under it reverted to a dataclass default while the file looked like a section left
-        deliberately alone. It cost a real config its burst frequency without a word.
+        Merging that over the defaults would replace the whole block while the file looks
+        like a section left deliberately alone.
         """
         path = tmp_path / "decomb.yaml"
-        path.write_text("benchmark:\n  probe:\n    # only a comment\n", encoding="utf-8")
+        path.write_text("detection:\n  # only a comment\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="empty block"):
             load_config(path)
@@ -117,9 +116,8 @@ class TestAnEmptyBlockIsRefused:
         assert "Delete the key" in str(excinfo.value)
 
     def test_a_block_with_settings_in_it_still_merges(self, tmp_path):
-        config = _config(tmp_path, {"benchmark": {"probe": {"burst_hz": 45.0}}})
-        settings = remove.RemovalSettings.from_config(config)
+        config = _config(tmp_path, {"removal": {"filter_jobs": 2}})
+        settings = notch.HarmonicNotchSettings.from_config(config)
 
-        assert settings.benchmark.probe.burst_hz == 45.0
-        # and the siblings it did not mention survive
-        assert settings.benchmark.probe.burst_sd_s == 0.05
+        assert settings.filter_jobs == 2
+        assert settings.estimation_window_s == 54.0

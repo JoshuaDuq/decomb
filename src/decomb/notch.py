@@ -1,59 +1,152 @@
-"""Remove the bands the line removal cannot: a wide FIR notch over measured clusters.
+"""Automatic participant-specific FIR notches for supported comb harmonics.
 
-    decomb notch
-
-``apply`` subtracts a sinusoid wherever a line is resolvable. Some contamination is not:
-a band can carry a hundred distinct peaks above 3 dB at millihertz resolution,
-non-stationary between windows -- the structure mains itself usually has. Removing the
-tallest peak one at a time just exposes the next one; only a notch spanning the whole
-cluster works, at the cost of the band's full width whether or not signal was in it. That
-different trade is why this is its own stage: it runs last, reads what ``apply`` wrote,
-and writes its own BIDS root so the two transforms stay separable.
-
-Like ``apply``, sidecars are copied byte-for-byte and only ``.eeg`` binaries are
-rewritten; only EEG channels are filtered, ECG and EOG stay byte-identical.
-
-A fixed-width FIR notch has no estimator that can be wrong, so nothing here is gated --
-instead the manifest records, per recording and per band, what the notch actually took
-and what it cost in each analysed band.
+The transform makes no claim to recover neural activity at a removed harmonic. Its
+manifest therefore records every stopband and transition as unavailable for inference.
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from decomb import remove
-
-CANONICAL_BANDS = ("delta", "theta", "alpha", "beta", "gamma")
-"""Bands the cost is reported against, when the configuration defines them."""
+from decomb import __version__, harmonics, recordings, spectral
 
 
 @dataclass(frozen=True)
-class NotchBand:
-    """One contiguous span to remove, named by its edges rather than a centre and width.
+class HarmonicNotchSettings:
+    """Configuration required to detect and notch supported comb harmonics."""
 
-    Edges are what a diagnosis measures and what a reader can check against a spectrum; a
-    centre and a width are what the filter wants. Converting here keeps the configuration
-    in the units the evidence is in.
-    """
+    task: str
+    estimation_window_s: float
+    estimation_overlap: float
+    filter_jobs: int
+    nominal_fundamental_hz: float
+    harmonic_range: tuple[int, int]
+    removal_harmonic_range: tuple[int, int]
+    search_hz: float
+    min_prominence_db: float
+    uncertainty_confidence_z: float
+    low_hz: float
+    high_hz: float
+    background_half_width_hz: float
+    min_harmonics_for_fit: int
+    max_harmonic_residual_resolutions: float
+    max_fit_residual_rms_resolutions: float
+    minimum_stopband_resolutions: float
+    transition_bandwidth_resolutions: float
+    residual_search_hz: float
+    roundtrip_relative_tolerance: float
 
+    def __post_init__(self) -> None:
+        positive = (
+            "estimation_window_s",
+            "nominal_fundamental_hz",
+            "search_hz",
+            "uncertainty_confidence_z",
+            "background_half_width_hz",
+            "max_harmonic_residual_resolutions",
+            "max_fit_residual_rms_resolutions",
+            "minimum_stopband_resolutions",
+            "transition_bandwidth_resolutions",
+            "residual_search_hz",
+            "roundtrip_relative_tolerance",
+        )
+        for name in positive:
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"removal.{name} must be finite and positive.")
+        if not self.task.strip():
+            raise ValueError("dataset.task must name a BIDS task label.")
+        if self.filter_jobs < 1:
+            raise ValueError("removal.filter_jobs must be positive.")
+        if not 0.0 < self.estimation_overlap < 1.0:
+            raise ValueError("removal.estimation_overlap must lie strictly between zero and one.")
+        if self.min_harmonics_for_fit < 3:
+            raise ValueError("removal.min_harmonics_for_fit must be at least three.")
+        if not 0.0 <= self.low_hz < self.high_hz:
+            raise ValueError("removal low_hz and high_hz must be increasing.")
+        for name in ("harmonic_range", "removal_harmonic_range"):
+            first, last = getattr(self, name)
+            if first < 1 or last < first:
+                raise ValueError(f"removal.{name} must contain increasing positive integers.")
+        if self.search_hz >= self.nominal_fundamental_hz / 2.0:
+            raise ValueError("removal.search_hz must be below half the nominal fundamental.")
+        if self.max_fit_residual_rms_resolutions > self.max_harmonic_residual_resolutions:
+            raise ValueError(
+                "removal.max_fit_residual_rms_resolutions cannot exceed "
+                "max_harmonic_residual_resolutions."
+            )
+
+    @property
+    def spectral_resolution_hz(self) -> float:
+        return spectral.hann_resolution_hz(self.estimation_window_s)
+
+    @property
+    def transition_bandwidth_hz(self) -> float:
+        return self.transition_bandwidth_resolutions * self.spectral_resolution_hz
+
+    @property
+    def minimum_stopband_width_hz(self) -> float:
+        return self.minimum_stopband_resolutions * self.spectral_resolution_hz
+
+    @property
+    def max_harmonic_residual_hz(self) -> float:
+        return self.max_harmonic_residual_resolutions * self.spectral_resolution_hz
+
+    @property
+    def max_fit_residual_rms_hz(self) -> float:
+        return self.max_fit_residual_rms_resolutions * self.spectral_resolution_hz
+
+    @classmethod
+    def from_config(cls, config) -> HarmonicNotchSettings:
+        block = dict(config.get("removal") or {})
+        known = {entry.name for entry in fields(cls)} - {"task"}
+        unknown = set(block) - known
+        if unknown:
+            raise ValueError(
+                f"Unknown `removal` setting(s): {sorted(unknown)}. "
+                f"Known settings are {sorted(known)}."
+            )
+        missing = known - set(block)
+        if missing:
+            raise ValueError(f"Missing `removal` setting(s): {sorted(missing)}.")
+        values: dict[str, object] = {"task": str((config.get("dataset") or {}).get("task", ""))}
+        for entry in fields(cls):
+            if entry.name not in block:
+                continue
+            value = block[entry.name]
+            if entry.name in {"harmonic_range", "removal_harmonic_range"}:
+                values[entry.name] = tuple(int(item) for item in value)
+            elif entry.name in {"filter_jobs", "min_harmonics_for_fit"}:
+                values[entry.name] = int(value)
+            else:
+                values[entry.name] = float(value)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class HarmonicStopband:
+    """One measured harmonic interval that is unavailable after filtering."""
+
+    harmonics: tuple[int, ...]
     low_hz: float
     high_hz: float
 
     def __post_init__(self) -> None:
+        if not self.harmonics or tuple(sorted(set(self.harmonics))) != self.harmonics:
+            raise ValueError("Stopband harmonics must be sorted unique positive integers.")
+        if any(harmonic < 1 for harmonic in self.harmonics):
+            raise ValueError("Stopband harmonics must be positive.")
         if not np.all(np.isfinite((self.low_hz, self.high_hz))):
-            raise ValueError("Notch band edges must be finite.")
-        if self.low_hz <= 0.0:
-            raise ValueError(f"Notch band edges must be positive, got {self.low_hz}.")
-        if self.high_hz <= self.low_hz:
-            raise ValueError(
-                f"Notch band must have increasing edges, got [{self.low_hz}, {self.high_hz}]."
-            )
+            raise ValueError("Stopband edges must be finite.")
+        if self.low_hz <= 0.0 or self.high_hz <= self.low_hz:
+            raise ValueError("Stopband edges must be positive and increasing.")
 
     @property
     def centre_hz(self) -> float:
@@ -63,135 +156,294 @@ class NotchBand:
     def width_hz(self) -> float:
         return self.high_hz - self.low_hz
 
-    def overlap_hz(self, low_hz: float, high_hz: float) -> float:
-        """Hertz shared with another span, zero when they are disjoint."""
-        return max(0.0, min(self.high_hz, high_hz) - max(self.low_hz, low_hz))
-
-    def __str__(self) -> str:
-        return f"{self.low_hz:g}-{self.high_hz:g} Hz"
-
 
 @dataclass(frozen=True)
-class NotchSettings:
-    """Everything the notch stage needs, resolved from configuration."""
+class HarmonicNotchPlan:
+    """The complete fixed FIR geometry for one recording."""
 
-    bands: tuple[NotchBand, ...]
-    analysed_bands: tuple[tuple[str, float, float], ...]
-    filter_jobs: int = 4
-    trans_bandwidth_hz: float = 1.0
-    """Width of each transition, in Hz, on both sides of a band.
-
-    MNE's own default for ``notch_filter``. It is why a notch always costs more than the
-    span it is asked for -- a band requested at 0.3 Hz can measure nearly 1 Hz once the
-    transitions are counted. The manifest reports what was actually attenuated rather than
-    what was requested, for that reason.
-    """
+    stopbands: tuple[HarmonicStopband, ...]
+    transition_bandwidth_hz: float
 
     def __post_init__(self) -> None:
-        if not self.bands:
-            raise ValueError(
-                "No notch bands are configured, so there is nothing for this stage to do. "
-                "`decomb notch` is opt-in: set `notch_bands` to the [low, high] edges of a "
-                "band that `apply` cannot reach because its contamination is a cluster "
-                "rather than a resolvable line. It ships empty because a band costs its "
-                "full width whether or not signal was in it."
-            )
-        if self.filter_jobs < 1:
-            raise ValueError("filter_jobs must be positive.")
-        if not np.isfinite(self.trans_bandwidth_hz) or self.trans_bandwidth_hz <= 0.0:
-            raise ValueError("trans_bandwidth_hz must be finite and positive.")
-        edges = sorted((band.low_hz, band.high_hz) for band in self.bands)
-        for (_, earlier_high), (later_low, _) in zip(edges, edges[1:]):
-            if later_low < earlier_high:
-                raise ValueError("Notch bands must not overlap; merge them into one span instead.")
+        if not self.stopbands:
+            raise ValueError("A harmonic notch plan requires at least one supported harmonic.")
+        if not np.isfinite(self.transition_bandwidth_hz) or self.transition_bandwidth_hz <= 0.0:
+            raise ValueError("The transition bandwidth must be finite and positive.")
+        if any(
+            later.low_hz < earlier.high_hz
+            for earlier, later in zip(self.stopbands, self.stopbands[1:])
+        ):
+            raise ValueError("Harmonic stopbands must be sorted and non-overlapping.")
 
-    @classmethod
-    def from_config(cls, config) -> NotchSettings:
-        """Read ``notch_bands`` and the analysed bands from the workflow configuration."""
-        # No band is notched unless the configuration names one. This stage costs the full
-        # width of a band whether or not signal was in it, and where a band belongs is a
-        # property of one room, so an empty list is the only safe default -- and it is not
-        # an error, it means this stage has nothing to do. __post_init__ says so in full.
-        configured = config.get("notch_bands") or ()
-        if not isinstance(configured, (list, tuple)):
-            raise ValueError("notch_bands must be a list of [low, high] pairs.")
-        bands = tuple(_band_from_entry(entry) for entry in configured)
-        defaults = cls(bands=bands, analysed_bands=())
-        return cls(
-            bands=bands,
-            analysed_bands=analysed_bands_from_config(config),
-            filter_jobs=int(config.get("removal.filter_jobs", defaults.filter_jobs)),
-            trans_bandwidth_hz=float(
-                config.get("notch_trans_bandwidth_hz", defaults.trans_bandwidth_hz)
-            ),
+    def unavailable_edges(self) -> tuple[tuple[float, float], ...]:
+        """Intervals unsuitable for inference, including the FIR transitions."""
+        half_transition_hz = self.transition_bandwidth_hz / 2.0
+        return tuple(
+            (
+                stopband.low_hz - half_transition_hz,
+                stopband.high_hz + half_transition_hz,
+            )
+            for stopband in self.stopbands
         )
 
 
-def _band_from_entry(entry) -> NotchBand:
-    """Build one band from a configuration entry, refusing anything not a pair."""
-    if isinstance(entry, dict):
-        try:
-            return NotchBand(float(entry["low"]), float(entry["high"]))
-        except KeyError as error:
-            raise ValueError(f"A notch band mapping needs 'low' and 'high': {entry!r}") from error
-    values = tuple(entry) if isinstance(entry, (list, tuple)) else ()
-    if len(values) != 2:
-        raise ValueError(f"Each notch band must be a [low, high] pair, got {entry!r}.")
-    return NotchBand(float(values[0]), float(values[1]))
+def _observed_harmonic_intervals(model, settings) -> list[HarmonicStopband]:
+    """Intervals supported by the whole run and localized in its adaptive windows."""
+    first, last = settings.removal_harmonic_range
+    supported = {
+        harmonic
+        for harmonic in model.whole_estimate.supported_harmonics
+        if first <= harmonic <= last
+    }
+    whole_positions = dict(
+        zip(
+            model.whole_estimate.supported_harmonics,
+            model.whole_estimate.supported_positions_hz,
+        )
+    )
+    intervals = []
+    for harmonic in sorted(supported):
+        uncertainty_hz = (
+            settings.uncertainty_confidence_z
+            * harmonic
+            * model.whole_estimate.fundamental_jackknife_se_hz
+        )
+        lower_edges = [whole_positions[harmonic] - uncertainty_hz]
+        upper_edges = [whole_positions[harmonic] + uncertainty_hz]
+        for evidence in model.window_evidence:
+            positions = dict(zip(evidence.harmonics, evidence.positions_hz))
+            if harmonic not in positions:
+                continue
+            lower_edges.append(positions[harmonic])
+            upper_edges.append(positions[harmonic])
 
-
-def analysed_bands_from_config(config) -> tuple[tuple[str, float, float], ...]:
-    """The bands the notch's cost is reported against.
-
-    Read from the config's ``frequency_bands`` so the manifest speaks in the units the
-    study's analyses do. Only the canonical five are taken; any other name defined there
-    is ignored rather than reported against.
-    """
-    defined = config.get("frequency_bands") or {}
-    if not isinstance(defined, dict):
-        raise ValueError("frequency_bands must be a mapping of name to [low, high].")
-    bands = []
-    for name in CANONICAL_BANDS:
-        edges = defined.get(name)
-        if edges is None:
+        low_hz = min(lower_edges)
+        high_hz = max(upper_edges)
+        centre_hz = (low_hz + high_hz) / 2.0
+        if not settings.low_hz <= centre_hz <= settings.high_hz:
             continue
-        low, high = (float(value) for value in edges)
-        if high <= low:
-            raise ValueError(f"frequency_bands.{name} must have increasing edges.")
-        bands.append((name, low, high))
-    return tuple(bands)
+        minimum_width_hz = settings.minimum_stopband_width_hz
+        if high_hz - low_hz < minimum_width_hz:
+            low_hz = centre_hz - minimum_width_hz / 2.0
+            high_hz = centre_hz + minimum_width_hz / 2.0
+        intervals.append(HarmonicStopband((harmonic,), low_hz, high_hz))
+    return intervals
 
 
-def notch_eeg(raw, settings: NotchSettings):
-    """Return a copy with every configured band filtered out of the EEG channels."""
+def _merge_stopbands(
+    stopbands: list[HarmonicStopband],
+    *,
+    minimum_gap_hz: float,
+) -> tuple[HarmonicStopband, ...]:
+    """Merge intervals without enough passband for their filter transitions."""
+    merged: list[HarmonicStopband] = []
+    for stopband in sorted(stopbands, key=lambda band: band.low_hz):
+        if not merged or stopband.low_hz > merged[-1].high_hz + minimum_gap_hz:
+            merged.append(stopband)
+            continue
+        previous = merged[-1]
+        merged[-1] = HarmonicStopband(
+            harmonics=tuple(sorted((*previous.harmonics, *stopband.harmonics))),
+            low_hz=previous.low_hz,
+            high_hz=max(previous.high_hz, stopband.high_hz),
+        )
+    return tuple(merged)
+
+
+def plan_harmonic_stopbands(model, settings) -> HarmonicNotchPlan:
+    """Build the narrowest plan justified by measured harmonic positions."""
+    transition_bandwidth_hz = settings.transition_bandwidth_hz
+    stopbands = _merge_stopbands(
+        _observed_harmonic_intervals(model, settings),
+        minimum_gap_hz=transition_bandwidth_hz,
+    )
+    return HarmonicNotchPlan(stopbands, transition_bandwidth_hz)
+
+
+def _estimate_comb_spectrum(spectrum, settings):
+    frequencies_hz, spectrum_db, prominence_db = spectrum
+    return harmonics.estimate_comb(
+        frequencies_hz,
+        spectrum_db,
+        prominence_db,
+        nominal_fundamental_hz=settings.nominal_fundamental_hz,
+        fit_harmonic_range=settings.harmonic_range,
+        supported_harmonic_range=settings.removal_harmonic_range,
+        search_hz=settings.search_hz,
+        min_prominence_db=settings.min_prominence_db,
+        min_harmonics=settings.min_harmonics_for_fit,
+        max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
+        max_residual_rms_hz=settings.max_fit_residual_rms_hz,
+    )
+
+
+def _localize_window_evidence(
+    spectrum,
+    settings,
+    supported_harmonics,
+    fundamental_hz,
+):
+    frequencies_hz, spectrum_db, prominence_db = spectrum
+    return harmonics.localize_supported_harmonics(
+        frequencies_hz,
+        spectrum_db,
+        prominence_db,
+        supported_harmonics=supported_harmonics,
+        fundamental_hz=fundamental_hz,
+        search_hz=settings.max_harmonic_residual_hz,
+        min_prominence_db=settings.min_prominence_db,
+    )
+
+
+def fit_harmonic_model(raw, settings):
+    """Authorize the comb once, then localize only those targets in each window."""
+    spectra = recordings.session_run_spectra(raw, settings)
+    whole_estimate = _estimate_comb_spectrum(spectra.whole, settings)
+    window_evidence = tuple(
+        _localize_window_evidence(
+            spectrum,
+            settings,
+            whole_estimate.supported_harmonics,
+            whole_estimate.fundamental_hz,
+        )
+        for spectrum in spectra.windows
+    )
+    return harmonics.AdaptiveCombModel(
+        whole_estimate=whole_estimate,
+        window_evidence=window_evidence,
+    )
+
+
+def apply_harmonic_notches(raw, plan: HarmonicNotchPlan, *, filter_jobs: int):
+    """Return a copy with the evidence-bounded harmonic intervals removed from EEG."""
     import mne
 
+    if filter_jobs < 1:
+        raise ValueError("filter_jobs must be positive.")
     picks = mne.pick_types(raw.info, eeg=True, exclude=())
     if len(picks) == 0:
-        raise ValueError("The notch requires at least one EEG channel.")
+        raise ValueError("Harmonic notching requires at least one EEG channel.")
+
     nyquist_hz = float(raw.info["sfreq"]) / 2.0
-    for band in settings.bands:
-        if band.high_hz >= nyquist_hz:
-            raise ValueError(f"Notch band {band} reaches the {nyquist_hz:g} Hz Nyquist limit.")
+    unavailable_edges = plan.unavailable_edges()
+    if unavailable_edges[0][0] <= 0.0:
+        raise ValueError("The first harmonic notch transition reaches 0 Hz.")
+    if unavailable_edges[-1][1] >= nyquist_hz:
+        raise ValueError(
+            f"The last harmonic notch transition reaches the {nyquist_hz:g} Hz Nyquist limit."
+        )
 
     filtered = raw.copy()
     filtered.notch_filter(
-        # Arrays, not lists: notch_filter tests ``notch_widths < 0`` before coercing, and a
-        # list raises a TypeError there rather than a message about widths.
-        freqs=np.array([band.centre_hz for band in settings.bands], dtype=float),
+        freqs=np.array(
+            [stopband.centre_hz for stopband in plan.stopbands],
+            dtype=float,
+        ),
         picks=picks,
-        notch_widths=np.array([band.width_hz for band in settings.bands], dtype=float),
-        trans_bandwidth=settings.trans_bandwidth_hz,
+        notch_widths=np.array(
+            [stopband.width_hz for stopband in plan.stopbands],
+            dtype=float,
+        ),
+        trans_bandwidth=plan.transition_bandwidth_hz,
         method="fir",
-        n_jobs=settings.filter_jobs,
+        filter_length="auto",
+        phase="zero",
+        n_jobs=filter_jobs,
         verbose="ERROR",
     )
     return filtered
 
 
-def band_power(freqs: np.ndarray, psd: np.ndarray, low_hz: float, high_hz: float) -> float:
+def _interval_overlap_hz(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    """Length shared by two closed frequency intervals."""
+    return max(0.0, min(first[1], second[1]) - max(first[0], second[0]))
+
+
+def harmonic_exclusion_rows(
+    recording: str,
+    plan: HarmonicNotchPlan,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+) -> list[dict[str, float | str]]:
+    """Describe exact stopbands and the total analysis bandwidth they invalidate."""
+    unavailable_edges = plan.unavailable_edges()
+    unavailable_shares = {
+        name: sum(
+            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in unavailable_edges
+        )
+        / (high_hz - low_hz)
+        for name, low_hz, high_hz in analysed_bands
+    }
+
+    rows: list[dict[str, float | str]] = []
+    for stopband, unavailable in zip(plan.stopbands, unavailable_edges):
+        row: dict[str, float | str] = {
+            "recording": recording,
+            "harmonics": ";".join(str(harmonic) for harmonic in stopband.harmonics),
+            "stopband_low_hz": stopband.low_hz,
+            "stopband_high_hz": stopband.high_hz,
+            "unavailable_low_hz": unavailable[0],
+            "unavailable_high_hz": unavailable[1],
+            "transition_bandwidth_hz": plan.transition_bandwidth_hz,
+        }
+        for name, share in unavailable_shares.items():
+            row[f"{name}_unavailable_share"] = share
+            row[f"{name}_retained_share"] = 1.0 - share
+        rows.append(row)
+    return rows
+
+
+def harmonic_plan_from_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> HarmonicNotchPlan:
+    """Reconstruct one recording's immutable filter geometry from its manifest."""
+    if not rows:
+        raise ValueError("A recording's harmonic notch manifest has no stopbands.")
+    transition_bandwidths_hz = {float(row["transition_bandwidth_hz"]) for row in rows}
+    if len(transition_bandwidths_hz) != 1:
+        raise ValueError("A recording must have one transition bandwidth.")
+    stopbands = tuple(
+        sorted(
+            (
+                HarmonicStopband(
+                    harmonics=tuple(int(value) for value in str(row["harmonics"]).split(";")),
+                    low_hz=float(row["stopband_low_hz"]),
+                    high_hz=float(row["stopband_high_hz"]),
+                )
+                for row in rows
+            ),
+            key=lambda stopband: stopband.low_hz,
+        )
+    )
+    return HarmonicNotchPlan(stopbands, transition_bandwidths_hz.pop())
+
+
+def analysed_bands_from_config(config) -> tuple[tuple[str, float, float], ...]:
+    """Return the canonical analysis bands whose unavailable shares are reported."""
+    defined = config.get("frequency_bands") or {}
+    if not isinstance(defined, dict):
+        raise ValueError("frequency_bands must be a mapping of name to [low, high].")
+    bands = []
+    for name, edges in defined.items():
+        if not str(name).strip():
+            raise ValueError("frequency_bands names must not be empty.")
+        low_hz, high_hz = (float(value) for value in edges)
+        if high_hz <= low_hz:
+            raise ValueError(f"frequency_bands.{name} must have increasing edges.")
+        bands.append((str(name), low_hz, high_hz))
+    return tuple(bands)
+
+
+def band_power(
+    frequencies_hz: np.ndarray,
+    psd: np.ndarray,
+    low_hz: float,
+    high_hz: float,
+) -> float:
     """Total power across the channel-mean spectrum between two edges."""
-    frequency_array = np.asarray(freqs, dtype=float)
+    frequency_array = np.asarray(frequencies_hz, dtype=float)
     inside = (frequency_array >= low_hz) & (frequency_array <= high_hz)
     if not np.any(inside):
         raise ValueError(f"No frequency bin lies in {low_hz:g}-{high_hz:g} Hz.")
@@ -199,91 +451,93 @@ def band_power(freqs: np.ndarray, psd: np.ndarray, low_hz: float, high_hz: float
 
 
 def _change_db(before: float, after: float) -> float:
-    """Decibel change, negative for a loss. Zero power before means nothing to report."""
+    """Return power change in decibels, with negative values denoting attenuation."""
     if before <= 0.0:
-        return 0.0
+        raise ValueError("Reference power must be positive.")
     return 10.0 * np.log10(max(after, np.finfo(float).tiny) / before)
 
 
-def notch_metrics(
-    freqs: np.ndarray,
-    psd_before: np.ndarray,
-    psd_after: np.ndarray,
-    settings: NotchSettings,
-) -> list[dict[str, float | str]]:
-    """One row per notched band: what it took, and what each analysed band lost."""
-    rows: list[dict[str, float | str]] = []
-    for band in settings.bands:
-        row: dict[str, float | str] = {
-            "band_hz": str(band),
-            "band_low_hz": band.low_hz,
-            "band_high_hz": band.high_hz,
-            "in_band_change_db": _change_db(
-                band_power(freqs, psd_before, band.low_hz, band.high_hz),
-                band_power(freqs, psd_after, band.low_hz, band.high_hz),
-            ),
-        }
-        for name, low_hz, high_hz in settings.analysed_bands:
-            before = band_power(freqs, psd_before, low_hz, high_hz)
-            after = band_power(freqs, psd_after, low_hz, high_hz)
-            row[f"{name}_change_db"] = _change_db(before, after)
-            # What the notch costs this band before any question of content: the share of
-            # its width the requested span covers. The transitions make the real footprint
-            # larger, which is what the change in dB above measures.
-            row[f"{name}_width_share"] = band.overlap_hz(low_hz, high_hz) / (high_hz - low_hz)
-        rows.append(row)
-    return rows
+def _measure_stopband_changes(
+    raw_before,
+    raw_after,
+    plan: HarmonicNotchPlan,
+    settings,
+) -> tuple[float, ...]:
+    """Measure power change inside each declared stopband."""
+    import mne
+
+    picks = mne.pick_types(raw_before.info, eeg=True, exclude=())
+    frequencies_hz, before_psd = recordings.psd(raw_before, picks, settings)
+    after_frequencies_hz, after_psd = recordings.psd(raw_after, picks, settings)
+    if not np.array_equal(frequencies_hz, after_frequencies_hz):
+        raise ValueError("Before and after spectra use different frequency grids.")
+    return tuple(
+        _change_db(
+            band_power(frequencies_hz, before_psd, stopband.low_hz, stopband.high_hz),
+            band_power(frequencies_hz, after_psd, stopband.low_hz, stopband.high_hz),
+        )
+        for stopband in plan.stopbands
+    )
 
 
-def notch_run(
+def clean_harmonic_run(
     vhdr: Path,
     output_root: Path,
     source_root: Path,
-    settings: NotchSettings,
-    removal_settings: remove.RemovalSettings | None = None,
+    settings,
+    analysed_bands: tuple[tuple[str, float, float], ...],
 ) -> list[dict[str, float | str]]:
-    """Notch one recording, write its binary, and measure what changed."""
-    import mne
+    """Fit, notch, write, and audit one continuous BrainVision recording."""
+    raw = recordings.read_bids_raw(vhdr)
+    model = fit_harmonic_model(raw, settings)
+    plan = plan_harmonic_stopbands(model, settings)
+    filtered = apply_harmonic_notches(raw, plan, filter_jobs=settings.filter_jobs)
 
-    mne.set_log_level("ERROR")
-    geometry = removal_settings or remove.RemovalSettings()
-    raw = remove.read_bids_raw(vhdr)
-    filtered = notch_eeg(raw, settings)
-
-    destination = output_root / vhdr.relative_to(source_root).with_suffix(".eeg")
+    relative_header = vhdr.relative_to(source_root)
+    destination = output_root / relative_header.with_suffix(".eeg")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    remove.write_eeg_binary(vhdr, destination, filtered.get_data())
+    recordings.write_eeg_binary(vhdr, destination, filtered.get_data())
 
-    written = remove.read_bids_raw(output_root / vhdr.relative_to(source_root))
+    written = recordings.read_bids_raw(output_root / relative_header)
     expected = filtered.get_data()
-    deviation = float(np.max(np.abs(written.get_data() - expected)))
-    scale = float(np.max(np.abs(expected)))
-    tolerance = geometry.roundtrip_relative_tolerance * scale
-    if deviation > tolerance:
+    deviation_v = float(np.max(np.abs(written.get_data() - expected)))
+    tolerance_v = settings.roundtrip_relative_tolerance * float(np.max(np.abs(expected)))
+    if deviation_v > tolerance_v:
         raise RuntimeError(
-            f"{vhdr.name}: written data differs by {deviation:.3e} V, "
-            f"above the {tolerance:.3e} V float32 round-trip tolerance."
+            f"{vhdr.name}: written data differs by {deviation_v:.3e} V, "
+            f"above the {tolerance_v:.3e} V float32 round-trip tolerance."
         )
 
-    picks = mne.pick_types(raw.info, eeg=True, exclude=())
-    freqs, psd_before = remove._psd(raw, picks, geometry)
-    _, psd_after = remove._psd(filtered, picks, geometry)
-    rows = notch_metrics(freqs, psd_before, psd_after, settings)
-    for row in rows:
-        row["recording"] = vhdr.stem
-        row["roundtrip_deviation_v"] = deviation
+    rows = harmonic_exclusion_rows(vhdr.stem, plan, analysed_bands)
+    changes_db = _measure_stopband_changes(raw, filtered, plan, settings)
+    for row, stopband, change_db in zip(rows, plan.stopbands, changes_db):
+        supporting_window_count = sum(
+            any(harmonic in evidence.harmonics for harmonic in stopband.harmonics)
+            for evidence in model.window_evidence
+        )
+        row["fundamental_hz"] = model.whole_estimate.fundamental_hz
+        row["estimation_window_count"] = len(model.window_evidence)
+        row["supporting_window_count"] = supporting_window_count
+        row["in_stopband_change_db"] = change_db
+        row["roundtrip_deviation_v"] = deviation_v
     return rows
 
 
-def write_derivative_description(
+def relative_source_dataset_url(source_root: Path, derivative_root: Path) -> str:
+    """Filesystem-relative BIDS source URL from the published derivative root."""
+    relative_path = os.path.relpath(source_root.resolve(), derivative_root.resolve())
+    return Path(relative_path).as_posix()
+
+
+def write_harmonic_derivative_description(
     output_root: Path,
-    source_root: Path,
-    settings: NotchSettings,
+    source_dataset_url: str,
+    settings,
 ) -> Path:
-    """Declare the notched root a derivative and record the bands that made it."""
+    """Declare the automatic harmonic-notch output and its inference boundary."""
     import json
 
-    path = Path(output_root) / "dataset_description.json"
+    path = output_root / "dataset_description.json"
     if not path.is_file():
         raise FileNotFoundError(f"Source dataset description was not mirrored to {path}.")
     described = json.loads(path.read_text(encoding="utf-8"))
@@ -291,108 +545,272 @@ def write_derivative_description(
         raise ValueError("BIDS dataset_description.json must contain a JSON object.")
 
     described["DatasetType"] = "derivative"
-    described.setdefault("Name", "band-notched EEG")
-    described.setdefault("BIDSVersion", "1.8.0")
+    if "BIDSVersion" not in described:
+        raise ValueError("BIDS dataset_description.json must declare BIDSVersion.")
+    described["Name"] = "decomb harmonic-notched EEG"
     existing = described.get("GeneratedBy", [])
     if not isinstance(existing, list) or not all(isinstance(entry, dict) for entry in existing):
         raise ValueError("BIDS GeneratedBy must be a list of objects.")
-    generated = [entry for entry in existing if "decomb notch" not in str(entry.get("Name", ""))]
+    generated = [entry for entry in existing if entry.get("Name") != "decomb"]
     generated.append(
         {
-            "Name": "decomb notch",
-            "Version": remove._code_revision(),
+            "Name": "decomb",
+            "Version": __version__,
             "Description": (
-                "Wide FIR notch over measured contamination bands that are clusters rather "
-                "than resolvable lines. Sidecars are byte-identical to the source; only the "
-                ".eeg binaries differ, and only EEG channels are filtered."
+                "The whole recording authorized participant-specific comb harmonics; "
+                "overlapping Hann-window spectra localized only those supported targets. "
+                "They were removed with zero-phase MNE FIR notches. The stopbands and "
+                "their transitions are unavailable for inference and are listed per "
+                "recording in harmonic_notch_manifest.tsv."
             ),
             "Parameters": {
-                "bands_hz": [[band.low_hz, band.high_hz] for band in settings.bands],
-                "trans_bandwidth_hz": settings.trans_bandwidth_hz,
+                "method": "fir",
+                "phase": "zero",
+                **{
+                    name: list(value) if isinstance(value, tuple) else value
+                    for name, value in asdict(settings).items()
+                },
+                "spectral_resolution_hz": settings.spectral_resolution_hz,
+                "minimum_stopband_width_hz": settings.minimum_stopband_width_hz,
+                "transition_bandwidth_hz": settings.transition_bandwidth_hz,
             },
         }
     )
     described["GeneratedBy"] = generated
-    described["SourceDatasets"] = [{"URL": f"../{Path(source_root).name}"}]
-
+    if not source_dataset_url:
+        raise ValueError("The source dataset URL must not be empty.")
+    described["SourceDatasets"] = [{"URL": source_dataset_url}]
     path.write_text(json.dumps(described, indent=2) + "\n", encoding="utf-8")
     return path
 
 
 def run(args: argparse.Namespace) -> None:
-    """Execute the notch stage."""
+    """Apply automatic evidence-bounded harmonic notches to a complete BIDS dataset."""
     import time
 
+    import mne
+
+    from decomb import effective
     from decomb.config import load_config
 
+    mne.set_log_level("ERROR")
     config = load_config(getattr(args, "config", None))
-    source_root = config.path("output_root", override=getattr(args, "bids_root", None))
-    notched_root = config.path("notched_root", override=getattr(args, "output_root", None))
+    source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
+    output_root = config.path("output_root", override=getattr(args, "output_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
-    settings = NotchSettings.from_config(config)
-    # The task label lives with the removal settings; this stage reads the same dataset.
-    removal_settings = remove.RemovalSettings.from_config(config)
+    settings = HarmonicNotchSettings.from_config(config)
+    analysed_bands = analysed_bands_from_config(config)
+    runs = recordings.discover_runs(source_root, subjects=None, task=settings.task)
 
-    if not source_root.is_dir():
-        raise FileNotFoundError(
-            f"No line-cleaned dataset at {source_root}. Run `decomb apply` first; the "
-            "notch is the last stage, not a replacement for the removal."
-        )
-    runs = remove.discover_runs(source_root, subjects=None, task=removal_settings.task)
-    print(f"Notching {len(runs)} recordings from {source_root}")
-    for band in settings.bands:
-        shares = ", ".join(
-            f"{name} {band.overlap_hz(low, high) / (high - low):.1%}"
-            for name, low, high in settings.analysed_bands
-            if band.overlap_hz(low, high) > 0.0
-        )
-        print(
-            f"  {band} (centre {band.centre_hz:g} Hz, width {band.width_hz:g} Hz)"
-            + (f" -> {shares}" if shares else "")
-        )
-
-    if notched_root.exists():
+    if output_root.exists():
         raise FileExistsError(
-            f"Refusing to mix a new derivative with existing output: {notched_root}"
+            f"Refusing to mix a new derivative with existing output: {output_root}"
         )
-    staging = notched_root.with_name(f".{notched_root.name}.staging")
+    staging = output_root.with_name(f".{output_root.name}.staging")
     if staging.exists():
         raise FileExistsError(
             f"Incomplete staging output exists at {staging}; inspect it before retrying."
         )
     staging.mkdir(parents=True)
-    print(f"Staging a complete derivative in {staging}")
-    print(f"  copied {remove.mirror_sidecars(source_root, staging)} sidecars")
+    print(f"Applying automatic harmonic notches to {len(runs)} recordings")
+    print(f"  copied {recordings.mirror_sidecars(source_root, staging)} sidecars")
 
     rows: list[dict[str, float | str]] = []
     for index, vhdr in enumerate(runs, start=1):
         started = time.time()
-        measured = notch_run(vhdr, staging, source_root, settings, removal_settings)
+        measured = clean_harmonic_run(
+            vhdr,
+            staging,
+            source_root,
+            settings,
+            analysed_bands,
+        )
         rows.extend(measured)
-        summary = "  ".join(
-            f"{row['band_hz']} {row['in_band_change_db']:+.1f} dB" for row in measured
+        stopband_width_hz = sum(
+            float(row["stopband_high_hz"]) - float(row["stopband_low_hz"]) for row in measured
+        )
+        median_change_db = float(
+            np.median([float(row["in_stopband_change_db"]) for row in measured])
         )
         print(
-            f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} {summary} ({time.time() - started:.0f}s)"
+            f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
+            f"{len(measured)} stopbands, {stopband_width_hz:.3f} Hz, "
+            f"median {median_change_db:+.1f} dB ({time.time() - started:.0f}s)"
         )
 
     frame = pd.DataFrame(rows)
-    remove._write_tsv_atomic(frame, staging / "notch_manifest.tsv")
-    described = write_derivative_description(staging, source_root, settings)
+    manifest_name = "harmonic_notch_manifest.tsv"
+    recordings.write_tsv_atomic(frame, staging / manifest_name)
+    source_dataset_url = relative_source_dataset_url(source_root, output_root)
+    described = write_harmonic_derivative_description(
+        staging,
+        source_dataset_url,
+        settings,
+    )
+    os.replace(staging, output_root)
 
-    import os
-
-    os.replace(staging, notched_root)
     report_dir.mkdir(parents=True, exist_ok=True)
-    remove._write_tsv_atomic(frame, report_dir / "notch_manifest.tsv")
+    recordings.write_tsv_atomic(frame, report_dir / manifest_name)
+    effective_path = effective.write(
+        config,
+        settings,
+        report_dir / "effective_config_apply.txt",
+        stage="apply",
+    )
+    print(f"  declared {output_root / described.name} a derivative of {source_root}")
+    print(f"  wrote {report_dir / manifest_name}")
+    print(f"  wrote {effective_path}")
 
-    print("\nmedian change per band:")
-    for band_label, block in frame.groupby("band_hz"):
-        costs = "  ".join(
-            f"{name} {block[f'{name}_change_db'].median():+.2f} dB"
-            for name, _, _ in settings.analysed_bands
-            if f"{name}_change_db" in block
+
+def _validate_matching_recordings(original, cleaned) -> None:
+    """Fail when a purported derivative does not match its source geometry."""
+    if original.ch_names != cleaned.ch_names:
+        raise ValueError("Source and cleaned recordings have different channel names.")
+    if original.get_channel_types() != cleaned.get_channel_types():
+        raise ValueError("Source and cleaned recordings have different channel types.")
+    if original.n_times != cleaned.n_times:
+        raise ValueError("Source and cleaned recordings have different sample counts.")
+    if float(original.info["sfreq"]) != float(cleaned.info["sfreq"]):
+        raise ValueError("Source and cleaned recordings have different sampling frequencies.")
+
+
+def _adjacent_residual_peak(
+    frequencies_hz: np.ndarray,
+    prominence_db: np.ndarray,
+    stopband: HarmonicStopband,
+    unavailable: tuple[float, float],
+    settings,
+) -> tuple[float, float]:
+    """Frequency and prominence of the largest available peak beside a stopband."""
+    search = (frequencies_hz >= stopband.low_hz - settings.residual_search_hz) & (
+        frequencies_hz <= stopband.high_hz + settings.residual_search_hz
+    )
+    available = (frequencies_hz < unavailable[0]) | (frequencies_hz > unavailable[1])
+    candidate_indices = np.flatnonzero(search & available)
+    candidates = np.asarray(prominence_db, dtype=float)[candidate_indices]
+    if candidates.size == 0:
+        return float("nan"), float("nan")
+    selected = int(candidate_indices[int(np.argmax(candidates))])
+    return float(frequencies_hz[selected]), float(prominence_db[selected])
+
+
+def verify_harmonic_run(
+    source_vhdr: Path,
+    cleaned_vhdr: Path,
+    manifest_rows: Sequence[Mapping[str, object]],
+    settings,
+) -> list[dict[str, float | str]]:
+    """Re-measure a written recording using only its declared filter geometry."""
+    original = recordings.read_bids_raw(source_vhdr)
+    cleaned = recordings.read_bids_raw(cleaned_vhdr)
+    _validate_matching_recordings(original, cleaned)
+    plan = harmonic_plan_from_rows(manifest_rows)
+    changes_db = _measure_stopband_changes(original, cleaned, plan, settings)
+    original_frequencies_hz, _, original_prominence_db = recordings.run_spectrum(
+        original,
+        settings,
+    )
+    cleaned_frequencies_hz, _, cleaned_prominence_db = recordings.run_spectrum(
+        cleaned,
+        settings,
+    )
+    if not np.array_equal(original_frequencies_hz, cleaned_frequencies_hz):
+        raise ValueError("Source and cleaned prominence spectra use different grids.")
+
+    rows = []
+    for stopband, unavailable, change_db in zip(
+        plan.stopbands,
+        plan.unavailable_edges(),
+        changes_db,
+    ):
+        original_peak_hz, original_peak_db = _adjacent_residual_peak(
+            original_frequencies_hz,
+            original_prominence_db,
+            stopband,
+            unavailable,
+            settings,
         )
-        print(f"  {band_label}  in band {block.in_band_change_db.median():+.2f} dB   {costs}")
-    print(f"  declared {(notched_root / described.name)} a derivative of {source_root}")
-    print(f"  wrote {report_dir / 'notch_manifest.tsv'}")
+        cleaned_peak_hz, cleaned_peak_db = _adjacent_residual_peak(
+            cleaned_frequencies_hz,
+            cleaned_prominence_db,
+            stopband,
+            unavailable,
+            settings,
+        )
+        rows.append(
+            {
+                "recording": source_vhdr.stem,
+                "harmonics": ";".join(str(value) for value in stopband.harmonics),
+                "stopband_low_hz": stopband.low_hz,
+                "stopband_high_hz": stopband.high_hz,
+                "unavailable_low_hz": unavailable[0],
+                "unavailable_high_hz": unavailable[1],
+                "verified_stopband_change_db": change_db,
+                "original_adjacent_peak_hz": original_peak_hz,
+                "original_adjacent_prominence_db": original_peak_db,
+                "cleaned_adjacent_peak_hz": cleaned_peak_hz,
+                "cleaned_adjacent_prominence_db": cleaned_peak_db,
+                "adjacent_max_prominence_change_db": cleaned_peak_db - original_peak_db,
+            }
+        )
+    return rows
+
+
+def run_verify(args: argparse.Namespace) -> None:
+    """Audit the written harmonic-notch derivative without refitting its targets."""
+    from decomb import effective
+    from decomb.config import load_config
+
+    config = load_config(getattr(args, "config", None))
+    source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
+    cleaned_root = config.path("output_root", override=getattr(args, "output_root", None))
+    report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
+    settings = HarmonicNotchSettings.from_config(config)
+    runs = recordings.discover_runs(source_root, subjects=None, task=settings.task)
+    manifest_path = cleaned_root / "harmonic_notch_manifest.tsv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"No harmonic notch manifest at {manifest_path}. Run `decomb apply` first."
+        )
+    manifest = pd.read_csv(manifest_path, sep="\t", float_precision="round_trip")
+    required = {
+        "recording",
+        "harmonics",
+        "stopband_low_hz",
+        "stopband_high_hz",
+        "transition_bandwidth_hz",
+    }
+    missing = required - set(manifest.columns)
+    if missing:
+        raise ValueError(f"Harmonic notch manifest is missing columns: {sorted(missing)}")
+    recording_names = {vhdr.stem for vhdr in runs}
+    if set(manifest["recording"]) != recording_names:
+        raise ValueError("Harmonic notch manifest does not cover exactly the source recordings.")
+
+    rows: list[dict[str, float | str]] = []
+    for vhdr in runs:
+        block = manifest.loc[manifest["recording"] == vhdr.stem]
+        rows.extend(
+            verify_harmonic_run(
+                vhdr,
+                cleaned_root / vhdr.relative_to(source_root),
+                block.to_dict("records"),
+                settings,
+            )
+        )
+    frame = pd.DataFrame(rows)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "harmonic_notch_verification.tsv"
+    recordings.write_tsv_atomic(frame, output_path)
+    effective_path = effective.write(
+        config,
+        settings,
+        report_dir / "effective_config_verify.txt",
+        stage="verify",
+    )
+    print(
+        f"Verified {len(runs)} recordings: median stopband change "
+        f"{frame['verified_stopband_change_db'].median():+.1f} dB"
+    )
+    print(f"  wrote {output_path}")
+    print(f"  wrote {effective_path}")

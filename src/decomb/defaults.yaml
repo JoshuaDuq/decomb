@@ -1,330 +1,89 @@
-# decomb defaults. Every parameter the workflow uses appears here; nothing is hardcoded
-# somewhere else. Copy this to decomb.yaml and change what you need -- your file is merged
-# over this one, so it only has to contain the keys you are changing.
-#
-# Values marked SITE describe one room and mean nothing for another. Run
-# `decomb diagnose` on your own data and set them from what it reports.
-#
-# An unrecognised key is an error rather than a silent no-op, so a misspelling cannot
-# leave you believing a setting is in force.
+# decomb defaults. Copy this file to decomb.yaml and override only site-specific values.
+# Unknown correction settings are errors: a misspelling must never become a silent no-op.
 
 paths:
-  # BIDS root holding the recordings to clean. decomb reads BrainVision recordings at
-  # sub-*/[ses-*/]eeg/*_eeg.vhdr, with or without ses- and run-.
+  # BrainVision BIDS root: sub-*/[ses-*/]eeg/*_eeg.vhdr.
   bids_root: "data/bids"
 
-  # Cleaned copy written by `decomb apply`. Sidecars are byte-identical to the source;
-  # only the .eeg binaries are rewritten.
+  # Complete BIDS derivative written atomically by `decomb apply`.
   output_root: "<bids_root>_decombed"
 
-  # Written by `decomb notch`, which reads output_root. Optional, and empty by default.
-  notched_root: "<output_root>_notched"
-
-  # Tables and figures.
   diagnosis_dir: "outputs/diagnosis"
   removal_dir: "outputs/removal"
 
 dataset:
-  # BIDS task label to process. "*" takes every task in the dataset.
+  # BIDS task label. "*" processes every task.
   task: "*"
 
-  # Repetition time of a periodic acquisition running alongside the EEG, in seconds.
-  # Only used to report where each line sits relative to the k/TR grid, which separates a
-  # line locked to the acquisition from one that is not. Leave null if there is none.
+  # Optional repetition time, used only to classify detected lines against the k/TR grid.
   tr_seconds: null
 
-# ---------------------------------------------------------------------------------------
-# What `decomb diagnose` and `decomb verify` look for. Both use these, so the sweep that
-# finds the lines and the sweep that checks whether they went are the same measurement.
-# ---------------------------------------------------------------------------------------
 detection:
-  # Band swept for lines. Set it to the span your analyses read.
   low_hz: 3.0
   high_hz: 95.0
-
-  # Half-width of the running-median window a bin's local background is taken from. Wide
-  # enough that a line cannot raise its own background -- several comb spacings -- and
-  # narrow enough to follow the 1/f slope.
   background_half_width_hz: 4.62962962962963
-
-  # Empirical-null screening level after dependence-robust correction.
   fdr_alpha: 0.05
   null_min_bins: 32
   null_lower_percentile: 15.865525393145702
   comb_chance_sigma: 2.0
   tr_tolerance_bins: 1.0
-
-  # How near an integer multiple a line must sit to count as a comb member. A real comb
-  # holds residuals a few millihertz wide; this is several bins wider than that.
   comb_tolerance_hz: 0.06
-
-  # Largest gap between two detections that may vote for the comb spacing. Above a few
-  # times the fundamental the votes are all multiples and add nothing.
   max_pair_spacing_hz: 12.0
-
-  # Half-power width, in window widths, below/above which a detection is monochromatic /
-  # too broad to be a line. A Hann window floors a true sinusoid at 1.0.
   narrow_linewidth_ratio: 3.0
   wide_member_ratio: 10.0
-
-  # How much spectrum around a line counts as belonging to it, when charging bands.
   line_mask_half_width_hz: 0.15
-
-  # The commonest gap between detections is often a multiple of the true fundamental, so
-  # submultiples are tried. A divisor is accepted only when it explains this much more of
-  # the comb in excess of chance; the spacing is then refined within search_fraction of
-  # the candidate -- a refinement of a measured gap, not a search for a period.
   max_subharmonic_divisor: 6
   min_subharmonic_gain: 0.2
   spacing_search_fraction: 0.02
-
-  # Percentile bootstrap of each line's prominence across the sampling unit.
-  # bootstrap_alpha is the interval level: 0.05 reports a 95% interval.
   bootstrap_resamples: 10000
   bootstrap_alpha: 0.05
   bootstrap_seed: 42
 
-# ---------------------------------------------------------------------------------------
-# What `decomb benchmark` and `decomb apply` do.
-# ---------------------------------------------------------------------------------------
+# Automatic participant-specific harmonic notch planning and application.
 removal:
-  # Length of each adaptive estimation window. Sets the frequency resolution the fit works
-  # at (1 / estimation_window_s) and so the shortest recording that can be processed. It
-  # must resolve the spacing of the lines being removed.
+  # The validated default. A Hann window of this duration resolves 0.026633 Hz.
   estimation_window_s: 54.0
-  filter_length: "27s"   # half the estimation window
+  estimation_overlap: 0.5
   filter_jobs: 4
-  mt_bandwidth: 0.6      # set to your comb spacing: the band reaches half this either side
 
-  # SITE. Where the comb search starts; every recording is then measured on its own.
+  # SITE. Starting point and reliable harmonics used to fit each recording's comb.
   nominal_fundamental_hz: 1.2
-
-  # SITE. Harmonics used to FIT the fundamental. Only well-determined ones belong here: a
-  # weak, poorly localised peak would pull the fundamental every other harmonic inherits.
   harmonic_range: [24, 79]
 
-  # SITE. Harmonics actually removed, which may reach further than the fit at both ends. A
-  # weak but arithmetically exact peak is still a line; a peak that sits off its comb
-  # position, appears in a minority of recordings, and lands where real rhythms live is
-  # not worth the risk.
+  # Harmonics eligible for removal. Only harmonics supported by the whole recording are
+  # notched; this range does not manufacture missing targets.
   removal_harmonic_range: [22, 82]
 
-  # Band handed to a wide notch instead of being taken here. Use [49.5, 50.5] at 50 Hz.
-  mains_notch_hz: [59.5, 60.5]
-  exclude_mains: true
-
-  # Band transformed, and band every cost is measured over. Set cost_band_hz to the span
-  # your analyses use.
+  # Frequency span that may be transformed.
   low_hz: 3.0
   high_hz: 99.8
-  cost_band_hz: [28.0, 95.0]
-  band_cost_thresholds_db: [1.0, 3.0]
 
-  # Search and acceptance geometry for the comb fit.
-  search_hz: 0.25          # comb search half-width; keep below half the comb spacing
+  # Comb-fit evidence requirements.
+  search_hz: 0.25
   min_prominence_db: 1.0
-
-  # Half-width of the window a bin's local background is taken from. Wide enough that a
-  # line cannot raise its own background -- several comb spacings -- and narrow enough to
-  # follow the 1/f slope. The digits matter: the residual audit picks its background bins
-  # with a continuous test, so rounding this moves the window by a bin at some targets.
   background_half_width_hz: 4.62962962962963
-
-  # A fundamental fitted from three peaks licenses removing sixty harmonics, so the fit
-  # has to be well supported before it authorises a grid: this many mutually consistent
-  # harmonics, none deviating more than max_harmonic_residual_resolutions, scattering no
-  # more than max_fit_residual_rms_resolutions about the fitted grid.
   min_harmonics_for_fit: 20
-
-  # Both tolerances are widths in the spectrum the fit is read from, so they are given in
-  # units of that spectrum's resolution -- the half-power width of a Hann-windowed pure
-  # tone, 1.4382 / estimation_window_s, which is the narrowest peak the analysis can
-  # produce and so the natural unit for "how far is far".
-  #
-  # They used to be in hertz, which was only right for one window length. The resolution
-  # is 26.6 mHz at the 54 s default, so doubling the window to 108 s halves it while a
-  # fixed 0.06 Hz stays put and quietly becomes twice as permissive. Measured across a
-  # 15-participant cohort, one recording's supported harmonic count fell from 24 to 19
-  # over exactly that change while another's rose from 19 to 26 -- the window length was
-  # moving two different things at once.
-  #
-  # 2.25 and 1.5 are 0.06 Hz and 0.04 Hz at 54 s, to within 0.13%, so nothing about the
-  # shipped behaviour changes; only its response to a different window does.
   max_harmonic_residual_resolutions: 2.25
   max_fit_residual_rms_resolutions: 1.5
 
-  # How much spectrum each line costs: freq/ratio, because a mains-locked comb wanders in
-  # proportion to harmonic number. MNE's own default is freq/200, which is far wider than
-  # a line needs. Raising the ratio further leaves the high harmonics standing.
-  notch_width_ratio: 450
-  notch_width_min_hz: 0.05
+  # FIR geometry in units of the Hann half-power resolution. These values are explicit
+  # configuration, not study assumptions embedded in the implementation.
+  minimum_stopband_resolutions: 2.0
+  transition_bandwidth_resolutions: 4.0
 
-  # Propagate each window's f0 uncertainty to harmonic k as z * k * SE(f0).
+  # Propagate whole-recording fundamental uncertainty to harmonic k as z * k * SE(f0).
+  # The stopband also spans each position directly observed in overlapping windows;
+  # missing window evidence is neither inherited nor manufactured.
   uncertainty_confidence_z: 2.0
 
-  # Isolated lines are detected automatically; no frequency list is accepted, because a
-  # line's position varies between participants by more than a safe static window.
-  detection_low_hz: 20.0
-  detection_high_hz: 100.0
-
-  # What admits a peak as a line: a false discovery rate against a null fitted to this
-  # recording's own prominence spectrum, over exactly the bins the search reached.
-  #
-  # Not a decibel floor. Prominence is not invariant to the analysis -- a sinusoid's peak
-  # integrates coherently with window length while the background does not, so the same
-  # physical line gains about 3 dB per doubling of estimation_window_s, and a fixed bar
-  # means something different at every window and on every channel. A bar also carries no
-  # error rate. This test calibrates itself to the recording's own noise and states the
-  # rate at which it is wrong.
-  detection_fdr_alpha: 0.05
-  detection_null_min_bins: 32
-  detection_null_lower_percentile: 15.865525393145702
-
-  # Optional prominence floor on top of that test. null disables it, which is the default.
-  # Declare one only if your site wants a stated minimum amplitude; it is then recorded in
-  # the derivative's provenance as the explicit choice it is.
-  detection_min_prominence_db: null
-
-  # The search beside a validated harmonic asks a different question -- not "is this above
-  # the background" but "is this a second source, or this harmonic's own skirt" -- and it
-  # still answers with a bar. A calibrated replacement (hold the summit against the same
-  # offset at every other harmonic) was built and measured: it agrees with this bar on real
-  # data and beats it on a clean comb, but neither separates a narrow source from a narrow
-  # noise summit riding on a rhythm, which is the failure that matters. See the setting's
-  # docstring in remove.py for the measurement and the second condition that would.
-  detection_adjacent_min_prominence_db: 10.0
-
-  # Extra spectrum left either side of a peak's measured support when widening a notch.
-  # Zero covers exactly the bins the support was observed over.
-  support_margin_hz: 0.0
-
-  # Also a bar, and not a detection one: how prominent a peak must be before its observed
-  # extent is allowed to widen a notch that is already removing it. Admitting more peaks
-  # here does not find more artifact, it empties more band -- replacing this with the
-  # calibrated test cost 334 extra notches and 1.1 dB of suppression on one recording.
-  support_min_prominence_db: 10.0
-
-  detection_search_hz: 0.05    # refinement only; must stay below line_claim_hz
-  min_runs_per_line: 3
-  min_runs_per_block_line: 2
-  min_independent_windows_per_line: 3
-
-  # How much spectrum a resolved line claims for itself.
-  line_claim_hz: 0.109
-
-  # How wide a peak may be and still be a line rather than a rhythm, in resolutions --
-  # see max_harmonic_residual_resolutions below for why these are not in hertz. 9.4 is
-  # 0.25 Hz at the shipped 54 s window, which is what this was.
-  max_line_width_resolutions: 9.4
-
-  # How far either side of a target a residual is still that target's responsibility. The
-  # notch's own width is the wrong region: a target that missed leaves its line just
-  # outside what the notch claimed. Keep this inside half the comb spacing.
+  # Verification reports the strongest available-bin peak this far beyond each transition.
   residual_search_hz: 0.15
 
-  # Levels the criteria are decided at. residual_family_alpha is the family-wise rate of
-  # the Thomson F search that authorises a second-pass removal, over one channel's whole
-  # frequency grid. The same level, over a different family, decides whether a channel
-  # carries a line at a target the comb fit already named: there the family is that target
-  # list, because the fit has already said where to look. The other two decide the cohort
-  # criteria; n_seam_controls sets the resolution of the seam test, whose smallest
-  # attainable p-value is 1/(n+1).
-  residual_family_alpha: 0.05
-  false_discovery_rate: 0.05
-  seam_alpha: 0.05
-  n_seam_controls: 40
-
-  # Optional ceiling on the share of cost_band_hz a broadband signal may lose. null means
-  # the cost is measured and reported but nothing is refused on it. There is no default
-  # number on purpose: the cost is already fixed by the notch width and the number of
-  # targets, so any ceiling shipped here could only be one chosen after seeing the answer.
-  # Declare one if your study wants a stated budget.
-  max_band_cost: null
-
-  # Largest round-trip error accepted when reading a written binary back. float32 has a
-  # relative precision near 6e-8 of full scale; a decade above that separates
-  # quantisation from corruption.
+  # Float32 BrainVision round-trip check.
   roundtrip_relative_tolerance: 1.0e-6
 
-# ---------------------------------------------------------------------------------------
-# What `decomb benchmark` injects, and what it accepts. Part of the settings fingerprint,
-# so a benchmark run under looser criteria cannot certify an apply.
-# ---------------------------------------------------------------------------------------
-benchmark:
-  probe:
-    # Tones injected where the removal does NOT act, standing for narrowband neural
-    # activity. Placed midway between comb harmonics -- (k + 0.5) * f0 -- which is the
-    # unique position maximising the distance to both neighbours.
-    #
-    # Empty means the benchmark places them itself, from the targets of every plan it is
-    # about to measure. That is the default because it is the first moment the answer is
-    # knowable: the midpoints need a fitted fundamental, and the isolated lines are found
-    # per recording. A cohort catalogue naming 9 isolated lines corresponded to 297 distinct
-    # targets across 89 plans, and hand-picked tones that cleared every catalogue line still
-    # landed 0.046 and 0.118 Hz from lines that were not in it -- discovered six hours into
-    # a benchmark, because that is when the colliding recording came up.
-    #
-    # Give a list to override. It is checked the same way, and refused the same way.
-    sinusoid_hz: []
-    sinusoid_count: 4
-    sinusoid_amplitude_v: 5.0e-7
-
-    # A broadband transient, which is the realistic worst case: its bandwidth necessarily
-    # overlaps several comb lines. burst_centre_s must fall inside the shortest recording.
-    burst_hz: 40.0
-    burst_centre_s: 120.0
-    burst_sd_s: 0.05
-    burst_amplitude_v: 3.0e-6
-    burst_window_half_widths: 4.0
-
-  # Clear space a probe tone needs from the nearest removal target. A probe colliding with
-  # a target tests nothing -- it would be taken out by design.
-  min_probe_separation_hz: 0.3
-
-  # Tones placed ON the plan's own targets, which measure the opposite quantity: how much
-  # of a narrowband signal coinciding with an artifact does not survive. Reported, never
-  # gated. The broadband cost probe uses every EEG channel and its channel-specific plan.
-  in_band_probe_count: 4
-
-  gate:
-    # The one criterion decidable inside a single recording. Everything else is an excess
-    # over a matched control and is decided across the recordings.
-    #
-    # An invariant on a linear operator, kept because a non-linear failure would break it.
-    # It reads 1.0 on any data under any settings, so it never stops a run over a level
-    # someone picked; it stops one only when the removal has stopped being linear.
-    min_burst_correlation: 0.99
-
-    # There were bounds here on intrinsic_energy_ratio -- the share of the injected
-    # transient that survives -- and they are gone. The quantity is still measured, and now
-    # reported beside the band cost instead of deciding anything.
-    #
-    # It is the cost of projecting out a recording's own targets, measured against that
-    # same transient put through the same removal alone. So it is larger for a recording
-    # carrying more artifact, and a level applied to it charges a dataset for its own
-    # contamination. The shipped floor of 0.85 refused seven recordings of a 15-participant
-    # cohort whose collateral damage was nil -- burst_energy_ratio 0.9999 to 1.0000 -- and
-    # one participant with three times the cohort's narrowband load measured 0.71 with an
-    # equally clean bill of health.
-    #
-    # The level could not be derived either: any expectation computed from the same plan is
-    # a model of the measurement itself, so a removal that widened every notch would
-    # predict its own wider loss and pass.
-    #
-    # Whether the cost is acceptable is a question about a study, answerable from the
-    # reported figure and the band cost beside it. It is not something a config file should
-    # answer in advance, and it is not a reason to refuse to write a dataset.
-
-# ---------------------------------------------------------------------------------------
-# `decomb notch`: bands taken wholesale, read as edges. Empty by default, because a band
-# costs its full width whether or not signal was in it. Declare one only where the
-# contamination is a cluster of many non-stationary peaks that sinusoid subtraction cannot
-# reach. The removal reads this list too, and stays out of every band in it.
-# ---------------------------------------------------------------------------------------
-notch_bands: []
-notch_trans_bandwidth_hz: 1.0
-
-# Bands the cost of every stage is reported against.
+# Shares of these bands made unavailable by stopbands plus transitions are written to the
+# manifest. Frequencies in those intervals must be excluded from study inference.
 frequency_bands:
   delta: [1.0, 3.9]
   theta: [4.0, 7.9]
@@ -333,8 +92,7 @@ frequency_bands:
   gamma: [30.1, 80.0]
 
 psd:
-  # window_s is unset, which makes it follow removal.estimation_window_s so the figure
-  # resolves what the fit resolved. Set it here to override.
+  window_s: 54.0
   overlap: 0.5
   band_hz: [1.0, 100.0]
-  panel_span_hz: 10.0   # tiled figure: roughly one bin per pixel
+  panel_span_hz: 10.0
