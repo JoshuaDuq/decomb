@@ -16,7 +16,7 @@ STAGES = ("diagnose", "apply", "verify", "psd")
 
 STAGE_HELP = {
     "diagnose": "measure which lines exist, whether they form a comb, and what they cost",
-    "apply": "detect supported comb harmonics and write the narrowly notched BIDS copy",
+    "apply": "detect comb harmonics and isolated lines, then write the notched BIDS copy",
     "verify": "measure harmonic suppression and the exact unavailable frequency intervals",
     "psd": "before-and-after spectra of whatever exists",
 }

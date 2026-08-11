@@ -33,6 +33,9 @@ LOCAL_CONFIG_NAME = "decomb.yaml"
 
 #: Paths another path may refer to with a ``<name>`` placeholder.
 REFERENCEABLE = ("bids_root", "output_root")
+ALLOWED_TOP_LEVEL = {"paths", "removal", "frequency_bands", "simulation"}
+ALLOWED_PATHS = {"bids_root", "output_root", "diagnosis_dir", "removal_dir"}
+ALLOWED_REMOVAL = {"estimation_window_s", "frequency_range_hz"}
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -154,6 +157,27 @@ def load_config(config_path: str | Path | None = None) -> DecombConfig:
     overridden: frozenset[str] = frozenset()
     if source is not None:
         user = _read_yaml(source)
+        _validate_user_config(user)
         overridden = frozenset(_dotted_keys(user))
         data = _deep_merge(data, user)
     return DecombConfig(source=source, data=data, overridden=overridden)
+
+
+def _validate_user_config(user: Mapping[str, Any]) -> None:
+    """Reject obsolete or misspelled public settings before any stage runs."""
+    unknown_sections = set(user) - ALLOWED_TOP_LEVEL
+    if unknown_sections:
+        raise ValueError(f"Unknown config section(s): {sorted(unknown_sections)}.")
+    for section, allowed in (("paths", ALLOWED_PATHS), ("removal", ALLOWED_REMOVAL)):
+        block = user.get(section)
+        if block is None:
+            if section in user:
+                raise ValueError(
+                    f"`{section}` is an empty block. Delete the key or set a value."
+                )
+            continue
+        if not isinstance(block, Mapping):
+            raise ValueError(f"`{section}` must be a mapping.")
+        unknown = set(block) - allowed
+        if unknown:
+            raise ValueError(f"Unknown `{section}` setting(s): {sorted(unknown)}.")

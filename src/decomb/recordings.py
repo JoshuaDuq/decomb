@@ -19,8 +19,8 @@ from decomb import spectral
 class SessionRunSpectra:
     """Whole-recording and overlapping-window evidence on one frequency grid."""
 
-    whole: tuple[np.ndarray, np.ndarray, np.ndarray]
-    windows: tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...]
+    whole: tuple[np.ndarray, np.ndarray]
+    windows: tuple[tuple[np.ndarray, np.ndarray], ...]
     bounds: tuple[tuple[int, int], ...]
 
     def __post_init__(self) -> None:
@@ -58,8 +58,7 @@ def discover_runs(
     if not paths:
         raise FileNotFoundError(
             f"No recordings of task {task!r} found under {bids_root}. decomb reads "
-            "BrainVision recordings at sub-*/[ses-*/]eeg/*_eeg.vhdr; set "
-            "`dataset.task` to the BIDS task label or `*` for every task."
+            "BrainVision recordings at sub-*/[ses-*/]eeg/*_eeg.vhdr."
         )
     return paths
 
@@ -115,6 +114,23 @@ def overlapping_window_bounds(
     return tuple((start, start + window_samples) for start in starts)
 
 
+def non_overlapping_window_indices(
+    bounds: tuple[tuple[int, int], ...],
+) -> tuple[int, ...]:
+    """Greedily select independent windows, including no shifted overlapping tail."""
+    selected = []
+    previous_stop = -1
+    for index, (start, stop) in enumerate(bounds):
+        if stop <= start:
+            raise ValueError("Estimation-window bounds must be increasing.")
+        if start >= previous_stop:
+            selected.append(index)
+            previous_stop = stop
+    if len(selected) < 2:
+        raise ValueError("Line detection requires at least two non-overlapping windows.")
+    return tuple(selected)
+
+
 def session_run_spectra(raw, settings) -> SessionRunSpectra:
     """Measure channel-median Hann spectra for one run and its overlapping windows."""
     import mne
@@ -140,34 +156,16 @@ def session_run_spectra(raw, settings) -> SessionRunSpectra:
         windows,
         sampling_frequency_hz,
     )
-    half_width_bins = int(round(settings.background_half_width_hz / float(frequencies_hz[1])))
-
     whole_db = spectral.to_db(np.median(power.mean(axis=1), axis=0))
-    whole = _spectrum_tuple(frequencies_hz, whole_db, half_width_bins)
+    whole = (frequencies_hz, whole_db)
     window_spectra = tuple(
-        _spectrum_tuple(
-            frequencies_hz,
-            spectral.to_db(np.median(window_power, axis=0)),
-            half_width_bins,
-        )
+        (frequencies_hz, spectral.to_db(np.median(window_power, axis=0)))
         for window_power in np.moveaxis(power, 1, 0)
     )
     return SessionRunSpectra(whole, window_spectra, bounds)
 
 
-def _spectrum_tuple(
-    frequencies_hz: np.ndarray,
-    spectrum_db: np.ndarray,
-    half_width_bins: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    return (
-        frequencies_hz,
-        spectrum_db,
-        spectral.prominence_db(spectrum_db, half_width_bins=half_width_bins),
-    )
-
-
-def run_spectrum(raw, settings) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def run_spectrum(raw, settings) -> tuple[np.ndarray, np.ndarray]:
     """Return the whole-recording spectrum used by the harmonic estimator."""
     return session_run_spectra(raw, settings).whole
 
@@ -251,13 +249,29 @@ def write_eeg_binary(
     scaled.T.astype("<f4").tofile(destination)
 
 
+def quantized_eeg_data(vhdr_path: Path, data_volts: np.ndarray) -> np.ndarray:
+    """Values a BrainVision float32 round trip can represent, in volts."""
+    values = np.asarray(data_volts, dtype=float)
+    channel_names, resolutions = parse_channel_scaling(vhdr_path)
+    if values.ndim != 2 or values.shape[0] != len(channel_names):
+        raise ValueError("Quantization requires data matching the BrainVision channels.")
+    scaled = (values * 1e6) / resolutions[:, np.newaxis]
+    calibration = resolutions[:, np.newaxis] * 1e-6
+    return scaled.astype("<f4").astype(float) * calibration
+
+
 def mirror_sidecars(source_root: Path, output_root: Path) -> int:
     """Copy every BIDS file except the EEG binaries, which are rewritten."""
+    excluded_suffixes = {".bak", ".lock", ".orig", ".tmp"}
     copied = 0
     for path in sorted(source_root.rglob("*")):
-        if path.is_dir() or path.suffix in {".eeg", ".lock"}:
+        relative_path = path.relative_to(source_root)
+        suffixes = set(path.suffixes)
+        hidden = any(part.startswith(".") for part in relative_path.parts)
+        excluded = ".eeg" in suffixes or bool(suffixes & excluded_suffixes)
+        if path.is_dir() or hidden or excluded:
             continue
-        target = output_root / path.relative_to(source_root)
+        target = output_root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
         copied += 1

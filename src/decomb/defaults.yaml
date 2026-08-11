@@ -1,5 +1,4 @@
-# decomb defaults. Copy this file to decomb.yaml and override only site-specific values.
-# Unknown correction settings are errors: a misspelling must never become a silent no-op.
+# decomb defaults. A user normally sets only paths.bids_root in decomb.yaml.
 
 paths:
   # BrainVision BIDS root: sub-*/[ses-*/]eeg/*_eeg.vhdr.
@@ -8,91 +7,26 @@ paths:
   # Complete BIDS derivative written atomically by `decomb apply`.
   output_root: "<bids_root>_decombed"
 
-  diagnosis_dir: "outputs/diagnosis"
-  removal_dir: "outputs/removal"
+  # Reports are kept outside the derivative so `diagnose` cannot make `apply` think a
+  # partial derivative already exists.
+  diagnosis_dir: "<bids_root>_decomb_reports/diagnosis"
+  removal_dir: "<bids_root>_decomb_reports/removal"
 
-dataset:
-  # BIDS task label. "*" processes every task.
-  task: "*"
-
-  # Optional repetition time, used only to classify detected lines against the k/TR grid.
-  tr_seconds: null
-
-detection:
-  low_hz: 3.0
-  high_hz: 95.0
-  background_half_width_hz: 4.62962962962963
-  fdr_alpha: 0.05
-  null_min_bins: 32
-  null_lower_percentile: 15.865525393145702
-  comb_chance_sigma: 2.0
-  tr_tolerance_bins: 1.0
-  comb_tolerance_hz: 0.06
-  max_pair_spacing_hz: 12.0
-  narrow_linewidth_ratio: 3.0
-  wide_member_ratio: 10.0
-  line_mask_half_width_hz: 0.15
-  max_subharmonic_divisor: 6
-  min_subharmonic_gain: 0.2
-  spacing_search_fraction: 0.02
-  bootstrap_resamples: 10000
-  bootstrap_alpha: 0.05
-  bootstrap_seed: 42
-
-# Automatic participant-specific harmonic notch planning and application.
 removal:
-  # The validated default. A Hann window of this duration resolves 0.026633 Hz.
+  # The only non-derivable correction choice: the stationarity horizon. It defines the
+  # tradeoff between tracking a moving line and resolving nearby frequencies. The
+  # validated 54 s method default requires no per-dataset tuning.
   estimation_window_s: 54.0
-  estimation_overlap: 0.5
-  filter_jobs: 4
 
-  # SITE. Starting point and reliable harmonics used to fit each recording's comb.
-  nominal_fundamental_hz: 1.2
-  harmonic_range: [24, 79]
+  # Study span eligible for detection and removal. The upper edge cannot exceed 100 Hz
+  # and is also clipped to the recording's Nyquist limit.
+  frequency_range_hz: [0.0, 100.0]
 
-  # Harmonics eligible for removal. Only harmonics supported by the whole recording are
-  # notched; this range does not manufacture missing targets.
-  removal_harmonic_range: [22, 82]
-
-  # Frequency span that may be transformed.
-  low_hz: 3.0
-  high_hz: 99.8
-
-  # Comb-fit evidence requirements.
-  search_hz: 0.25
-  min_prominence_db: 1.0
-  background_half_width_hz: 4.62962962962963
-  min_harmonics_for_fit: 20
-  max_harmonic_residual_resolutions: 2.25
-  max_fit_residual_rms_resolutions: 1.5
-
-  # FIR geometry in units of the Hann half-power resolution. These values are explicit
-  # configuration, not study assumptions embedded in the implementation.
-  minimum_stopband_resolutions: 2.0
-  transition_bandwidth_resolutions: 4.0
-
-  # Propagate whole-recording fundamental uncertainty to harmonic k as z * k * SE(f0).
-  # The stopband also spans each position directly observed in overlapping windows;
-  # missing window evidence is neither inherited nor manufactured.
-  uncertainty_confidence_z: 2.0
-
-  # Verification reports the strongest available-bin peak this far beyond each transition.
-  residual_search_hz: 0.15
-
-  # Float32 BrainVision round-trip check.
-  roundtrip_relative_tolerance: 1.0e-6
-
-# Shares of these bands made unavailable by stopbands plus transitions are written to the
-# manifest. Frequencies in those intervals must be excluded from study inference.
+# Optional study definitions used only to report unavailable bandwidth. They never decide
+# which frequencies are detected or removed.
 frequency_bands:
   delta: [1.0, 3.9]
   theta: [4.0, 7.9]
   alpha: [8.0, 12.9]
   beta: [13.0, 30.0]
   gamma: [30.1, 80.0]
-
-psd:
-  window_s: 54.0
-  overlap: 0.5
-  band_hz: [1.0, 100.0]
-  panel_span_hz: 10.0

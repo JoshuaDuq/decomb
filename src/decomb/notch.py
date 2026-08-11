@@ -20,68 +20,27 @@ from decomb import __version__, harmonics, recordings, spectral
 
 @dataclass(frozen=True)
 class HarmonicNotchSettings:
-    """Configuration required to detect and notch supported comb harmonics."""
+    """The stationarity horizon and study frequency range supplied by the user."""
 
-    task: str
     estimation_window_s: float
-    estimation_overlap: float
-    filter_jobs: int
-    nominal_fundamental_hz: float
-    harmonic_range: tuple[int, int]
-    removal_harmonic_range: tuple[int, int]
-    search_hz: float
-    min_prominence_db: float
-    uncertainty_confidence_z: float
-    low_hz: float
-    high_hz: float
-    background_half_width_hz: float
-    min_harmonics_for_fit: int
-    max_harmonic_residual_resolutions: float
-    max_fit_residual_rms_resolutions: float
-    minimum_stopband_resolutions: float
-    transition_bandwidth_resolutions: float
-    residual_search_hz: float
-    roundtrip_relative_tolerance: float
+    frequency_range_hz: tuple[float, float]
 
     def __post_init__(self) -> None:
-        positive = (
-            "estimation_window_s",
-            "nominal_fundamental_hz",
-            "search_hz",
-            "uncertainty_confidence_z",
-            "background_half_width_hz",
-            "max_harmonic_residual_resolutions",
-            "max_fit_residual_rms_resolutions",
-            "minimum_stopband_resolutions",
-            "transition_bandwidth_resolutions",
-            "residual_search_hz",
-            "roundtrip_relative_tolerance",
-        )
-        for name in positive:
-            value = getattr(self, name)
-            if not np.isfinite(value) or value <= 0.0:
-                raise ValueError(f"removal.{name} must be finite and positive.")
-        if not self.task.strip():
-            raise ValueError("dataset.task must name a BIDS task label.")
-        if self.filter_jobs < 1:
-            raise ValueError("removal.filter_jobs must be positive.")
-        if not 0.0 < self.estimation_overlap < 1.0:
-            raise ValueError("removal.estimation_overlap must lie strictly between zero and one.")
-        if self.min_harmonics_for_fit < 3:
-            raise ValueError("removal.min_harmonics_for_fit must be at least three.")
-        if not 0.0 <= self.low_hz < self.high_hz:
-            raise ValueError("removal low_hz and high_hz must be increasing.")
-        for name in ("harmonic_range", "removal_harmonic_range"):
-            first, last = getattr(self, name)
-            if first < 1 or last < first:
-                raise ValueError(f"removal.{name} must contain increasing positive integers.")
-        if self.search_hz >= self.nominal_fundamental_hz / 2.0:
-            raise ValueError("removal.search_hz must be below half the nominal fundamental.")
-        if self.max_fit_residual_rms_resolutions > self.max_harmonic_residual_resolutions:
+        if not np.isfinite(self.estimation_window_s) or self.estimation_window_s <= 0.0:
+            raise ValueError("removal.estimation_window_s must be finite and positive.")
+        values = np.asarray(self.frequency_range_hz, dtype=float)
+        if values.shape != (2,) or not np.all(np.isfinite(values)):
             raise ValueError(
-                "removal.max_fit_residual_rms_resolutions cannot exceed "
-                "max_harmonic_residual_resolutions."
+                "removal.frequency_range_hz must contain two finite values."
             )
+        low_hz, high_hz = (float(value) for value in values)
+        if not 0.0 <= low_hz < high_hz <= harmonics.MAXIMUM_FREQUENCY_HZ:
+            raise ValueError("removal.frequency_range_hz must increase inside [0, 100] Hz.")
+
+    @property
+    def estimation_overlap(self) -> float:
+        """Hann's constant-overlap-add hop, derived from the window itself."""
+        return 0.5
 
     @property
     def spectral_resolution_hz(self) -> float:
@@ -89,24 +48,21 @@ class HarmonicNotchSettings:
 
     @property
     def transition_bandwidth_hz(self) -> float:
-        return self.transition_bandwidth_resolutions * self.spectral_resolution_hz
+        # MNE firwin's automatic Hamming length is 3.3 / transition bandwidth.
+        return 3.3 / self.estimation_window_s
 
     @property
     def minimum_stopband_width_hz(self) -> float:
-        return self.minimum_stopband_resolutions * self.spectral_resolution_hz
+        return self.spectral_resolution_hz
 
     @property
-    def max_harmonic_residual_hz(self) -> float:
-        return self.max_harmonic_residual_resolutions * self.spectral_resolution_hz
-
-    @property
-    def max_fit_residual_rms_hz(self) -> float:
-        return self.max_fit_residual_rms_resolutions * self.spectral_resolution_hz
+    def frequency_bin_width_hz(self) -> float:
+        return 1.0 / self.estimation_window_s
 
     @classmethod
     def from_config(cls, config) -> HarmonicNotchSettings:
         block = dict(config.get("removal") or {})
-        known = {entry.name for entry in fields(cls)} - {"task"}
+        known = {entry.name for entry in fields(cls)}
         unknown = set(block) - known
         if unknown:
             raise ValueError(
@@ -116,31 +72,36 @@ class HarmonicNotchSettings:
         missing = known - set(block)
         if missing:
             raise ValueError(f"Missing `removal` setting(s): {sorted(missing)}.")
-        values: dict[str, object] = {"task": str((config.get("dataset") or {}).get("task", ""))}
-        for entry in fields(cls):
-            if entry.name not in block:
-                continue
-            value = block[entry.name]
-            if entry.name in {"harmonic_range", "removal_harmonic_range"}:
-                values[entry.name] = tuple(int(item) for item in value)
-            elif entry.name in {"filter_jobs", "min_harmonics_for_fit"}:
-                values[entry.name] = int(value)
-            else:
-                values[entry.name] = float(value)
-        return cls(**values)
+        try:
+            frequency_range = tuple(float(value) for value in block["frequency_range_hz"])
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "removal.frequency_range_hz must contain two numeric values."
+            ) from error
+        return cls(
+            estimation_window_s=float(block["estimation_window_s"]),
+            frequency_range_hz=frequency_range,
+        )
 
 
 @dataclass(frozen=True)
 class HarmonicStopband:
-    """One measured harmonic interval that is unavailable after filtering."""
+    """One measured comb or isolated-line interval unavailable after filtering."""
 
     harmonics: tuple[int, ...]
     low_hz: float
     high_hz: float
+    kind: str = "comb"
 
     def __post_init__(self) -> None:
-        if not self.harmonics or tuple(sorted(set(self.harmonics))) != self.harmonics:
-            raise ValueError("Stopband harmonics must be sorted unique positive integers.")
+        if self.kind not in {"comb", "isolated", "mixed"}:
+            raise ValueError("Stopband kind must be comb, isolated, or mixed.")
+        if tuple(sorted(set(self.harmonics))) != self.harmonics:
+            raise ValueError("Stopband harmonics must be sorted unique integers.")
+        if self.kind == "comb" and not self.harmonics:
+            raise ValueError("A comb stopband requires at least one harmonic.")
+        if self.kind == "isolated" and self.harmonics:
+            raise ValueError("An isolated stopband cannot claim a comb harmonic.")
         if any(harmonic < 1 for harmonic in self.harmonics):
             raise ValueError("Stopband harmonics must be positive.")
         if not np.all(np.isfinite((self.low_hz, self.high_hz))):
@@ -189,44 +150,47 @@ class HarmonicNotchPlan:
 
 def _observed_harmonic_intervals(model, settings) -> list[HarmonicStopband]:
     """Intervals supported by the whole run and localized in its adaptive windows."""
-    first, last = settings.removal_harmonic_range
-    supported = {
-        harmonic
-        for harmonic in model.whole_estimate.supported_harmonics
-        if first <= harmonic <= last
-    }
     whole_positions = dict(
         zip(
-            model.whole_estimate.supported_harmonics,
-            model.whole_estimate.supported_positions_hz,
+            model.whole_estimate.harmonics,
+            model.whole_estimate.positions_hz,
         )
     )
     intervals = []
-    for harmonic in sorted(supported):
-        uncertainty_hz = (
-            settings.uncertainty_confidence_z
-            * harmonic
-            * model.whole_estimate.fundamental_jackknife_se_hz
-        )
-        lower_edges = [whole_positions[harmonic] - uncertainty_hz]
-        upper_edges = [whole_positions[harmonic] + uncertainty_hz]
+    location_uncertainty_hz = settings.frequency_bin_width_hz / 2.0
+    for harmonic in model.whole_estimate.harmonics:
+        lower_edges = [whole_positions[harmonic] - location_uncertainty_hz]
+        upper_edges = [whole_positions[harmonic] + location_uncertainty_hz]
         for evidence in model.window_evidence:
             positions = dict(zip(evidence.harmonics, evidence.positions_hz))
-            if harmonic not in positions:
-                continue
-            lower_edges.append(positions[harmonic])
-            upper_edges.append(positions[harmonic])
+            lower_edges.append(positions[harmonic] - location_uncertainty_hz)
+            upper_edges.append(positions[harmonic] + location_uncertainty_hz)
 
         low_hz = min(lower_edges)
         high_hz = max(upper_edges)
         centre_hz = (low_hz + high_hz) / 2.0
-        if not settings.low_hz <= centre_hz <= settings.high_hz:
-            continue
         minimum_width_hz = settings.minimum_stopband_width_hz
         if high_hz - low_hz < minimum_width_hz:
             low_hz = centre_hz - minimum_width_hz / 2.0
             high_hz = centre_hz + minimum_width_hz / 2.0
         intervals.append(HarmonicStopband((harmonic,), low_hz, high_hz))
+
+    for line_index, whole_position_hz in enumerate(model.isolated_lines.positions_hz):
+        positions_hz = [whole_position_hz]
+        positions_hz.extend(
+            window[line_index]
+            for window in model.isolated_lines.window_positions_hz
+        )
+        low_hz = min(positions_hz) - location_uncertainty_hz
+        high_hz = max(positions_hz) + location_uncertainty_hz
+        centre_hz = (low_hz + high_hz) / 2.0
+        if high_hz - low_hz < settings.minimum_stopband_width_hz:
+            half_width_hz = settings.minimum_stopband_width_hz / 2.0
+            low_hz = centre_hz - half_width_hz
+            high_hz = centre_hz + half_width_hz
+        intervals.append(
+            HarmonicStopband((), low_hz, high_hz, kind="isolated")
+        )
     return intervals
 
 
@@ -246,6 +210,7 @@ def _merge_stopbands(
             harmonics=tuple(sorted((*previous.harmonics, *stopband.harmonics))),
             low_hz=previous.low_hz,
             high_hz=max(previous.high_hz, stopband.high_hz),
+            kind=(previous.kind if previous.kind == stopband.kind else "mixed"),
         )
     return tuple(merged)
 
@@ -261,19 +226,12 @@ def plan_harmonic_stopbands(model, settings) -> HarmonicNotchPlan:
 
 
 def _estimate_comb_spectrum(spectrum, settings):
-    frequencies_hz, spectrum_db, prominence_db = spectrum
+    frequencies_hz, spectrum_db = spectrum
     return harmonics.estimate_comb(
         frequencies_hz,
         spectrum_db,
-        prominence_db,
-        nominal_fundamental_hz=settings.nominal_fundamental_hz,
-        fit_harmonic_range=settings.harmonic_range,
-        supported_harmonic_range=settings.removal_harmonic_range,
-        search_hz=settings.search_hz,
-        min_prominence_db=settings.min_prominence_db,
-        min_harmonics=settings.min_harmonics_for_fit,
-        max_harmonic_residual_hz=settings.max_harmonic_residual_hz,
-        max_residual_rms_hz=settings.max_fit_residual_rms_hz,
+        spectral_resolution_hz=settings.spectral_resolution_hz,
+        frequency_range_hz=settings.frequency_range_hz,
     )
 
 
@@ -283,43 +241,52 @@ def _localize_window_evidence(
     supported_harmonics,
     fundamental_hz,
 ):
-    frequencies_hz, spectrum_db, prominence_db = spectrum
-    return harmonics.localize_supported_harmonics(
+    frequencies_hz, spectrum_db = spectrum
+    return harmonics.localize_harmonics(
         frequencies_hz,
         spectrum_db,
-        prominence_db,
-        supported_harmonics=supported_harmonics,
+        harmonics=supported_harmonics,
         fundamental_hz=fundamental_hz,
-        search_hz=settings.max_harmonic_residual_hz,
-        min_prominence_db=settings.min_prominence_db,
+        spectral_resolution_hz=settings.spectral_resolution_hz,
     )
 
 
 def fit_harmonic_model(raw, settings):
-    """Authorize the comb once, then localize only those targets in each window."""
+    """Authorize a complete comb and statistically supported isolated lines."""
     spectra = recordings.session_run_spectra(raw, settings)
     whole_estimate = _estimate_comb_spectrum(spectra.whole, settings)
     window_evidence = tuple(
         _localize_window_evidence(
             spectrum,
             settings,
-            whole_estimate.supported_harmonics,
+            whole_estimate.harmonics,
             whole_estimate.fundamental_hz,
         )
         for spectrum in spectra.windows
     )
+    frequencies_hz, whole_spectrum_db = spectra.whole
+    isolated_lines = harmonics.detect_isolated_lines(
+        frequencies_hz,
+        whole_spectrum_db,
+        [spectrum_db for _, spectrum_db in spectra.windows],
+        comb=whole_estimate,
+        spectral_resolution_hz=settings.spectral_resolution_hz,
+        independent_window_indices=recordings.non_overlapping_window_indices(
+            spectra.bounds
+        ),
+        frequency_range_hz=settings.frequency_range_hz,
+    )
     return harmonics.AdaptiveCombModel(
         whole_estimate=whole_estimate,
         window_evidence=window_evidence,
+        isolated_lines=isolated_lines,
     )
 
 
-def apply_harmonic_notches(raw, plan: HarmonicNotchPlan, *, filter_jobs: int):
+def apply_harmonic_notches(raw, plan: HarmonicNotchPlan):
     """Return a copy with the evidence-bounded harmonic intervals removed from EEG."""
     import mne
 
-    if filter_jobs < 1:
-        raise ValueError("filter_jobs must be positive.")
     picks = mne.pick_types(raw.info, eeg=True, exclude=())
     if len(picks) == 0:
         raise ValueError("Harmonic notching requires at least one EEG channel.")
@@ -348,7 +315,7 @@ def apply_harmonic_notches(raw, plan: HarmonicNotchPlan, *, filter_jobs: int):
         method="fir",
         filter_length="auto",
         phase="zero",
-        n_jobs=filter_jobs,
+        n_jobs=-1,
         verbose="ERROR",
     )
     return filtered
@@ -381,6 +348,7 @@ def harmonic_exclusion_rows(
     for stopband, unavailable in zip(plan.stopbands, unavailable_edges):
         row: dict[str, float | str] = {
             "recording": recording,
+            "kind": stopband.kind,
             "harmonics": ";".join(str(harmonic) for harmonic in stopband.harmonics),
             "stopband_low_hz": stopband.low_hz,
             "stopband_high_hz": stopband.high_hz,
@@ -408,9 +376,17 @@ def harmonic_plan_from_rows(
         sorted(
             (
                 HarmonicStopband(
-                    harmonics=tuple(int(value) for value in str(row["harmonics"]).split(";")),
+                    harmonics=(
+                        ()
+                        if pd.isna(row["harmonics"]) or str(row["harmonics"]) == ""
+                        else tuple(
+                            int(float(value))
+                            for value in str(row["harmonics"]).split(";")
+                        )
+                    ),
                     low_hz=float(row["stopband_low_hz"]),
                     high_hz=float(row["stopband_high_hz"]),
+                    kind=str(row["kind"]),
                 )
                 for row in rows
             ),
@@ -491,7 +467,7 @@ def clean_harmonic_run(
     raw = recordings.read_bids_raw(vhdr)
     model = fit_harmonic_model(raw, settings)
     plan = plan_harmonic_stopbands(model, settings)
-    filtered = apply_harmonic_notches(raw, plan, filter_jobs=settings.filter_jobs)
+    filtered = apply_harmonic_notches(raw, plan)
 
     relative_header = vhdr.relative_to(source_root)
     destination = output_root / relative_header.with_suffix(".eeg")
@@ -501,23 +477,35 @@ def clean_harmonic_run(
     written = recordings.read_bids_raw(output_root / relative_header)
     expected = filtered.get_data()
     deviation_v = float(np.max(np.abs(written.get_data() - expected)))
-    tolerance_v = settings.roundtrip_relative_tolerance * float(np.max(np.abs(expected)))
+    representable = recordings.quantized_eeg_data(vhdr, expected)
+    quantization_deviation_v = float(np.max(np.abs(representable - expected)))
+    tolerance_v = float(np.nextafter(quantization_deviation_v, np.inf))
     if deviation_v > tolerance_v:
         raise RuntimeError(
             f"{vhdr.name}: written data differs by {deviation_v:.3e} V, "
-            f"above the {tolerance_v:.3e} V float32 round-trip tolerance."
+            f"above its {tolerance_v:.3e} V float32 quantization bound."
         )
 
     rows = harmonic_exclusion_rows(vhdr.stem, plan, analysed_bands)
     changes_db = _measure_stopband_changes(raw, filtered, plan, settings)
     for row, stopband, change_db in zip(rows, plan.stopbands, changes_db):
-        supporting_window_count = sum(
-            any(harmonic in evidence.harmonics for harmonic in stopband.harmonics)
-            for evidence in model.window_evidence
-        )
+        isolated_targets = [
+            (position_hz, evidence_bic)
+            for position_hz, evidence_bic in zip(
+                model.isolated_lines.positions_hz,
+                model.isolated_lines.evidence_bic,
+            )
+            if stopband.low_hz <= position_hz <= stopband.high_hz
+        ]
         row["fundamental_hz"] = model.whole_estimate.fundamental_hz
+        row["comb_evidence_bic"] = model.whole_estimate.evidence_bic
+        row["isolated_line_frequencies_hz"] = ";".join(
+            f"{position_hz:.17g}" for position_hz, _ in isolated_targets
+        )
+        row["isolated_line_evidence_bic"] = ";".join(
+            f"{evidence_bic:.17g}" for _, evidence_bic in isolated_targets
+        )
         row["estimation_window_count"] = len(model.window_evidence)
-        row["supporting_window_count"] = supporting_window_count
         row["in_stopband_change_db"] = change_db
         row["roundtrip_deviation_v"] = deviation_v
     return rows
@@ -557,11 +545,12 @@ def write_harmonic_derivative_description(
             "Name": "decomb",
             "Version": __version__,
             "Description": (
-                "The whole recording authorized participant-specific comb harmonics; "
-                "overlapping Hann-window spectra localized only those supported targets. "
-                "They were removed with zero-phase MNE FIR notches. The stopbands and "
-                "their transitions are unavailable for inference and are listed per "
-                "recording in harmonic_notch_manifest.tsv."
+                "BIC model comparison identified a participant-specific comb and "
+                "resolution-limited isolated lines. Every comb multiple in the configured "
+                "range was localized across overlapping Hann windows, then all targets "
+                "were removed with zero-phase MNE FIR notches. Stopbands and transitions "
+                "are unavailable for inference and are listed per recording in "
+                "harmonic_notch_manifest.tsv."
             ),
             "Parameters": {
                 "method": "fir",
@@ -600,7 +589,7 @@ def run(args: argparse.Namespace) -> None:
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
     settings = HarmonicNotchSettings.from_config(config)
     analysed_bands = analysed_bands_from_config(config)
-    runs = recordings.discover_runs(source_root, subjects=None, task=settings.task)
+    runs = recordings.discover_runs(source_root, subjects=None, task="*")
 
     if output_root.exists():
         raise FileExistsError(
@@ -676,22 +665,37 @@ def _validate_matching_recordings(original, cleaned) -> None:
 
 def _adjacent_residual_peak(
     frequencies_hz: np.ndarray,
-    prominence_db: np.ndarray,
+    spectrum_db: np.ndarray,
     stopband: HarmonicStopband,
     unavailable: tuple[float, float],
-    settings,
+    search_hz: float,
+    spectral_resolution_hz: float,
 ) -> tuple[float, float]:
-    """Frequency and prominence of the largest available peak beside a stopband."""
-    search = (frequencies_hz >= stopband.low_hz - settings.residual_search_hz) & (
-        frequencies_hz <= stopband.high_hz + settings.residual_search_hz
+    """Frequency and narrow-line contrast of the largest available adjacent peak."""
+    search = (frequencies_hz >= stopband.low_hz - search_hz) & (
+        frequencies_hz <= stopband.high_hz + search_hz
     )
     available = (frequencies_hz < unavailable[0]) | (frequencies_hz > unavailable[1])
     candidate_indices = np.flatnonzero(search & available)
-    candidates = np.asarray(prominence_db, dtype=float)[candidate_indices]
+    offset_bins = int(
+        np.ceil(spectral_resolution_hz / (frequencies_hz[1] - frequencies_hz[0]))
+    )
+    valid = (candidate_indices >= offset_bins) & (
+        candidate_indices < frequencies_hz.size - offset_bins
+    )
+    candidate_indices = candidate_indices[valid]
+    candidates = (
+        spectrum_db[candidate_indices]
+        - 0.5
+        * (
+            spectrum_db[candidate_indices - offset_bins]
+            + spectrum_db[candidate_indices + offset_bins]
+        )
+    )
     if candidates.size == 0:
         return float("nan"), float("nan")
     selected = int(candidate_indices[int(np.argmax(candidates))])
-    return float(frequencies_hz[selected]), float(prominence_db[selected])
+    return float(frequencies_hz[selected]), float(candidates[int(np.argmax(candidates))])
 
 
 def verify_harmonic_run(
@@ -706,17 +710,18 @@ def verify_harmonic_run(
     _validate_matching_recordings(original, cleaned)
     plan = harmonic_plan_from_rows(manifest_rows)
     changes_db = _measure_stopband_changes(original, cleaned, plan, settings)
-    original_frequencies_hz, _, original_prominence_db = recordings.run_spectrum(
+    original_frequencies_hz, original_spectrum_db = recordings.run_spectrum(
         original,
         settings,
     )
-    cleaned_frequencies_hz, _, cleaned_prominence_db = recordings.run_spectrum(
+    cleaned_frequencies_hz, cleaned_spectrum_db = recordings.run_spectrum(
         cleaned,
         settings,
     )
     if not np.array_equal(original_frequencies_hz, cleaned_frequencies_hz):
         raise ValueError("Source and cleaned prominence spectra use different grids.")
 
+    fundamental_hz = float(manifest_rows[0]["fundamental_hz"])
     rows = []
     for stopband, unavailable, change_db in zip(
         plan.stopbands,
@@ -725,21 +730,24 @@ def verify_harmonic_run(
     ):
         original_peak_hz, original_peak_db = _adjacent_residual_peak(
             original_frequencies_hz,
-            original_prominence_db,
+            original_spectrum_db,
             stopband,
             unavailable,
-            settings,
+            fundamental_hz / 2.0,
+            settings.spectral_resolution_hz,
         )
         cleaned_peak_hz, cleaned_peak_db = _adjacent_residual_peak(
             cleaned_frequencies_hz,
-            cleaned_prominence_db,
+            cleaned_spectrum_db,
             stopband,
             unavailable,
-            settings,
+            fundamental_hz / 2.0,
+            settings.spectral_resolution_hz,
         )
         rows.append(
             {
                 "recording": source_vhdr.stem,
+                "kind": stopband.kind,
                 "harmonics": ";".join(str(value) for value in stopband.harmonics),
                 "stopband_low_hz": stopband.low_hz,
                 "stopband_high_hz": stopband.high_hz,
@@ -747,10 +755,10 @@ def verify_harmonic_run(
                 "unavailable_high_hz": unavailable[1],
                 "verified_stopband_change_db": change_db,
                 "original_adjacent_peak_hz": original_peak_hz,
-                "original_adjacent_prominence_db": original_peak_db,
+                "original_adjacent_line_contrast_db": original_peak_db,
                 "cleaned_adjacent_peak_hz": cleaned_peak_hz,
-                "cleaned_adjacent_prominence_db": cleaned_peak_db,
-                "adjacent_max_prominence_change_db": cleaned_peak_db - original_peak_db,
+                "cleaned_adjacent_line_contrast_db": cleaned_peak_db,
+                "adjacent_max_line_contrast_change_db": cleaned_peak_db - original_peak_db,
             }
         )
     return rows
@@ -766,7 +774,7 @@ def run_verify(args: argparse.Namespace) -> None:
     cleaned_root = config.path("output_root", override=getattr(args, "output_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
     settings = HarmonicNotchSettings.from_config(config)
-    runs = recordings.discover_runs(source_root, subjects=None, task=settings.task)
+    runs = recordings.discover_runs(source_root, subjects=None, task="*")
     manifest_path = cleaned_root / "harmonic_notch_manifest.tsv"
     if not manifest_path.is_file():
         raise FileNotFoundError(
@@ -775,7 +783,9 @@ def run_verify(args: argparse.Namespace) -> None:
     manifest = pd.read_csv(manifest_path, sep="\t", float_precision="round_trip")
     required = {
         "recording",
+        "kind",
         "harmonics",
+        "fundamental_hz",
         "stopband_low_hz",
         "stopband_high_hz",
         "transition_bandwidth_hz",

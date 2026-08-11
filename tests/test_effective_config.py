@@ -24,12 +24,12 @@ def _config(tmp_path, document):
 
 class TestProvenance:
     def test_an_inherited_value_says_so(self, tmp_path):
-        config = _config(tmp_path, {"removal": {"filter_jobs": 3}})
+        config = _config(tmp_path, {})
         assert config.provenance("removal.estimation_window_s") == "packaged defaults"
 
     def test_a_value_the_user_set_names_their_file(self, tmp_path):
-        config = _config(tmp_path, {"removal": {"filter_jobs": 3}})
-        assert config.provenance("removal.filter_jobs") == str(config.source)
+        config = _config(tmp_path, {"removal": {"estimation_window_s": 60.0}})
+        assert config.provenance("removal.estimation_window_s") == str(config.source)
 
     def test_a_value_matching_the_default_is_still_the_users(self, tmp_path):
         """Writing a value down is a decision, even when it agrees with the default.
@@ -37,9 +37,9 @@ class TestProvenance:
         Someone who set it deliberately should not be told they inherited it -- the two
         mean different things when the default later changes.
         """
-        default = load_config(None).get("removal.filter_jobs")
-        config = _config(tmp_path, {"removal": {"filter_jobs": default}})
-        assert config.provenance("removal.filter_jobs") == str(config.source)
+        default = load_config(None).get("removal.estimation_window_s")
+        config = _config(tmp_path, {"removal": {"estimation_window_s": default}})
+        assert config.provenance("removal.estimation_window_s") == str(config.source)
 
     def test_with_no_config_file_everything_is_inherited(self):
         config = load_config(None)
@@ -55,7 +55,7 @@ class TestTheReport:
         names = {name for name, _, _ in table}
 
         assert "removal.estimation_window_s" in names
-        assert "detection.fdr_alpha" in names
+        assert "removal.transition_bandwidth_hz" in names
         assert "frequency_bands.gamma" in names
 
     def test_derived_values_appear_with_the_expression_that_made_them(self, tmp_path):
@@ -65,10 +65,10 @@ class TestTheReport:
 
         table = {name: (value, origin) for name, value, origin in effective.rows(config, settings)}
 
-        value, origin = table["removal.max_harmonic_residual_hz"]
+        value, origin = table["removal.transition_bandwidth_hz"]
         assert origin.startswith("derived:")
-        assert "spectral_resolution_hz" in origin
-        assert float(value) == pytest.approx(settings.max_harmonic_residual_hz)
+        assert "3.3" in origin
+        assert float(value) == pytest.approx(settings.transition_bandwidth_hz)
 
     def test_a_derived_value_tracks_the_setting_it_derives_from(self, tmp_path):
         config = _config(tmp_path, {"removal": {"estimation_window_s": 108.0}})
@@ -100,7 +100,7 @@ class TestAnEmptyBlockIsRefused:
         like a section left deliberately alone.
         """
         path = tmp_path / "decomb.yaml"
-        path.write_text("detection:\n  # only a comment\n", encoding="utf-8")
+        path.write_text("removal:\n  # only a comment\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="empty block"):
             load_config(path)
@@ -116,8 +116,7 @@ class TestAnEmptyBlockIsRefused:
         assert "Delete the key" in str(excinfo.value)
 
     def test_a_block_with_settings_in_it_still_merges(self, tmp_path):
-        config = _config(tmp_path, {"removal": {"filter_jobs": 2}})
+        config = _config(tmp_path, {"removal": {"estimation_window_s": 60.0}})
         settings = notch.HarmonicNotchSettings.from_config(config)
 
-        assert settings.filter_jobs == 2
-        assert settings.estimation_window_s == 54.0
+        assert settings.estimation_window_s == 60.0

@@ -41,47 +41,39 @@ from decomb.spectral import to_db  # noqa: E402
 
 @dataclass(frozen=True)
 class PsdSettings:
-    """How the spectra are computed. One set of values for every arm of the comparison."""
+    """PSD geometry derived from the correction's stationarity window."""
 
     window_s: float
+    band_hz: tuple[float, float]
     """Welch segment length, in seconds. Sets the resolution to ``1 / window_s``.
 
     Match it to the removal's estimation window so the figure resolves what the fit
     resolved. Resolving the comb spacing needs far less; resolving a close line pair needs
     all of it.
     """
-    overlap: float
-    band_hz: tuple[float, float]
-    panel_span_hz: float
-    """Width of each panel in the tiled figure -- narrow enough for roughly one bin per pixel."""
-
     def __post_init__(self) -> None:
         if not np.isfinite(self.window_s) or self.window_s <= 0.0:
             raise ValueError("window_s must be finite and positive.")
-        if not 0.0 <= self.overlap < 1.0:
-            raise ValueError("overlap must lie in [0, 1).")
         low_hz, high_hz = self.band_hz
-        if not 0.0 <= low_hz < high_hz:
-            raise ValueError("band_hz must be an increasing non-negative range.")
-        if not np.isfinite(self.panel_span_hz) or self.panel_span_hz <= 0.0:
-            raise ValueError("panel_span_hz must be finite and positive.")
+        if not 0.0 <= low_hz < high_hz <= 100.0:
+            raise ValueError("band_hz must increase inside [0, 100] Hz.")
+
+    @property
+    def overlap(self) -> float:
+        return 0.5
+
+    @property
+    def panel_span_hz(self) -> float:
+        return 10.0
 
     @classmethod
     def from_config(cls, config) -> PsdSettings:
-        block = dict(config.get("psd") or {})
-        known = {"window_s", "overlap", "band_hz", "panel_span_hz"}
-        unknown = set(block) - known
-        if unknown:
-            raise ValueError(f"Unknown `psd` setting(s): {sorted(unknown)}.")
-        missing = known - set(block)
-        if missing:
-            raise ValueError(f"Missing `psd` setting(s): {sorted(missing)}.")
-        band = block["band_hz"]
+        from decomb.notch import HarmonicNotchSettings
+
+        correction = HarmonicNotchSettings.from_config(config)
         return cls(
-            window_s=float(block["window_s"]),
-            overlap=float(block["overlap"]),
-            band_hz=(float(band[0]), float(band[1])),
-            panel_span_hz=float(block["panel_span_hz"]),
+            window_s=correction.estimation_window_s,
+            band_hz=correction.frequency_range_hz,
         )
 
 
@@ -99,13 +91,14 @@ def channel_median_psd(raw, settings: PsdSettings) -> tuple[np.ndarray, np.ndarr
     if n_fft > raw.n_times:
         raise ValueError(
             f"The recording holds {raw.n_times} samples, fewer than the {n_fft} of one "
-            f"{settings.window_s:g} s Welch segment. Lower `psd.window_s`."
+            f"{settings.window_s:g} s Welch segment. Lower "
+            "`removal.estimation_window_s`."
         )
     spectrum = raw.compute_psd(
         method="welch",
         picks="eeg",
         fmin=settings.band_hz[0],
-        fmax=settings.band_hz[1],
+        fmax=min(settings.band_hz[1], np.nextafter(sampling_frequency_hz / 2.0, 0.0)),
         n_fft=n_fft,
         n_overlap=int(round(n_fft * settings.overlap)),
         n_per_seg=n_fft,
@@ -119,7 +112,7 @@ def compare_recording(
     source_vhdr: Path,
     derivative_vhdrs: Sequence[tuple[str, Path]],
     settings: PsdSettings,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
     """One recording's spectrum before and after each derivative, on one frequency grid.
 
     Every arm is read through the same BIDS reader and measured with the same parameters,
@@ -128,6 +121,7 @@ def compare_recording(
     recordings on one axis.
     """
     source = recordings.read_bids_raw(source_vhdr)
+    duration_s = source.n_times / float(source.info["sfreq"])
     freqs, source_psd = channel_median_psd(source, settings)
     spectra = {"source": source_psd}
     for label, path in derivative_vhdrs:
@@ -144,7 +138,7 @@ def compare_recording(
         spectra[label] = psd
         del derivative
     del source
-    return freqs, spectra
+    return freqs, spectra, duration_s
 
 
 def analysis_bands_from_config(config) -> tuple[tuple[str, float, float], ...]:
@@ -183,6 +177,7 @@ def figure_band_panels(
     path: Path,
     *,
     settings: PsdSettings,
+    cohort_description: str,
     bands=(),
 ) -> None:
     """The same spectra tiled into readable spans, one panel per range.
@@ -217,8 +212,8 @@ def figure_band_panels(
             axis.legend(loc="upper left", fontsize=8)
         axis.tick_params(labelsize=8)
     axes[0][0].set_title(
-        f"Power spectra before and after removal, {settings.panel_span_hz:g} Hz per panel. "
-        "Welch via MNE."
+        f"Power spectra before and after removal: {cohort_description}. "
+        f"{settings.panel_span_hz:g} Hz per panel; Welch via MNE."
     )
     axes[-1][0].set_xlabel("frequency (Hz)")
     figure.supylabel("median PSD (dB re 1 V²/Hz)")
@@ -234,7 +229,7 @@ ARM_STYLE = {
     # which matters wherever the source spectrum already carried structure this pass never
     # aimed at, such as the periodic residue of an upstream gradient correction.
     "source": ("#F3A28E", "before correction", 2.2),
-    "harmonic-notched": ("#111827", "after harmonic notches", 0.7),
+    "harmonic-notched": ("#111827", "after automatic line notches", 0.7),
 }
 DEFAULT_STYLE = ("#6B7280", "", 0.7)
 
@@ -249,7 +244,13 @@ def _draw_order(arms) -> tuple[str, ...]:
     return ("source", *(label for label in arms if label != "source"))
 
 
-def figure_cohort(freqs, arms: dict[str, np.ndarray], path: Path, *, n_recordings: int) -> None:
+def figure_cohort(
+    freqs,
+    arms: dict[str, np.ndarray],
+    path: Path,
+    *,
+    cohort_description: str,
+) -> None:
     """Cohort median spectrum, and what the removal took, on one frequency axis."""
     figure, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True, height_ratios=[2, 1])
     for label in _draw_order(arms):
@@ -260,8 +261,7 @@ def figure_cohort(freqs, arms: dict[str, np.ndarray], path: Path, *, n_recording
     axes[0].legend(loc="upper right", fontsize=9)
     axes[0].set_ylabel("median PSD (dB re 1 V²/Hz)")
     axes[0].set_title(
-        f"Power spectra before and after removal, median of {n_recordings} recordings. "
-        "Welch via MNE."
+        f"Power spectra before and after removal: {cohort_description}. Welch via MNE."
     )
 
     # What changed, which is the question the top panel only implies. Negative is removed.
@@ -292,7 +292,11 @@ def figure_cohort(freqs, arms: dict[str, np.ndarray], path: Path, *, n_recording
 
 
 def figure_per_recording(
-    freqs, per_recording: dict[str, dict[str, np.ndarray]], path: Path
+    freqs,
+    per_recording: dict[str, dict[str, np.ndarray]],
+    path: Path,
+    *,
+    cohort_description: str,
 ) -> None:
     """One panel per recording, so a single bad one cannot hide inside a cohort median."""
     names = sorted(per_recording)
@@ -316,7 +320,8 @@ def figure_per_recording(
         axes[index // columns][index % columns].axis("off")
     figure.supxlabel("frequency (Hz)")
     figure.supylabel("median PSD (dB re 1 V²/Hz)")
-    figure.tight_layout()
+    figure.suptitle(f"Before and after automatic line notching: {cohort_description}")
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.995))
     figure.savefig(path, dpi=150)
     plt.close(figure)
 
@@ -329,7 +334,6 @@ def run(args: argparse.Namespace) -> None:
 
     config = load_config(getattr(args, "config", None))
     settings = PsdSettings.from_config(config)
-    task = str((config.get("dataset") or {})["task"])
     source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
 
@@ -341,13 +345,14 @@ def run(args: argparse.Namespace) -> None:
         )
 
     subjects = getattr(args, "subjects", None)
-    runs = recordings.discover_runs(source_root, subjects=subjects, task=task)
+    runs = recordings.discover_runs(source_root, subjects=subjects, task="*")
     print(f"Measuring {len(runs)} recordings from {source_root}")
     for label, root in available:
         print(f"  against {label}: {root}")
     print(f"  Welch, {settings.window_s:g} s segments, {settings.overlap:.0%} overlap, EEG only")
 
     per_recording: dict[str, dict[str, np.ndarray]] = {}
+    total_duration_s = 0.0
     freqs = None
     for index, vhdr in enumerate(runs, start=1):
         started = time.time()
@@ -355,12 +360,13 @@ def run(args: argparse.Namespace) -> None:
         missing = [str(path) for _, path in derivatives if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"{vhdr.stem}: derivative missing at {missing[0]}")
-        run_freqs, spectra = compare_recording(vhdr, derivatives, settings)
+        run_freqs, spectra, duration_s = compare_recording(vhdr, derivatives, settings)
         if freqs is None:
             freqs = run_freqs
         elif not np.array_equal(run_freqs, freqs):
             raise ValueError(f"{vhdr.stem}: spectra landed on a different grid from the first.")
         per_recording[vhdr.stem] = spectra
+        total_duration_s += duration_s
         print(f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} ({time.time() - started:.0f}s)")
 
     arms = {
@@ -368,20 +374,31 @@ def run(args: argparse.Namespace) -> None:
         for label in ("source", *(label for label, _ in available))
     }
     report_dir.mkdir(parents=True, exist_ok=True)
+    participant_count = len({recordings.subject_of(vhdr) for vhdr in runs})
+    cohort_description = (
+        f"{len(runs)} recordings from {participant_count} participants "
+        f"({total_duration_s / 3600.0:.1f} h EEG)"
+    )
     figure_cohort(
         freqs,
         arms,
         report_dir / "psd_before_after.png",
-        n_recordings=len(per_recording),
+        cohort_description=cohort_description,
     )
     figure_band_panels(
         freqs,
         arms,
         report_dir / "psd_before_after_panels.png",
         settings=settings,
+        cohort_description=cohort_description,
         bands=analysis_bands_from_config(config),
     )
-    figure_per_recording(freqs, per_recording, report_dir / "psd_before_after_per_recording.png")
+    figure_per_recording(
+        freqs,
+        per_recording,
+        report_dir / "psd_before_after_per_recording.png",
+        cohort_description=cohort_description,
+    )
     np.savez_compressed(
         report_dir / "psd_before_after.npz",
         freqs=freqs,

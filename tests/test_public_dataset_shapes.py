@@ -77,8 +77,16 @@ def test_task_filtering_is_not_paradigm_specific(tmp_path):
     assert len(recordings.discover_runs(tmp_path, None, task="*")) == 2
 
 
-def test_an_absent_task_names_the_yaml_setting(tmp_path):
+def test_an_absent_task_reports_the_requested_task(tmp_path):
     _write_run(tmp_path, "0001", "rest", run=None)
 
-    with pytest.raises(FileNotFoundError, match="dataset.task"):
+    with pytest.raises(FileNotFoundError, match="not-a-task"):
         recordings.discover_runs(tmp_path, subjects=None, task="not-a-task")
+
+
+def test_independent_windows_never_overlap_after_tail_alignment():
+    bounds = ((0, 10), (5, 15), (10, 20), (13, 23), (20, 30))
+
+    indices = recordings.non_overlapping_window_indices(bounds)
+
+    assert indices == (0, 2, 4)

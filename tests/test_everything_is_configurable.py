@@ -1,36 +1,14 @@
-"""The automatic correction exposes every user decision and no obsolete controls."""
+"""Only irreducible user decisions belong in the public YAML."""
 
 from __future__ import annotations
 
-from dataclasses import MISSING, fields
+from dataclasses import fields
 
 import pytest
 import yaml
 
-from decomb import catalogue, notch
+from decomb import notch
 from decomb.config import load_config
-
-OVERRIDES = {
-    "estimation_window_s": 60.0,
-    "estimation_overlap": 0.6,
-    "filter_jobs": 2,
-    "nominal_fundamental_hz": 1.5,
-    "harmonic_range": [10, 40],
-    "removal_harmonic_range": [9, 41],
-    "search_hz": 0.3,
-    "min_prominence_db": 1.5,
-    "uncertainty_confidence_z": 1.5,
-    "low_hz": 2.0,
-    "high_hz": 90.0,
-    "background_half_width_hz": 5.0,
-    "min_harmonics_for_fit": 12,
-    "max_harmonic_residual_resolutions": 2.0,
-    "max_fit_residual_rms_resolutions": 1.25,
-    "minimum_stopband_resolutions": 2.5,
-    "transition_bandwidth_resolutions": 5.0,
-    "residual_search_hz": 0.2,
-    "roundtrip_relative_tolerance": 1.0e-5,
-}
 
 
 def _config(tmp_path, document):
@@ -39,58 +17,67 @@ def _config(tmp_path, document):
     return load_config(path)
 
 
-def test_every_notch_setting_is_covered_by_this_test():
-    declared = {entry.name for entry in fields(notch.HarmonicNotchSettings)} - {"task"}
+def test_correction_config_contains_only_irreducible_user_choices():
+    settings = notch.HarmonicNotchSettings.from_config(load_config())
 
-    assert declared == set(OVERRIDES)
-
-
-def test_notch_settings_have_no_scientific_defaults_in_python():
-    assert all(entry.default is MISSING for entry in fields(notch.HarmonicNotchSettings))
-
-
-def test_detection_settings_have_no_scientific_defaults_in_python():
-    assert all(entry.default is MISSING for entry in fields(catalogue.DetectionSettings))
+    assert {field.name for field in fields(settings)} == {
+        "estimation_window_s",
+        "frequency_range_hz",
+    }
 
 
-@pytest.mark.parametrize("name", sorted(OVERRIDES))
-def test_every_notch_setting_reaches_the_settings_object(tmp_path, name):
-    settings = notch.HarmonicNotchSettings.from_config(
-        _config(tmp_path, {"removal": {name: OVERRIDES[name]}})
-    )
-    expected = OVERRIDES[name]
-    actual = getattr(settings, name)
+@pytest.mark.parametrize(
+    "obsolete",
+    [
+        "nominal_fundamental_hz",
+        "harmonic_range",
+        "removal_harmonic_range",
+        "min_prominence_db",
+        "min_harmonics_for_fit",
+        "search_hz",
+        "filter_jobs",
+        "transition_bandwidth_resolutions",
+        "roundtrip_relative_tolerance",
+    ],
+)
+def test_obsolete_manual_controls_are_errors(tmp_path, obsolete):
+    with pytest.raises(ValueError, match="Unknown `removal` setting"):
+        _config(tmp_path, {"removal": {obsolete: 1}})
 
-    assert list(actual) == expected if isinstance(actual, tuple) else actual == expected
 
-
-def test_task_is_read_from_the_dataset_block(tmp_path):
-    settings = notch.HarmonicNotchSettings.from_config(
-        _config(tmp_path, {"dataset": {"task": "rest"}})
-    )
-
-    assert settings.task == "rest"
-
-
-def test_packaged_defaults_match_the_settings_defaults():
+def test_threshold_blocks_are_absent_from_packaged_defaults():
     config = load_config()
-    settings = notch.HarmonicNotchSettings.from_config(config)
-    block = config.get("removal")
 
-    for name, expected in block.items():
-        actual = getattr(settings, name)
-        assert list(actual) == expected if isinstance(actual, tuple) else actual == expected
+    assert config.get("detection") is None
+    assert config.get("psd") is None
+    assert config.get("dataset") is None
 
 
-def test_obsolete_or_misspelled_correction_settings_are_errors(tmp_path):
-    config = _config(tmp_path, {"removal": {"harmonic_trajectory": {"enabled": True}}})
+def test_frequency_bands_remain_configurable_because_they_are_study_definitions(tmp_path):
+    config = _config(tmp_path, {"frequency_bands": {"custom": [7.0, 11.0]}})
 
-    with pytest.raises(ValueError, match="Unknown `removal` setting"):
-        notch.HarmonicNotchSettings.from_config(config)
+    assert config.get("frequency_bands.custom") == [7.0, 11.0]
 
 
-def test_filter_geometry_in_hz_is_derived_not_configurable(tmp_path):
-    config = _config(tmp_path, {"removal": {"transition_bandwidth_hz": 1.0}})
+def test_detection_frequency_range_is_a_deliberate_user_choice(tmp_path):
+    settings = notch.HarmonicNotchSettings.from_config(
+        _config(tmp_path, {"removal": {"frequency_range_hz": [1.0, 80.0]}})
+    )
 
-    with pytest.raises(ValueError, match="Unknown `removal` setting"):
-        notch.HarmonicNotchSettings.from_config(config)
+    assert settings.frequency_range_hz == (1.0, 80.0)
+
+
+@pytest.mark.parametrize("value", [50.0, [0.0], [0.0, 50.0, 100.0], [80.0, 20.0]])
+def test_malformed_frequency_ranges_fail_at_config_loading(tmp_path, value):
+    with pytest.raises(ValueError, match="frequency_range_hz"):
+        notch.HarmonicNotchSettings.from_config(
+            _config(tmp_path, {"removal": {"frequency_range_hz": value}})
+        )
+
+
+def test_removed_threshold_sections_fail_during_config_loading(tmp_path):
+    path = tmp_path / "decomb.yaml"
+    path.write_text("detection:\n  fdr_alpha: 0.05\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unknown config section"):
+        load_config(path)

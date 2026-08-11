@@ -4,52 +4,34 @@
   <img src="logo.png" alt="decomb logo" width="420">
 </p>
 
-`decomb` detects a participant-specific EEG artifact comb and removes only its supported
-harmonics with narrow zero-phase FIR notches. It writes a complete BrainVision BIDS
-derivative and an explicit list of frequencies that must not be used for inference.
+`decomb` is research software for automatic, auditable removal of narrowband EEG
+artifacts. It discovers a recording-specific harmonic comb without a nominal frequency,
+authorizes every integer multiple in the configured frequency range, and separately
+detects resolution-limited isolated lines. It writes a BrainVision BIDS derivative plus
+the exact frequency intervals that are unavailable for inference.
 
-The central scientific limitation is deliberate: neural activity and artifact occupying
-the same frequency in one recording are not identifiable from that recording alone. The
-pipeline therefore does not claim to recover neural signal inside a harmonic. It removes
-the contaminated interval and declares the stopband plus both transitions unavailable.
+The central limitation is explicit: neural and artifactual activity at the same frequency
+are not identifiable from one recording alone. `decomb` removes contaminated intervals;
+it does not claim to reconstruct neural signal inside them.
 
 ## Abstract
 
-`decomb` is research software for characterising and selectively suppressing narrow
-harmonic-comb contamination in continuous EEG stored as BIDS-compatible BrainVision data
-[[10](#references), [13](#references)].
-Its primary use case is EEG acquired during or near fMRI after established gradient- and
-pulse-artifact correction [[1](#references), [2](#references)]. Residual MR-environment
-sources can include cryogenic-pump and ventilation artifacts with repeated spectral peaks
-[[3](#references), [4](#references)]. A regular comb is evidence of spectral structure,
-not proof of physical source or stationarity; source control remains preferable whenever
-possible [[5](#references)].
+The primary use case is continuous EEG acquired during or near fMRI after established
+gradient- and pulse-artifact correction [[1](#references), [2](#references)]. Residual
+MR-environment sources can produce repeated spectral peaks, including cryogenic-pump and
+ventilation artifacts [[3](#references), [4](#references)]. A regular comb is evidence of
+spectral structure, not proof of a physical source; source control remains preferable
+whenever possible [[5](#references)].
 
-The software contribution is an auditable, per-recording procedure: blind diagnosis,
-uncertainty-aware harmonic localization, finite-width FIR notch construction, BIDS
-provenance, disk read-back, and independent spectral verification. It does not replace
-gradient or ballistocardiographic correction and makes no general performance claim across
-scanners, sites, or populations. Filter effects must be reported and interpreted in the
-context of the downstream analysis [[6](#references), [7](#references)].
+The pipeline performs per-recording model selection, complete harmonic enumeration,
+time-localized frequency tracking, isolated-line shape testing, finite-width FIR notch
+construction, atomic BIDS writing, disk read-back, and independent spectral verification.
+It does not replace gradient or ballistocardiographic correction. Broad rhythms and
+transient artifacts are outside the scope of frequency notching, and filter effects must
+be reported with the downstream analysis [[6](#references), [7](#references)].
 
-## Workflow
-
-```bash
-decomb diagnose --config decomb.yaml
-decomb apply --config decomb.yaml
-decomb verify --config decomb.yaml
-decomb psd --config decomb.yaml
-```
-
-- `diagnose` performs a blind cohort line sweep and estimates the comb structure.
-- `apply` independently fits every recording, plans its narrow harmonic stopbands, and
-  atomically writes the BIDS derivative.
-- `verify` reconstructs the immutable plan from the derivative manifest and re-measures
-  the data written to disk. It reports measurements, not an arbitrary acceptance rule.
-- `psd` produces source-versus-derivative spectral figures.
-
-There is no benchmark gate, neural-preservation reconstruction, manual wide-notch stage,
-or fallback cleaning method. Invalid assumptions and unidentifiable combs raise errors.
+Scanner triggers and scanner-clock annotations are neither read nor required. The method
+uses only the EEG recording and its standard BIDS metadata.
 
 ## Installation
 
@@ -63,49 +45,64 @@ Python 3.11 or newer is required.
 
 ## Configuration
 
-Copy `src/decomb/defaults.yaml` to `decomb.yaml` and change the site-specific paths and
-comb geometry. The default 54-second Hann estimation window was retained after the tested
-alternatives performed worse. At that duration its half-power spectral resolution is
-0.026633 Hz.
+The public correction has only two scientific settings: the stationarity horizon and the
+frequency range eligible for detection and removal. The defaults are 54 seconds and
+0–100 Hz. Everything else—Hann overlap, spectral resolution, localization uncertainty,
+notch width, FIR transition width, parallelism, verification geometry, and PSD
+geometry—is derived.
 
 ```yaml
 paths:
   bids_root: /data/study/bids
   output_root: /data/study/bids_decombed
-  diagnosis_dir: outputs/diagnosis
-  removal_dir: outputs/removal
-
-dataset:
-  task: "*"
-  tr_seconds: null
 
 removal:
   estimation_window_s: 54.0
-  estimation_overlap: 0.5
-  filter_jobs: 4
-  nominal_fundamental_hz: 1.2
-  harmonic_range: [24, 79]
-  removal_harmonic_range: [22, 82]
-  low_hz: 3.0
-  high_hz: 99.8
-  minimum_stopband_resolutions: 2.0
-  transition_bandwidth_resolutions: 4.0
+  frequency_range_hz: [0.0, 100.0]
 ```
 
-`dataset.tr_seconds` adds scanner-grid alignment to diagnosis. It does not alter the
-notches: trigger-based correction did not improve the tested recordings, so it is not
-part of the transform.
+Only `paths.bids_root` is required in practice: the output and report paths and both
+correction settings have packaged defaults. Unknown or obsolete keys are errors. There
+are no task, paradigm, participant, scanner, nominal-comb, amplitude-threshold, or
+manual-harmonic settings in the implementation.
 
-Every tunable scientific value is read from YAML; the Python implementation contains no
-task, paradigm, scanner, or participant special cases. `dataset.task` may be any BIDS task
-label or `"*"`, and `frequency_bands` may contain any study-defined band names. Unknown or
-missing correction keys are errors. Stopband and transition widths in hertz are derived
-from the configured resolution multipliers and the estimation-window duration.
+The 54-second window is the remaining experimental choice because stationarity cannot be
+inferred without defining a time scale. It gives DFT spacing
+$\Delta f=1/54=0.018519$ Hz and Hann half-power resolution
+$r=1.4382/54=0.026633$ Hz. Users may change it when their scientific stationarity
+assumption differs. The frequency range may be narrowed for a study but cannot exceed
+100 Hz.
+
+Optional `frequency_bands` entries name study bands for retained/unavailable bandwidth
+reporting only. They never influence detection or filtering.
+
+## Workflow
+
+```bash
+decomb diagnose --config decomb.yaml
+decomb apply --config decomb.yaml
+decomb verify --config decomb.yaml
+decomb psd --config decomb.yaml
+```
+
+- `diagnose` fits every requested recording without changing data and writes the selected
+  comb, isolated-line evidence, and planned intervals.
+- `apply` refits every recording, writes a complete derivative through an atomic staging
+  directory, and reads each BrainVision file back from disk.
+- `verify` reconstructs the immutable FIR plan from the derivative manifest and measures
+  the delivered files without refitting targets.
+- `psd` computes matched before/after Welch spectra with MNE and generates cohort,
+  frequency-panel, and per-recording figures.
+
+`apply` and `verify` always operate on the complete discovered dataset. A subset cannot be
+published as though it certified the whole derivative.
 
 ## Method
 
-Let $x[n]$ be one channel of a window, $f_s$ the sampling frequency, $N$ the sample
-count, $T=N/f_s$, and $\Delta f=1/T$. With Hann taper $w[n]$, the one-sided density is
+### Spectral estimate
+
+Let $x[n]$ be one EEG channel in a window, $f_s$ the sampling frequency,
+$N$ the number of samples, $T=N/f_s$, and $w[n]$ a Hann taper. The one-sided density is
 
 $$
 S(f_k)=\frac{c_k}{f_s\sum_n w^2[n]}
@@ -113,199 +110,188 @@ S(f_k)=\frac{c_k}{f_s\sum_n w^2[n]}
 \qquad f_k=\frac{k f_s}{N},
 $$
 
-where $c_k=2$ except at DC and Nyquist. Channels are summarized by their median and
-windows by their mean. In decibels, $X(f)=10\log_{10}S(f)$. Local prominence is measured
-against a symmetric running-median background that excludes the line core:
+where $c_k=2$ except at DC and Nyquist. Channels are summarized by their median. The
+full-recording estimate is the mean window power followed by the channel median. In
+decibels, $X(f)=10\log_{10}S(f)$. Peak positions are refined below the FFT grid with a
+three-point parabola. The Hann half-power resolution is $r=1.4382/T$ [[8](#references)].
+
+### Threshold-free comb selection
+
+Candidate fundamentals are searched exhaustively from $2r$ to one quarter of the upper
+analysis edge; four observable multiples are the minimum identifiable grid. For candidate
+$f_0$, let
 
 $$
-B(f_k)=\operatorname{median}\{X(f_j):c<|j-k|\le H\},
-\qquad P(f_k)=X(f_k)-B(f_k).
+\mathcal K(f_0)=\left\{k\in\mathbb N:
+f_{\min}\le kf_0\le f_{\max}\right\}.
 $$
 
-The catalogue controls its dependent frequency-bin family with the conservative
-Benjamini--Yekutieli procedure [[14](#references)]. Peak positions are refined below the
-FFT grid by a three-point parabola. The Hann half-power resolution used by the planner is
-$r=1.4382/T$ [[8](#references)].
-
-For refined harmonic positions $\hat f^{(k)}$ and prominence weights $w_k$, the comb
-fundamental is the weighted least-squares slope through the origin:
+At every candidate multiple, the integer-grid contrast against the halfway positions is
 
 $$
-\hat f_0=\frac{\sum_{k\in\mathcal K}w_k k\hat f^{(k)}}
-{\sum_{k\in\mathcal K}w_k k^2}.
+d_k=X(kf_0)-\frac{X(kf_0-f_0/2)+X(kf_0+f_0/2)}{2}.
 $$
 
-Membership $\mathcal K$ is iterated to a fixed point under the configured residual bound.
-The fit is accepted only with at least `min_harmonics_for_fit` members and bounded scatter,
+The null model fixes the mean contrast at zero. The comb model estimates one positive
+mean $\bar d$. With $K=|\mathcal K|$, residual sums $R_0=\sum_k d_k^2$ and
+$R_1=\sum_k(d_k-\bar d)^2$, and $M$ distinguishable candidate grids, the evidence is
 
 $$
-\operatorname{RMS}=\sqrt{\frac{1}{|\mathcal K|}
-\sum_{k\in\mathcal K}\left(\hat f^{(k)}-k\hat f_0\right)^2}.
+\Delta\mathrm{BIC}=K\log\!\left(\frac{R_1}{R_0}\right)
++\log K+2\log M.
 $$
 
-Fundamental uncertainty is the delete-one jackknife [[9](#references)]:
+A negative value means the comb model encodes the data more economically than its null
+[[9](#references)]. The zero boundary is the definition of model comparison, not a tuned
+amplitude threshold. BIC values based on grids of different sizes are not comparable
+likelihoods, so supported grids are ranked by matched contrast
 
 $$
-\widehat{\operatorname{SE}}(\hat f_0)=
-\sqrt{\frac{n-1}{n}\sum_{i=1}^{n}
-\left(\hat f_0^{(-i)}-\bar f\right)^2},
-\qquad
-\bar f=\frac1n\sum_{i=1}^{n}\hat f_0^{(-i)}.
+Q(f_0)=\bar d\sqrt{K}.
 $$
 
-For each continuous recording:
+This prevents a dense grid from winning merely by accumulating weak curvature:
+subharmonics dilute $\bar d$ with empty positions, while multiples lose evidence by
+omitting lines. Once $f_0$ is selected, every integer multiple in the configured range is
+authorized, including weak or locally absent harmonics. There is no harmonic-number or
+prominence cutoff.
 
-1. The channel-median whole-recording spectrum authorizes the comb fundamental and the
-   mutually consistent harmonics eligible for removal.
-2. Overlapping Hann-window spectra localize only those already-authorized harmonics. A
-   window obscured by a transient contributes no position; it cannot create a target and
-   missing evidence is never copied from another window.
-3. Each stopband spans the whole-recording position and every directly observed window
-   position, plus whole-recording fundamental uncertainty,
-   `z × harmonic × SE(f0)`.
-4. A stationary harmonic receives the configured minimum stopband width in spectral
-   resolutions.
-5. Stopbands without enough passband for separate transitions are merged.
-6. MNE-Python applies all stopbands in one zero-phase FIR operation to EEG channels only.
+### Isolated narrow lines
 
-More precisely, let $p_{k0}$ be harmonic $k$'s whole-recording position,
-$\sigma_0$ the whole-recording fundamental standard error, $J_k$ the windows in which
-that authorized harmonic is directly localized, and $p_{kj}$ its position in window $j$.
-With $z$ equal to `uncertainty_confidence_z`, the measured uncertainty envelope is
+Off-comb local maxima are evaluated as isolated-line candidates. Two independent tests
+must favor a line model.
+
+First, non-overlapping 54-second windows measure resolution-scale contrast
 
 $$
-a_k=\min\left(p_{k0}-zk\sigma_0,\min_{j\in J_k}p_{kj}\right),\qquad
-b_k=\max\left(p_{k0}+zk\sigma_0,\max_{j\in J_k}p_{kj}\right).
+g_j=X_j(f)-\frac{X_j(f-2r)+X_j(f+2r)}{2},
 $$
 
-When $J_k$ is empty, only the whole-recording bounds enter the envelope. This preserves
-the explicit absence of window evidence while allowing the global FIR plan to remain
-robust to a broadband transient that masks one window.
-
-Let $s$ be `minimum_stopband_resolutions` and $t$ be
-`transition_bandwidth_resolutions`. With $m_k=(a_k+b_k)/2$ and
-$h_k=\max((b_k-a_k)/2,sr/2)$, the requested stopband is
+and compare a positive shared mean with the zero-mean null by the same BIC construction.
+Second, local linear power is fitted either by a smooth quadratic background or by that
+background plus the measured Hann point-spread function
 
 $$
-[L_k,U_k]=[m_k-h_k,\;m_k+h_k].
+H(u)=\left[
+\frac{0.5\,\operatorname{sinc}(u)
+-0.25\,\operatorname{sinc}(u-1)
+-0.25\,\operatorname{sinc}(u+1)}{0.5}
+\right]^2,
 $$
 
-Thus every stationary stopband is at least $sr$ wide, while measured motion and propagated
-uncertainty can only widen it. The total MNE transition bandwidth is $q=tr$, making the
-declared inference exclusion
+where $u$ is frequency offset in DFT bins. The line amplitude must be positive and the
+shape model must improve BIC after paying for the frequency search. The least favorable
+of the temporal and shape $\Delta\mathrm{BIC}$ values is recorded. This rejects broad,
+stable neural-like spectral peaks while allowing single off-comb narrowband artifacts.
+
+An arbitrary transient or broad artifact cannot be made identifiable by a frequency
+notch. Such structure must be handled with a method appropriate to its time-domain or
+spatial signature.
+
+### Adaptive FIR geometry
+
+All authorized comb harmonics and isolated lines are localized in every overlapping Hann
+window without another amplitude gate. For target positions $p_0,p_1,\ldots,p_J$ and
+bin-position uncertainty $\epsilon=\Delta f/2$, the measured envelope is
 
 $$
-E_k=[L_k-q/2,\;U_k+q/2].
+a=\min_j p_j-\epsilon,\qquad b=\max_j p_j+\epsilon.
 $$
 
-Intervals too close to sustain separate transitions are merged before filtering. For an
-analysis band $A=[A_0,A_1]$, the unavailable share reported in the manifest is
+With centre $m=(a+b)/2$, the requested stopband half-width is
 
 $$
-C_A=\frac{\left|A\cap\bigcup_k E_k\right|}{A_1-A_0},
-\qquad R_A=1-C_A.
+h=\max\left(\frac{b-a}{2},\frac{r}{2}\right),
+\qquad [L,U]=[m-h,m+h].
 $$
 
-Measured attenuation inside a requested stopband is
+The total MNE transition bandwidth is derived as $q=3.3/T$. For MNE's Hamming `firwin`
+design, this makes the automatic filter length equal to the stationarity window. The
+transition-inclusive interval withdrawn from inference is
 
 $$
-\Delta_k=10\log_{10}\left(\frac{P_{\mathrm{after},k}}
-{P_{\mathrm{before},k}}\right)\ \mathrm{dB}.
+E=[L-q/2,U+q/2].
 $$
 
-With the packaged defaults, the stopband floor is two resolutions and the total transition
-bandwidth is four resolutions. MNE allocates half of the transition bandwidth on each
-side. This keeps the requested stopband narrow while avoiding an unrealistically sharp
-response and excessive ringing [[6](#references)]. The implementation follows the
-[MNE notch filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html)
-and [MNE filtering tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html)
-[[11](#references), [12](#references)].
+Intervals with less than $q$ passband between them are merged. MNE-Python then applies all
+stopbands in one zero-phase FIR operation to EEG channels only [[10](#references),
+[11](#references)]. For analysis band $A=[A_0,A_1]$, the manifest reports
 
-The method does not automatically notch isolated peaks or every integer multiple of the
-fundamental. A configured harmonic range only defines eligibility; it does not manufacture
-evidence for an absent line.
+$$
+C_A=\frac{\left|A\cap\bigcup_i E_i\right|}{A_1-A_0},
+\qquad R_A=1-C_A,
+$$
 
-## Reproducible simulated demonstration
+the unavailable and retained shares. Measured in-stopband power change is
 
-The following figures are generated by the current production estimator and FIR transform,
-not drawn by hand. The deterministic simulation contains coloured background noise, a
-27-member 1.2 Hz comb, and a known oscillation at 42.35 Hz that does not lie on the comb.
-Every signal and correction value is declared in
-[`docs/simulated_readme.yaml`](docs/simulated_readme.yaml), and
-[`docs/make_figure.py`](docs/make_figure.py) regenerates both images.
+$$
+\Delta_i=10\log_{10}\!\left(
+\frac{P_{\mathrm{after},i}}{P_{\mathrm{before},i}}
+\right)\ \mathrm{dB}.
+$$
 
-![Power spectra before and after automatic harmonic notching](docs/psd_before_after.png)
+## Real-data demonstration
 
-All 27 simulated harmonics were independently supported and planned. The overview shows
-deep attenuation confined to their narrow neighborhoods while the off-grid test oscillation
-remained at −0.00 dB amplitude change. This is an implementation test on known signals, not
-a performance estimate for biological EEG.
+These figures are produced by the production pipeline from all 90 recordings in the
+validation dataset: 15 participants and 12.1 hours of EEG (7.31–8.55 minutes per run).
+They are not simulated and not hand-drawn. Both sides use the same channels, samples,
+54-second Welch windows, 50% overlap, and MNE `Raw.compute_psd` implementation.
 
-![Detailed stopband, transitions, and preserved off-grid oscillation](docs/harmonic_detail.png)
+![Cohort power spectra and spectral change before and after automatic line notching across 90 real EEG recordings](docs/psd_before_after.png)
 
-The detail view makes the inference boundary explicit. Harmonic 35 at 42 Hz was attenuated
-by 68.0 dB in amplitude, but its shaded stopband and FIR transitions are unavailable for
-scientific inference—the plot does not claim neural recovery there. The nearby 42.35 Hz test
-oscillation is outside that interval and was preserved. Regenerate the figures with:
+The overview shows the cohort-median spectrum and its change. A median can hide a
+participant-specific failure, so the pipeline also generates a per-recording audit and
+the same cohort data in readable 10 Hz panels:
 
-```bash
-python docs/make_figure.py
-```
+![Cohort power spectra before and after automatic line notching in 10 Hz panels across 90 real EEG recordings](docs/psd_before_after_panels.png)
 
-## Outputs
+Across the blind diagnostic fit, every recording selected 83 harmonics. Fundamental
+estimates ranged from 1.199659 to 1.200551 Hz; comb $\Delta\mathrm{BIC}$ ranged from
+−44.74 to −8.88. The model found 0–7 isolated lines per recording (median 2), producing
+83–89 merged stopbands. Transition-inclusive unavailable bandwidth was 9.48–10.88 Hz
+over the 0–100 Hz range. These are measurements from one site, not promised performance
+bounds for another scanner, population, or preprocessing chain.
 
-`apply` mirrors BIDS sidecars, rewrites only `.eeg` binaries, and adds:
+## Outputs and interpretation
 
-- `harmonic_notch_manifest.tsv` in the derivative and report directory;
-- `effective_config_apply.txt`, listing every YAML and derived value with provenance;
-- a derivative `dataset_description.json` containing the complete correction settings,
-  derived FIR geometry, and inference limit.
+The derivative follows EEG-BIDS and BIDS derivative conventions [[12](#references),
+[13](#references)]. `apply` mirrors valid BIDS sidecars, rewrites only BrainVision `.eeg`
+binaries, and adds:
 
-Each manifest row records:
+- `harmonic_notch_manifest.tsv`, with exact stopband and unavailable edges;
+- `dataset_description.json`, including `GeneratedBy`, parameters, and a relative
+  `SourceDatasets` URL;
+- `effective_config_apply.txt`, listing each YAML and derived value with provenance.
 
-- recording and contributing harmonic number(s);
-- total estimation-window count and the number directly supporting the stopband;
-- nominal stopband edges;
-- transition-inclusive unavailable edges;
-- transition bandwidth;
-- fitted fundamental;
-- measured in-stopband attenuation after filtering;
-- float32 BrainVision round-trip deviation;
-- unavailable and retained shares of every analysis band defined in YAML.
+Each manifest row records the line kind (`comb`, `isolated`, or `mixed`), contributing
+harmonic numbers, isolated-line frequencies and least-favorable BIC values, fitted
+fundamental and comb BIC, exact FIR geometry, number of estimation windows, in-stopband
+change, BrainVision round-trip deviation, and unavailable/retained share of each declared
+analysis band. Floating-point geometry is written with round-trip precision so
+verification reconstructs the exact applied plan.
 
-`verify` writes `harmonic_notch_verification.tsv` with disk-measured attenuation and the
-largest adjacent prominence in the original and cleaned recordings, together with its
-change. Adjacent peaks are reported rather than silently expanded into new notches because
-a nearby peak is not evidence that it belongs to the comb.
+`verify` writes `harmonic_notch_verification.tsv` after independently reading the source
+and derivative from disk. It reports stopband attenuation and adjacent available-line
+contrast; it does not silently enlarge the original plan.
 
-## Interpreting corrected data
-
-The cleaned derivative is suitable for analyses outside the declared unavailable
-intervals. Analyses at a notched harmonic are not scientifically recoverable from a single
-recording and must exclude that frequency interval. Narrow notches preserve more of the
-surrounding band than conventional 1-Hz notches, but they do not make the exact harmonic
-interpretable.
-
-On a three-participant real-recording validation, the current method planned 51–57
-supported stopbands per recording. Nominal stopband width totaled 3.34–3.73 Hz and the
-transition-inclusive unavailable width totaled 8.78–9.80 Hz. Per-recording median
-in-stopband attenuation was −33.2 to −35.5 dB after disk round-trip; independent
-verification measured a −34.5 dB cohort median. The unavailable share was 2.16–3.80% of
-beta and 12.65–13.50% of gamma. The strongest adjacent off-grid line, at 46.963 Hz, remained
-and was reported rather than notched because it was not an exact supported comb harmonic.
-These are measurements of three recordings at one site, not promised performance bounds.
+The corrected derivative is suitable for analyses outside each manifest's unavailable
+intervals. Frequencies inside a stopband or FIR transition must not be interpreted as
+recovered neural activity. Narrow data-driven intervals retain substantially more nearby
+bandwidth than conventional wide notches, but they do not make the exact removed
+frequency scientifically usable.
 
 ## Tests
 
 ```bash
 pytest -q
-ruff check src tests docs/make_figure.py
+ruff check src tests
 ```
 
-The focused automatic-notch tests cover whole-recording authorization, explicit missing
-window evidence, uncertainty and measured motion, transition merging, MNE filtering,
-off-band tone preservation, manifest geometry, BIDS round-trip behavior, CLI routing,
-verification complexity, and the README simulation.
+The tests cover blind comb recovery, complete harmonic enumeration, dense-subharmonic
+rejection, broad-peak preservation, isolated-line removal, configurable frequency bounds,
+window independence, adaptive stopband geometry, MNE filtering, exact manifest
+reconstruction, strict BIDS discovery, binary quantization, hidden/backup exclusion,
+provenance, CLI routing, and matched before/after PSD generation.
 
 ## References
 
@@ -328,7 +314,7 @@ verification complexity, and the README simulation.
    [doi:10.3791/50283](https://doi.org/10.3791/50283)
 6. Widmann A, Schröger E, Maess B. Digital filter design for electrophysiological data—a
    practical approach. *Journal of Neuroscience Methods*. 2015;250:34–46.
-   [doi:10.1016/j.jneumeth.2014.08.002](https://doi.org/10.1016/j.jneumeth.2014.08.002)
+   [doi:10.1016/j.jneumeth.2014.08.002](https://doi.org/10.1016/j.neumeth.2014.08.002)
 7. Bullock M, Jackson GD, Abbott DF. Artifact reduction in simultaneous EEG-fMRI: a
    systematic review of methods and contemporary usage. *Frontiers in Neurology*.
    2021;12:622719.
@@ -336,25 +322,26 @@ verification complexity, and the README simulation.
 8. Harris FJ. On the use of windows for harmonic analysis with the discrete Fourier
    transform. *Proceedings of the IEEE*. 1978;66:51–83.
    [doi:10.1109/PROC.1978.10837](https://doi.org/10.1109/PROC.1978.10837)
-9. Efron B, Stein C. The jackknife estimate of variance. *Annals of Statistics*.
-   1981;9:586–596.
-   [doi:10.1214/aos/1176345462](https://doi.org/10.1214/aos/1176345462)
-10. Pernet CR, Appelhoff S, Gorgolewski KJ, et al. EEG-BIDS, an extension to the Brain
-    Imaging Data Structure for electroencephalography. *Scientific Data*. 2019;6:103.
-    [doi:10.1038/s41597-019-0104-8](https://doi.org/10.1038/s41597-019-0104-8)
-11. Gramfort A, Luessi M, Larson E, et al. MNE software for processing MEG and EEG data.
+9. Schwarz G. Estimating the dimension of a model. *Annals of Statistics*.
+   1978;6:461–464.
+   [doi:10.1214/aos/1176344136](https://doi.org/10.1214/aos/1176344136)
+10. Gramfort A, Luessi M, Larson E, et al. MNE software for processing MEG and EEG data.
     *NeuroImage*. 2014;86:446–460.
     [doi:10.1016/j.neuroimage.2013.10.027](https://doi.org/10.1016/j.neuroimage.2013.10.027)
-12. Gramfort A, Luessi M, Larson E, et al. MEG and EEG data analysis with MNE-Python.
+11. Gramfort A, Luessi M, Larson E, et al. MEG and EEG data analysis with MNE-Python.
     *Frontiers in Neuroscience*. 2013;7:267.
     [doi:10.3389/fnins.2013.00267](https://doi.org/10.3389/fnins.2013.00267)
+12. Pernet CR, Appelhoff S, Gorgolewski KJ, et al. EEG-BIDS, an extension to the Brain
+    Imaging Data Structure for electroencephalography. *Scientific Data*. 2019;6:103.
+    [doi:10.1038/s41597-019-0104-8](https://doi.org/10.1038/s41597-019-0104-8)
 13. Gorgolewski KJ, Auer T, Calhoun VD, et al. The Brain Imaging Data Structure, a format
     for organizing and describing outputs of neuroimaging experiments. *Scientific Data*.
     2016;3:160044.
     [doi:10.1038/sdata.2016.44](https://doi.org/10.1038/sdata.2016.44)
-14. Benjamini Y, Yekutieli D. The control of the false discovery rate in multiple testing
-    under dependency. *Annals of Statistics*. 2001;29:1165–1188.
-    [doi:10.1214/aos/1013699998](https://doi.org/10.1214/aos/1013699998)
+
+The FIR implementation follows the
+[MNE notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html)
+and [MNE filtering tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html).
 
 ## License
 

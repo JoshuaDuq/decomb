@@ -39,15 +39,28 @@ class TestSettings:
 
     @pytest.mark.parametrize(
         "kwargs",
-        [{"window_s": 0.0}, {"window_s": -1.0}, {"overlap": 1.0}, {"overlap": -0.1}],
+        [{"window_s": 0.0}, {"window_s": -1.0}],
     )
     def test_an_impossible_setting_is_refused(self, kwargs):
         with pytest.raises(ValueError):
             _settings(**kwargs)
 
-    def test_a_reversed_band_is_refused(self):
-        with pytest.raises(ValueError, match="band_hz"):
-            _settings(band_hz=(100.0, 1.0))
+    def test_overlap_and_band_are_derived(self):
+        settings = _settings()
+
+        assert settings.overlap == 0.5
+        assert settings.band_hz == (0.0, 100.0)
+
+    def test_band_follows_correction_frequency_range(self, tmp_path):
+        path = tmp_path / "decomb.yaml"
+        path.write_text(
+            "removal:\n  frequency_range_hz: [2.0, 80.0]\n",
+            encoding="utf-8",
+        )
+
+        settings = psd.PsdSettings.from_config(load_config(path))
+
+        assert settings.band_hz == (2.0, 80.0)
 
 
 class TestSpectrum:
@@ -87,18 +100,15 @@ class TestSpectrum:
     def test_a_recording_shorter_than_one_segment_is_refused(self):
         raw, _ = _raw(seconds=5.0)
 
-        with pytest.raises(ValueError, match="psd.window_s"):
+        with pytest.raises(ValueError, match="removal.estimation_window_s"):
             psd.channel_median_psd(raw, _settings(window_s=54.0))
 
-    def test_the_band_bounds_what_is_returned(self):
+    def test_the_returned_band_is_automatically_limited_to_100_hz(self):
         raw, _ = _raw()
 
-        freqs, _ = psd.channel_median_psd(
-            raw,
-            _settings(window_s=20.0, band_hz=(10.0, 40.0)),
-        )
+        freqs, _ = psd.channel_median_psd(raw, _settings(window_s=20.0))
 
-        assert freqs.min() >= 10.0 and freqs.max() <= 40.0
+        assert freqs.min() >= 0.0 and freqs.max() <= 100.0
 
 
 def _bids(root: Path, *, line_amplitude: float) -> Path:
@@ -118,17 +128,22 @@ class TestComparison:
         cleaned = _bids(tmp_path / "clean", line_amplitude=0.0)
         settings = _settings(window_s=20.0)
 
-        freqs, arms = psd.compare_recording(source, [("line-cleaned", cleaned)], settings)
+        freqs, arms, duration_s = psd.compare_recording(
+            source,
+            [("line-cleaned", cleaned)],
+            settings,
+        )
 
         change = psd.to_db(arms["line-cleaned"]) - psd.to_db(arms["source"])
         assert change[int(np.argmin(change))] < -20.0
         assert freqs[int(np.argmin(change))] == pytest.approx(57.25, abs=0.1)
+        assert duration_s == pytest.approx(120.0, abs=0.01)
 
     def test_untouched_frequencies_are_unchanged(self, tmp_path):
         source = _bids(tmp_path / "src", line_amplitude=5e-6)
         cleaned = _bids(tmp_path / "clean", line_amplitude=0.0)
 
-        freqs, arms = psd.compare_recording(
+        freqs, arms, _ = psd.compare_recording(
             source, [("line-cleaned", cleaned)], _settings(window_s=20.0)
         )
 
@@ -186,7 +201,12 @@ class TestFigures:
         }
         path = tmp_path / "psd.png"
 
-        psd.figure_cohort(freqs, arms, path, n_recordings=3)
+        psd.figure_cohort(
+            freqs,
+            arms,
+            path,
+            cohort_description="3 recordings from 2 participants (0.1 h EEG)",
+        )
 
         assert path.is_file() and path.stat().st_size > 0
 
@@ -201,7 +221,12 @@ class TestFigures:
         }
         path = tmp_path / "per_recording.png"
 
-        psd.figure_per_recording(freqs, per_recording, path)
+        psd.figure_per_recording(
+            freqs,
+            per_recording,
+            path,
+            cohort_description="4 recordings from 4 participants (0.1 h EEG)",
+        )
 
         assert path.is_file() and path.stat().st_size > 0
 

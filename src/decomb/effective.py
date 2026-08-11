@@ -23,21 +23,14 @@ from decomb.config import DecombConfig
 DERIVED: tuple[tuple[str, str], ...] = (
     ("removal.spectral_resolution_hz", "1.4382 / estimation_window_s"),
     (
-        "removal.max_harmonic_residual_hz",
-        "max_harmonic_residual_resolutions * spectral_resolution_hz",
-    ),
-    (
-        "removal.max_fit_residual_rms_hz",
-        "max_fit_residual_rms_resolutions * spectral_resolution_hz",
-    ),
-    (
         "removal.transition_bandwidth_hz",
-        "transition_bandwidth_resolutions * spectral_resolution_hz",
+        "MNE firwin Hamming constant 3.3 / estimation_window_s",
     ),
     (
         "removal.minimum_stopband_width_hz",
-        "minimum_stopband_resolutions * spectral_resolution_hz",
+        "Hann half-power spectral_resolution_hz",
     ),
+    ("removal.frequency_bin_width_hz", "1 / estimation_window_s"),
 )
 
 

@@ -1,7 +1,15 @@
-"""Participant-specific estimation of an arithmetic line comb.
+"""Threshold-free discovery and localization of a harmonic line comb.
 
-The fitted harmonics establish the fundamental.  Supported harmonics are then localized
-against that fitted grid and are the only frequencies a correction may target.
+The detector compares two explicit spectral models.  The null says that power at an
+integer grid is no different from power halfway between grid points.  The alternative
+adds one positive mean contrast at a freely selected fundamental.  The Bayesian
+information criterion (BIC), including the description length of the frequency search,
+decides between them.  There is no amplitude, prominence, prevalence, or harmonic-number
+cutoff to tune.
+
+Once the alternative wins, every integer multiple inside the configured analysis range
+belongs to the correction plan. Local spectra refine positions; they never decide
+whether an already-authorized harmonic exists.
 """
 
 from __future__ import annotations
@@ -11,400 +19,585 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from decomb.spectral import refine_peak_frequency
+MAXIMUM_FREQUENCY_HZ = 100.0
+
+
+class NoCombDetected(RuntimeError):
+    """The no-comb model describes the spectrum better than a harmonic grid."""
 
 
 @dataclass(frozen=True)
 class CombEstimate:
-    """One spectrum's fitted comb and independently localized supported members."""
+    """One spectrum's selected fundamental and complete harmonic grid."""
 
     fundamental_hz: float
-    fitted_harmonics: tuple[int, ...]
-    fitted_positions_hz: tuple[float, ...]
-    supported_harmonics: tuple[int, ...]
-    supported_positions_hz: tuple[float, ...]
-    residual_rms_hz: float
-    max_abs_residual_hz: float
-    fundamental_jackknife_se_hz: float
+    harmonics: tuple[int, ...]
+    positions_hz: tuple[float, ...]
+    evidence_bic: float
 
     def __post_init__(self) -> None:
-        _validate_harmonic_positions(
-            self.fitted_harmonics,
-            self.fitted_positions_hz,
-            name="fitted",
-        )
-        _validate_harmonic_positions(
-            self.supported_harmonics,
-            self.supported_positions_hz,
-            name="supported",
-        )
+        _validate_harmonic_positions(self.harmonics, self.positions_hz)
         scalars = (
             self.fundamental_hz,
-            self.residual_rms_hz,
-            self.max_abs_residual_hz,
-            self.fundamental_jackknife_se_hz,
+            self.evidence_bic,
         )
         if not np.all(np.isfinite(scalars)):
             raise ValueError("Comb estimates must contain finite values.")
         if self.fundamental_hz <= 0.0:
-            raise ValueError("The fitted fundamental must be positive.")
-        if min(scalars[1:]) < 0.0:
-            raise ValueError("Comb residuals and uncertainty must be non-negative.")
+            raise ValueError("The comb fundamental must be positive.")
+        if self.evidence_bic >= 0.0:
+            raise ValueError("A selected comb must improve BIC over the no-comb model.")
 
     @property
-    def n_fitted_harmonics(self) -> int:
-        return len(self.fitted_harmonics)
-
-
-@dataclass(frozen=True)
-class AdaptiveCombModel:
-    """Whole-recording authorization and optional window-localized positions."""
-
-    whole_estimate: CombEstimate
-    window_evidence: tuple[HarmonicEvidence, ...]
-
-    def __post_init__(self) -> None:
-        if not self.window_evidence:
-            raise ValueError("At least one estimation window is required.")
+    def n_harmonics(self) -> int:
+        return len(self.harmonics)
 
 
 @dataclass(frozen=True)
 class HarmonicEvidence:
-    """Harmonics directly visible in one window; an empty window is explicit."""
+    """Positions of every authorized harmonic in one spectrum."""
 
     harmonics: tuple[int, ...]
     positions_hz: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        if len(self.harmonics) != len(self.positions_hz):
-            raise ValueError("Each window harmonic requires one measured position.")
-        if self.harmonics != tuple(sorted(set(self.harmonics))):
-            raise ValueError("Window harmonics must be sorted and unique.")
-        if self.harmonics and self.harmonics[0] < 1:
-            raise ValueError("Window harmonics must be positive.")
+        _validate_harmonic_positions(self.harmonics, self.positions_hz)
+
+
+@dataclass(frozen=True)
+class IsolatedLineModel:
+    """Whole-recording isolated lines and their position in every window."""
+
+    positions_hz: tuple[float, ...]
+    evidence_bic: tuple[float, ...]
+    window_positions_hz: tuple[tuple[float, ...], ...]
+
+    def __post_init__(self) -> None:
+        count = len(self.positions_hz)
+        if count != len(self.evidence_bic):
+            raise ValueError("Every isolated line requires one BIC value.")
+        if any(len(positions) != count for positions in self.window_positions_hz):
+            raise ValueError("Every window must localize every isolated line.")
         if not np.all(np.isfinite(self.positions_hz)):
-            raise ValueError("Window harmonic positions must be finite.")
-        if self.positions_hz and min(self.positions_hz) <= 0.0:
-            raise ValueError("Window harmonic positions must be positive.")
+            raise ValueError("Isolated-line positions must be finite.")
+        if self.positions_hz != tuple(sorted(self.positions_hz)):
+            raise ValueError("Isolated-line positions must be sorted.")
+        if self.evidence_bic and max(self.evidence_bic) >= 0.0:
+            raise ValueError("Selected isolated lines must improve BIC.")
+
+
+@dataclass(frozen=True)
+class AdaptiveCombModel:
+    """Complete comb plus independently supported isolated line components."""
+
+    whole_estimate: CombEstimate
+    window_evidence: tuple[HarmonicEvidence, ...]
+    isolated_lines: IsolatedLineModel
+
+    def __post_init__(self) -> None:
+        if not self.window_evidence:
+            raise ValueError("At least one estimation window is required.")
+        expected = self.whole_estimate.harmonics
+        if any(evidence.harmonics != expected for evidence in self.window_evidence):
+            raise ValueError("Every window must localize the complete authorized comb.")
+        if len(self.isolated_lines.window_positions_hz) != len(self.window_evidence):
+            raise ValueError("Comb and isolated lines must use the same windows.")
 
 
 def estimate_comb(
     frequencies_hz: Sequence[float],
     spectrum_db: Sequence[float],
-    prominence_db: Sequence[float],
     *,
-    nominal_fundamental_hz: float,
-    fit_harmonic_range: tuple[int, int],
-    supported_harmonic_range: tuple[int, int],
-    search_hz: float,
-    min_prominence_db: float,
-    min_harmonics: int,
-    max_harmonic_residual_hz: float,
-    max_residual_rms_hz: float,
+    spectral_resolution_hz: float,
+    frequency_range_hz: tuple[float, float] = (0.0, MAXIMUM_FREQUENCY_HZ),
 ) -> CombEstimate:
-    """Fit a comb and localize only prominent members consistent with its grid."""
-    frequencies = np.asarray(frequencies_hz, dtype=float)
-    spectrum = np.asarray(spectrum_db, dtype=float)
-    prominence = np.asarray(prominence_db, dtype=float)
-    _validate_spectrum(frequencies, spectrum, prominence)
-    _validate_estimation_parameters(
-        nominal_fundamental_hz=nominal_fundamental_hz,
-        fit_harmonic_range=fit_harmonic_range,
-        supported_harmonic_range=supported_harmonic_range,
-        search_hz=search_hz,
-        min_prominence_db=min_prominence_db,
-        min_harmonics=min_harmonics,
-        max_harmonic_residual_hz=max_harmonic_residual_hz,
-        max_residual_rms_hz=max_residual_rms_hz,
-    )
+    """Select a harmonic model by minimum description length.
 
-    candidate_harmonics, candidate_positions, candidate_weights = _localize_range(
+    Candidate spacing is exhaustive at the precision needed to keep its highest
+    harmonic within half a DFT bin.  Four observable multiples are required because the
+    alternative estimates a frequency, a contrast mean, and residual variance; fewer
+    observations cannot identify those quantities independently.
+    """
+    frequencies, spectrum = _validated_spectrum(frequencies_hz, spectrum_db)
+    spectral_resolution = _positive(spectral_resolution_hz, "spectral_resolution_hz")
+    minimum_frequency, maximum_frequency = _analysis_range(
         frequencies,
-        spectrum,
-        prominence,
-        fundamental_hz=nominal_fundamental_hz,
-        harmonic_range=fit_harmonic_range,
-        search_hz=search_hz,
-        min_prominence_db=min_prominence_db,
+        frequency_range_hz,
     )
-    if len(candidate_harmonics) < min_harmonics:
-        raise ValueError(
-            f"Only {len(candidate_harmonics)} comb harmonics exceeded "
-            f"{min_prominence_db:g} dB; at least {min_harmonics} are required."
+    bin_width_hz = float(frequencies[1] - frequencies[0])
+    candidates = _fundamental_candidates(
+        bin_width_hz,
+        spectral_resolution,
+        maximum_frequency,
+    )
+    search_description_length = 2.0 * np.log(candidates.size)
+
+    scored = np.array(
+        [
+            _comb_score(
+                frequencies,
+                spectrum,
+                fundamental_hz=candidate,
+                frequency_range_hz=(minimum_frequency, maximum_frequency),
+                search_description_length=search_description_length,
+            )
+            for candidate in candidates
+        ]
+    )
+    supported = np.isfinite(scored[:, 0]) & (scored[:, 0] < 0.0)
+    if not np.any(supported):
+        best_bic = float(np.min(scored[:, 0]))
+        raise NoCombDetected(
+            "The spectrum contains no supported harmonic comb through "
+            f"{maximum_frequency:g} Hz (best ΔBIC={best_bic:+.3f})."
         )
 
-    fitted_harmonics, fitted_positions, fitted_weights, fundamental_hz = _fit_consistent_harmonics(
-        candidate_harmonics,
-        candidate_positions,
-        candidate_weights,
-        min_harmonics=min_harmonics,
-        max_harmonic_residual_hz=max_harmonic_residual_hz,
+    # A BIC can decide whether each grid improves on its own null, but BIC values built
+    # from grids of different sizes are not comparable likelihoods: a dense grid can
+    # accumulate weak curvature at hundreds of locations. Rank supported grids by their
+    # matched-contrast score, mean contrast times sqrt(number of positions). The square
+    # root puts grids on the common scale of a summed independent signal: subharmonics
+    # are diluted by extra empty locations, while multiples lose the evidence in omitted
+    # lines. This is a model ranking, not an amplitude cutoff.
+    supported_indices = np.flatnonzero(supported)
+    supported_scores = scored[supported_indices]
+    harmonic_counts = np.array(
+        [
+            len(
+                _harmonic_numbers(
+                    float(candidates[index]),
+                    (minimum_frequency, maximum_frequency),
+                )
+            )
+            for index in supported_indices
+        ]
     )
-    residuals_hz = fitted_positions - fitted_harmonics * fundamental_hz
-    residual_rms_hz = float(np.sqrt(np.mean(residuals_hz**2)))
-    if residual_rms_hz > max_residual_rms_hz:
-        raise ValueError(
-            f"Fitted harmonics scatter {residual_rms_hz:.3f} Hz RMS about their grid, "
-            f"above the {max_residual_rms_hz:.3f} Hz bound."
-        )
+    matched_contrast = supported_scores[:, 1] * np.sqrt(harmonic_counts)
+    strongest_contrast = np.max(matched_contrast)
+    strongest = supported_indices[matched_contrast == strongest_contrast]
+    selected = int(strongest[np.argmin(scored[strongest, 0])])
+    evidence_bic = float(scored[selected, 0])
 
-    supported_harmonics, supported_positions, _ = _localize_range(
+    fundamental_hz = float(candidates[selected])
+    harmonic_numbers = _harmonic_numbers(
+        fundamental_hz,
+        (minimum_frequency, maximum_frequency),
+    )
+    evidence = localize_harmonics(
         frequencies,
         spectrum,
-        prominence,
+        harmonics=harmonic_numbers,
         fundamental_hz=fundamental_hz,
-        harmonic_range=supported_harmonic_range,
-        search_hz=max_harmonic_residual_hz,
-        min_prominence_db=min_prominence_db,
+        spectral_resolution_hz=spectral_resolution,
     )
-    if supported_harmonics.size == 0:
-        raise ValueError("The fitted comb has no supported harmonic eligible for removal.")
-
     return CombEstimate(
         fundamental_hz=fundamental_hz,
-        fitted_harmonics=tuple(int(value) for value in fitted_harmonics),
-        fitted_positions_hz=tuple(float(value) for value in fitted_positions),
-        supported_harmonics=tuple(int(value) for value in supported_harmonics),
-        supported_positions_hz=tuple(float(value) for value in supported_positions),
-        residual_rms_hz=residual_rms_hz,
-        max_abs_residual_hz=float(np.max(np.abs(residuals_hz))),
-        fundamental_jackknife_se_hz=_fundamental_jackknife_se(
-            fitted_harmonics,
-            fitted_positions,
-            fitted_weights,
-        ),
+        harmonics=harmonic_numbers,
+        positions_hz=evidence.positions_hz,
+        evidence_bic=evidence_bic,
     )
 
 
-def localize_supported_harmonics(
+def localize_harmonics(
     frequencies_hz: Sequence[float],
     spectrum_db: Sequence[float],
-    prominence_db: Sequence[float],
     *,
-    supported_harmonics: Sequence[int],
+    harmonics: Sequence[int],
     fundamental_hz: float,
-    search_hz: float,
-    min_prominence_db: float,
+    spectral_resolution_hz: float,
 ) -> HarmonicEvidence:
-    """Localize visible whole-recording targets without authorizing a new grid."""
-    frequencies = np.asarray(frequencies_hz, dtype=float)
-    spectrum = np.asarray(spectrum_db, dtype=float)
-    prominence = np.asarray(prominence_db, dtype=float)
-    _validate_spectrum(frequencies, spectrum, prominence)
-    harmonic_numbers = tuple(int(value) for value in supported_harmonics)
+    """Refine every authorized grid position without an amplitude gate."""
+    frequencies, spectrum = _validated_spectrum(frequencies_hz, spectrum_db)
+    fundamental = _positive(fundamental_hz, "fundamental_hz")
+    resolution = _positive(spectral_resolution_hz, "spectral_resolution_hz")
+    harmonic_numbers = tuple(int(value) for value in harmonics)
     if harmonic_numbers != tuple(sorted(set(harmonic_numbers))):
-        raise ValueError("Supported harmonics must be sorted and unique.")
-    if harmonic_numbers and harmonic_numbers[0] < 1:
-        raise ValueError("Supported harmonics must be positive.")
-    if not np.isfinite(fundamental_hz) or fundamental_hz <= 0.0:
-        raise ValueError("fundamental_hz must be finite and positive.")
-    if not np.isfinite(search_hz) or search_hz <= 0.0:
-        raise ValueError("search_hz must be finite and positive.")
-    if not np.isfinite(min_prominence_db) or min_prominence_db <= 0.0:
-        raise ValueError("min_prominence_db must be finite and positive.")
+        raise ValueError("Harmonics must be sorted and unique.")
+    if not harmonic_numbers or harmonic_numbers[0] < 1:
+        raise ValueError("Harmonics must contain positive integers.")
 
-    found_harmonics = []
-    found_positions = []
-    for harmonic in harmonic_numbers:
-        target_hz = harmonic * fundamental_hz
-        peak = _peak_near(
+    positions = tuple(
+        _local_peak_position(
             frequencies,
             spectrum,
-            prominence,
-            target_hz=target_hz,
-            search_hz=search_hz,
+            target_hz=harmonic * fundamental,
+            spectral_resolution_hz=resolution,
         )
-        if peak is None:
-            continue
-        position_hz, strength_db = peak
-        if strength_db < min_prominence_db:
-            continue
-        if abs(position_hz - target_hz) > search_hz:
-            continue
-        found_harmonics.append(harmonic)
-        found_positions.append(position_hz)
-    return HarmonicEvidence(
-        tuple(found_harmonics),
-        tuple(float(value) for value in found_positions),
+        for harmonic in harmonic_numbers
     )
+    return HarmonicEvidence(harmonic_numbers, positions)
+
+
+def detect_isolated_lines(
+    frequencies_hz: Sequence[float],
+    whole_spectrum_db: Sequence[float],
+    window_spectra_db: Sequence[Sequence[float]],
+    *,
+    comb: CombEstimate,
+    spectral_resolution_hz: float,
+    independent_window_indices: Sequence[int],
+    frequency_range_hz: tuple[float, float] = (0.0, MAXIMUM_FREQUENCY_HZ),
+) -> IsolatedLineModel:
+    """Select off-comb narrow lines by BIC across independent Hann windows."""
+    frequencies, whole_spectrum = _validated_spectrum(
+        frequencies_hz,
+        whole_spectrum_db,
+    )
+    windows = np.asarray(window_spectra_db, dtype=float)
+    if windows.ndim != 2 or windows.shape[1] != frequencies.size:
+        raise ValueError("Window spectra must form a window-by-frequency array.")
+    if windows.shape[0] < 2 or not np.all(np.isfinite(windows)):
+        raise ValueError("Isolated-line detection requires two finite spectral windows.")
+    resolution = _positive(spectral_resolution_hz, "spectral_resolution_hz")
+    independent_indices = np.asarray(independent_window_indices, dtype=int)
+    if (
+        independent_indices.ndim != 1
+        or independent_indices.size < 2
+        or np.any(independent_indices < 0)
+        or np.any(independent_indices >= windows.shape[0])
+        or np.any(np.diff(independent_indices) <= 0)
+    ):
+        raise ValueError(
+            "independent_window_indices must select at least two ordered unique windows."
+        )
+    minimum_frequency, maximum_frequency = _analysis_range(
+        frequencies,
+        frequency_range_hz,
+    )
+
+    from scipy.signal import find_peaks
+
+    candidate_indices = find_peaks(whole_spectrum)[0]
+    inside = (frequencies[candidate_indices] >= max(minimum_frequency, resolution)) & (
+        frequencies[candidate_indices] <= maximum_frequency
+    )
+    candidate_indices = candidate_indices[inside]
+    harmonic_grid_hz = comb.fundamental_hz * np.asarray(comb.harmonics)
+    off_comb = np.array(
+        [
+            np.min(np.abs(harmonic_grid_hz - frequencies[index])) > resolution
+            for index in candidate_indices
+        ],
+        dtype=bool,
+    )
+    candidate_indices = candidate_indices[off_comb]
+    if candidate_indices.size == 0:
+        return IsolatedLineModel((), (), tuple(() for _ in windows))
+
+    search_description_length = 2.0 * np.log(candidate_indices.size)
+    independent_windows = windows[independent_indices]
+    selected: list[tuple[float, float]] = []
+    for index in candidate_indices:
+        position_hz = _local_peak_position(
+            frequencies,
+            whole_spectrum,
+            target_hz=float(frequencies[index]),
+            spectral_resolution_hz=resolution,
+        )
+        contrasts_db = _line_contrasts(
+            frequencies,
+            independent_windows,
+            position_hz=position_hz,
+            spectral_resolution_hz=resolution,
+        )
+        evidence_bic = _positive_mean_bic(
+            contrasts_db,
+            search_description_length=search_description_length,
+        )
+        shape_bic = _line_shape_bic(
+            frequencies,
+            whole_spectrum,
+            position_hz=position_hz,
+            spectral_resolution_hz=resolution,
+            search_description_length=search_description_length,
+        )
+        least_favourable_bic = max(evidence_bic, shape_bic)
+        if least_favourable_bic < 0.0:
+            selected.append((position_hz, least_favourable_bic))
+
+    selected.sort()
+    positions_hz = tuple(position for position, _ in selected)
+    evidence_bic = tuple(value for _, value in selected)
+    window_positions = tuple(
+        tuple(
+            _local_peak_position(
+                frequencies,
+                window,
+                target_hz=position_hz,
+                spectral_resolution_hz=resolution,
+            )
+            for position_hz in positions_hz
+        )
+        for window in windows
+    )
+    return IsolatedLineModel(positions_hz, evidence_bic, window_positions)
+
+
+def _line_shape_bic(
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    *,
+    position_hz: float,
+    spectral_resolution_hz: float,
+    search_description_length: float,
+) -> float:
+    """Compare a resolution-limited Hann line with a smooth local spectrum."""
+    radius_hz = 4.0 * spectral_resolution_hz
+    inside = np.abs(frequencies_hz - position_hz) <= radius_hz
+    local_frequencies_hz = frequencies_hz[inside]
+    if local_frequencies_hz.size < 8:
+        return float("inf")
+
+    local_db = spectrum_db[inside]
+    local_power = 10.0 ** ((local_db - np.max(local_db)) / 10.0)
+    scaled_frequency = (local_frequencies_hz - position_hz) / radius_hz
+    smooth_design = np.column_stack(
+        (
+            np.ones(local_frequencies_hz.size),
+            scaled_frequency,
+            scaled_frequency**2,
+        )
+    )
+    smooth_coefficients, *_ = np.linalg.lstsq(
+        smooth_design,
+        local_power,
+        rcond=None,
+    )
+    smooth_residual = local_power - smooth_design @ smooth_coefficients
+    null_residual_sum = float(smooth_residual @ smooth_residual)
+    if null_residual_sum <= 0.0:
+        return float("inf")
+
+    bin_width_hz = float(frequencies_hz[1] - frequencies_hz[0])
+    bin_offset = (local_frequencies_hz - position_hz) / bin_width_hz
+    hann_amplitude = (
+        0.5 * np.sinc(bin_offset)
+        - 0.25 * np.sinc(bin_offset - 1.0)
+        - 0.25 * np.sinc(bin_offset + 1.0)
+    )
+    hann_power = (hann_amplitude / 0.5) ** 2
+    line_design = np.column_stack((smooth_design, hann_power))
+    line_coefficients, *_ = np.linalg.lstsq(
+        line_design,
+        local_power,
+        rcond=None,
+    )
+    if line_coefficients[-1] <= 0.0:
+        return float("inf")
+    line_residual = local_power - line_design @ line_coefficients
+    alternative_residual_sum = float(line_residual @ line_residual)
+    alternative_residual_sum = max(
+        alternative_residual_sum,
+        np.finfo(float).tiny,
+    )
+    count = local_frequencies_hz.size
+    return float(
+        count * np.log(alternative_residual_sum / null_residual_sum)
+        + np.log(count)
+        + search_description_length
+    )
+
+
+def _line_contrasts(
+    frequencies_hz: np.ndarray,
+    spectra_db: np.ndarray,
+    *,
+    position_hz: float,
+    spectral_resolution_hz: float,
+) -> np.ndarray:
+    centres_db = np.array(
+        [np.interp(position_hz, frequencies_hz, spectrum) for spectrum in spectra_db]
+    )
+    left_db = np.array(
+        [
+            np.interp(
+                position_hz - 2.0 * spectral_resolution_hz,
+                frequencies_hz,
+                spectrum,
+            )
+            for spectrum in spectra_db
+        ]
+    )
+    right_db = np.array(
+        [
+            np.interp(
+                position_hz + 2.0 * spectral_resolution_hz,
+                frequencies_hz,
+                spectrum,
+            )
+            for spectrum in spectra_db
+        ]
+    )
+    return centres_db - 0.5 * (left_db + right_db)
+
+
+def _positive_mean_bic(
+    values: np.ndarray,
+    *,
+    search_description_length: float,
+) -> float:
+    mean = float(np.mean(values))
+    if mean <= 0.0:
+        return float("inf")
+    null_residual_sum = float(np.sum(values**2))
+    alternative_residual_sum = float(np.sum((values - mean) ** 2))
+    if null_residual_sum <= 0.0:
+        return float("inf")
+    if alternative_residual_sum == 0.0:
+        alternative_residual_sum = np.finfo(float).tiny
+    count = values.size
+    return float(
+        count * np.log(alternative_residual_sum / null_residual_sum)
+        + np.log(count)
+        + search_description_length
+    )
+
+
+def _fundamental_candidates(
+    bin_width_hz: float,
+    spectral_resolution_hz: float,
+    maximum_frequency_hz: float,
+) -> np.ndarray:
+    """All identifiable spacings at sub-bin accuracy for their highest harmonic."""
+    minimum_hz = 2.0 * spectral_resolution_hz
+    maximum_hz = maximum_frequency_hz / 4.0
+    if minimum_hz >= maximum_hz:
+        raise ValueError("The spectrum cannot resolve four distinct comb harmonics.")
+
+    candidates = []
+    candidate_hz = minimum_hz
+    while candidate_hz <= maximum_hz:
+        candidates.append(candidate_hz)
+        highest_harmonic = int(maximum_frequency_hz / candidate_hz)
+        candidate_hz += bin_width_hz / (2.0 * highest_harmonic)
+    return np.asarray(candidates, dtype=float)
+
+
+def _comb_score(
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    *,
+    fundamental_hz: float,
+    frequency_range_hz: tuple[float, float],
+    search_description_length: float,
+) -> tuple[float, float]:
+    harmonic_numbers = np.asarray(
+        _harmonic_numbers(fundamental_hz, frequency_range_hz),
+        dtype=float,
+    )
+    if harmonic_numbers.size < 4:
+        return float("inf"), float("nan")
+    centres_hz = harmonic_numbers * fundamental_hz
+    centre_db = np.interp(centres_hz, frequencies_hz, spectrum_db)
+    halfway_db = 0.5 * (
+        np.interp(centres_hz - fundamental_hz / 2.0, frequencies_hz, spectrum_db)
+        + np.interp(centres_hz + fundamental_hz / 2.0, frequencies_hz, spectrum_db)
+    )
+    contrasts_db = centre_db - halfway_db
+    mean_contrast_db = float(np.mean(contrasts_db))
+    if mean_contrast_db <= 0.0:
+        return float("inf"), mean_contrast_db
+
+    null_residual_sum = float(np.sum(contrasts_db**2))
+    alternative_residual_sum = float(
+        np.sum((contrasts_db - mean_contrast_db) ** 2)
+    )
+    if null_residual_sum <= 0.0 or alternative_residual_sum <= 0.0:
+        return float("inf"), mean_contrast_db
+
+    observation_count = contrasts_db.size
+    fit_gain = observation_count * np.log(
+        alternative_residual_sum / null_residual_sum
+    )
+    mean_parameter_cost = np.log(observation_count)
+
+    evidence_bic = fit_gain + mean_parameter_cost + search_description_length
+    return float(evidence_bic), mean_contrast_db
+
+
+def _local_peak_position(
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    *,
+    target_hz: float,
+    spectral_resolution_hz: float,
+) -> float:
+    from decomb.spectral import refine_peak_frequency
+
+    low, high = np.searchsorted(
+        frequencies_hz,
+        [target_hz - spectral_resolution_hz, target_hz + spectral_resolution_hz],
+    )
+    low = max(1, int(low))
+    high = min(frequencies_hz.size - 1, int(high))
+    if high <= low:
+        raise ValueError(f"Harmonic at {target_hz:g} Hz lies outside the spectrum.")
+    index = low + int(np.argmax(spectrum_db[low:high]))
+    return refine_peak_frequency(frequencies_hz, spectrum_db, index)
+
+
+def _validated_spectrum(
+    frequencies_hz: Sequence[float],
+    spectrum_db: Sequence[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    frequencies = np.asarray(frequencies_hz, dtype=float)
+    spectrum = np.asarray(spectrum_db, dtype=float)
+    if frequencies.ndim != 1 or frequencies.size < 5:
+        raise ValueError("Comb estimation requires a one-dimensional frequency grid.")
+    if frequencies.shape != spectrum.shape:
+        raise ValueError("Frequency and spectrum arrays must have equal shapes.")
+    if not np.all(np.isfinite(frequencies)) or np.any(np.diff(frequencies) <= 0.0):
+        raise ValueError("Comb frequencies must be finite and strictly increasing.")
+    if not np.all(np.isfinite(spectrum)):
+        raise ValueError("The comb spectrum must contain only finite values.")
+    steps = np.diff(frequencies)
+    if not np.allclose(steps, steps[0], rtol=1e-8, atol=np.finfo(float).eps):
+        raise ValueError("Comb estimation requires an evenly spaced frequency grid.")
+    return frequencies, spectrum
+
+
+def _harmonic_numbers(
+    fundamental_hz: float,
+    frequency_range_hz: tuple[float, float],
+) -> tuple[int, ...]:
+    low_hz, high_hz = frequency_range_hz
+    first = max(1, int(np.ceil(low_hz / fundamental_hz)))
+    last = int(np.floor(high_hz / fundamental_hz))
+    return tuple(range(first, last + 1))
+
+
+def _analysis_range(
+    frequencies_hz: np.ndarray,
+    frequency_range_hz: tuple[float, float],
+) -> tuple[float, float]:
+    values = np.asarray(frequency_range_hz, dtype=float)
+    if values.shape != (2,) or not np.all(np.isfinite(values)):
+        raise ValueError("frequency_range_hz must contain two finite values.")
+    low_hz, requested_high_hz = (float(value) for value in values)
+    if not 0.0 <= low_hz < requested_high_hz <= MAXIMUM_FREQUENCY_HZ:
+        raise ValueError("frequency_range_hz must increase inside [0, 100] Hz.")
+    high_hz = min(requested_high_hz, float(frequencies_hz[-2]))
+    if high_hz <= low_hz:
+        raise ValueError("The spectrum does not cover the configured frequency range.")
+    return low_hz, high_hz
+
+
+def _positive(value: float, name: str) -> float:
+    number = float(value)
+    if not np.isfinite(number) or number <= 0.0:
+        raise ValueError(f"{name} must be finite and positive.")
+    return number
 
 
 def _validate_harmonic_positions(
     harmonic_numbers: tuple[int, ...],
     positions_hz: tuple[float, ...],
-    *,
-    name: str,
 ) -> None:
-    if len(harmonic_numbers) != len(positions_hz):
-        raise ValueError(f"Each {name} harmonic requires one measured position.")
-    if not harmonic_numbers:
-        raise ValueError(f"At least one {name} harmonic is required.")
+    if len(harmonic_numbers) != len(positions_hz) or not harmonic_numbers:
+        raise ValueError("Every non-empty harmonic list requires one measured position.")
     if harmonic_numbers != tuple(sorted(set(harmonic_numbers))):
-        raise ValueError(f"{name.capitalize()} harmonics must be sorted and unique.")
+        raise ValueError("Harmonics must be sorted and unique.")
     if harmonic_numbers[0] < 1:
-        raise ValueError(f"{name.capitalize()} harmonics must be positive.")
+        raise ValueError("Harmonics must be positive.")
     if not np.all(np.isfinite(positions_hz)) or min(positions_hz) <= 0.0:
-        raise ValueError(f"{name.capitalize()} positions must be finite and positive.")
-
-
-def _validate_spectrum(
-    frequencies_hz: np.ndarray,
-    spectrum_db: np.ndarray,
-    prominence_db: np.ndarray,
-) -> None:
-    if frequencies_hz.ndim != 1 or frequencies_hz.size < 3:
-        raise ValueError("Comb estimation requires a one-dimensional frequency grid.")
-    if not frequencies_hz.shape == spectrum_db.shape == prominence_db.shape:
-        raise ValueError("Frequency, spectrum, and prominence arrays must have equal shapes.")
-    if not np.all(np.isfinite(frequencies_hz)) or np.any(np.diff(frequencies_hz) <= 0.0):
-        raise ValueError("Comb frequencies must be finite and strictly increasing.")
-
-
-def _validate_estimation_parameters(**parameters) -> None:
-    nominal = parameters["nominal_fundamental_hz"]
-    search_hz = parameters["search_hz"]
-    if not np.isfinite(nominal) or nominal <= 0.0:
-        raise ValueError("nominal_fundamental_hz must be finite and positive.")
-    if not np.isfinite(search_hz) or not 0.0 < search_hz < nominal / 2.0:
-        raise ValueError("search_hz must lie below half the nominal fundamental.")
-    for name in ("fit_harmonic_range", "supported_harmonic_range"):
-        first, last = parameters[name]
-        if first < 1 or last < first:
-            raise ValueError(f"{name} must contain increasing positive integers.")
-    if parameters["min_harmonics"] < 3:
-        raise ValueError("min_harmonics must be at least three.")
-    for name in (
-        "min_prominence_db",
-        "max_harmonic_residual_hz",
-        "max_residual_rms_hz",
-    ):
-        value = parameters[name]
-        if not np.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{name} must be finite and positive.")
-
-
-def _localize_range(
-    frequencies_hz: np.ndarray,
-    spectrum_db: np.ndarray,
-    prominence_db: np.ndarray,
-    *,
-    fundamental_hz: float,
-    harmonic_range: tuple[int, int],
-    search_hz: float,
-    min_prominence_db: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    harmonics = []
-    positions = []
-    weights = []
-    first, last = harmonic_range
-    for harmonic in range(first, last + 1):
-        target_hz = harmonic * fundamental_hz
-        peak = _peak_near(
-            frequencies_hz,
-            spectrum_db,
-            prominence_db,
-            target_hz=target_hz,
-            search_hz=search_hz,
-        )
-        if peak is None:
-            continue
-        position_hz, strength_db = peak
-        if strength_db < min_prominence_db:
-            continue
-        if abs(position_hz - target_hz) > search_hz:
-            continue
-        harmonics.append(harmonic)
-        positions.append(position_hz)
-        weights.append(strength_db)
-    return (
-        np.asarray(harmonics, dtype=float),
-        np.asarray(positions, dtype=float),
-        np.asarray(weights, dtype=float),
-    )
-
-
-def _peak_near(
-    frequencies_hz: np.ndarray,
-    spectrum_db: np.ndarray,
-    prominence_db: np.ndarray,
-    *,
-    target_hz: float,
-    search_hz: float,
-) -> tuple[float, float] | None:
-    low, high = np.searchsorted(
-        frequencies_hz,
-        [target_hz - search_hz, target_hz + search_hz],
-    )
-    if high <= low:
-        return None
-    window = prominence_db[low:high]
-    if not np.any(np.isfinite(window)):
-        return None
-    index = low + int(np.nanargmax(window))
-    if not 0 < index < frequencies_hz.size - 1:
-        return None
-    return (
-        refine_peak_frequency(frequencies_hz, spectrum_db, index),
-        float(prominence_db[index]),
-    )
-
-
-def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
-    order = np.argsort(values, kind="stable")
-    cumulative = np.cumsum(weights[order])
-    index = int(np.searchsorted(cumulative, cumulative[-1] / 2.0, side="left"))
-    return float(values[order[index]])
-
-
-def _fit_consistent_harmonics(
-    harmonics: np.ndarray,
-    positions_hz: np.ndarray,
-    weights: np.ndarray,
-    *,
-    min_harmonics: int,
-    max_harmonic_residual_hz: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    seed_hz = _weighted_median(positions_hz / harmonics, weights)
-    retained = np.abs(positions_hz - harmonics * seed_hz) <= max_harmonic_residual_hz
-    visited: set[bytes] = set()
-    while True:
-        membership = retained.tobytes()
-        if membership in visited:
-            raise RuntimeError("Robust comb membership entered a cycle.")
-        visited.add(membership)
-        if np.count_nonzero(retained) < min_harmonics:
-            raise ValueError(
-                f"Only {np.count_nonzero(retained)} mutually consistent comb harmonics remain."
-            )
-        selected_harmonics = harmonics[retained]
-        selected_positions = positions_hz[retained]
-        selected_weights = weights[retained]
-        fundamental_hz = float(
-            np.sum(selected_weights * selected_harmonics * selected_positions)
-            / np.sum(selected_weights * selected_harmonics**2)
-        )
-        updated = np.abs(positions_hz - harmonics * fundamental_hz) <= max_harmonic_residual_hz
-        if np.array_equal(updated, retained):
-            return (
-                selected_harmonics,
-                selected_positions,
-                selected_weights,
-                fundamental_hz,
-            )
-        retained = updated
-
-
-def _fundamental_jackknife_se(
-    harmonics: np.ndarray,
-    positions_hz: np.ndarray,
-    weights: np.ndarray,
-) -> float:
-    count = harmonics.size
-    estimates = np.empty(count, dtype=float)
-    for omitted in range(count):
-        retained = np.arange(count) != omitted
-        estimates[omitted] = np.sum(
-            weights[retained] * harmonics[retained] * positions_hz[retained]
-        ) / np.sum(weights[retained] * harmonics[retained] ** 2)
-    centre_hz = float(np.mean(estimates))
-    return float(np.sqrt((count - 1) / count * np.sum((estimates - centre_hz) ** 2)))
+        raise ValueError("Harmonic positions must be finite and positive.")
