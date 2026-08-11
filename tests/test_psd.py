@@ -237,6 +237,12 @@ def test_the_stage_is_reachable_from_the_cli():
     assert "psd" in cli.STAGES
 
 
+def test_dataset_description_uses_singular_participant_grammar():
+    assert psd.dataset_description(6, 1, 2880.0) == (
+        "6 recordings from 1 participant (0.8 h EEG)"
+    )
+
+
 def test_the_stage_refuses_before_apply_has_run(tmp_path, monkeypatch):
     import argparse
 
@@ -261,3 +267,41 @@ def test_the_stage_refuses_before_apply_has_run(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="Run `decomb apply` first"):
         psd.run(argparse.Namespace(config=None, bids_root=None, report_dir=None))
+
+
+def test_the_stage_uses_the_output_root_override(tmp_path, monkeypatch):
+    import argparse
+
+    configured_settings = _settings()
+    overridden_derivative = tmp_path / "chosen-derivative"
+    overridden_derivative.mkdir()
+
+    class Config:
+        def path(self, name, override=None):
+            return Path(override) if override is not None else tmp_path / name
+
+        def get(self, key, default=None):
+            return default
+
+    monkeypatch.setattr("decomb.config.load_config", lambda *a, **k: Config())
+    monkeypatch.setattr(
+        psd.PsdSettings,
+        "from_config",
+        lambda config: configured_settings,
+    )
+    monkeypatch.setattr(
+        psd.recordings,
+        "discover_runs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("discovery reached")),
+    )
+
+    with pytest.raises(RuntimeError, match="discovery reached"):
+        psd.run(
+            argparse.Namespace(
+                config=None,
+                bids_root=None,
+                output_root=overridden_derivative,
+                report_dir=None,
+                subjects=None,
+            )
+        )

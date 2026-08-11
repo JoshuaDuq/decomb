@@ -273,84 +273,186 @@ def detect_isolated_lines(
     )
     candidate_indices = candidate_indices[inside]
     harmonic_grid_hz = comb.fundamental_hz * np.asarray(comb.harmonics)
-    off_comb = np.array(
-        [
-            np.min(np.abs(harmonic_grid_hz - frequencies[index])) > resolution
-            for index in candidate_indices
-        ],
-        dtype=bool,
+    distance_to_comb_hz = np.min(
+        np.abs(frequencies[:, np.newaxis] - harmonic_grid_hz),
+        axis=1,
     )
-    candidate_indices = candidate_indices[off_comb]
+    candidate_indices = candidate_indices[distance_to_comb_hz[candidate_indices] > resolution]
     if candidate_indices.size == 0:
         return IsolatedLineModel((), (), tuple(() for _ in windows))
 
-    search_description_length = 2.0 * np.log(candidate_indices.size)
+    analysis_indices = np.flatnonzero(
+        (frequencies >= minimum_frequency) & (frequencies <= maximum_frequency)
+    )
+    tracking_bins = distance_to_comb_hz > resolution
+    tracking_bins[: int(analysis_indices[0])] = False
+    tracking_bins[int(analysis_indices[-1]) + 1 :] = False
+    candidate_features = _candidate_features(
+        candidate_indices,
+        whole_spectrum,
+        eligible_bins=tracking_bins,
+        first_index=max(1, int(analysis_indices[0])),
+        last_index=min(frequencies.size - 2, int(analysis_indices[-1])),
+    )
+    search_description_length = 2.0 * np.log(len(candidate_features))
     independent_windows = windows[independent_indices]
-    selected: list[tuple[float, float]] = []
-    for index in candidate_indices:
-        position_hz = _local_peak_position(
+    selected: list[tuple[float, float, tuple[float, ...]]] = []
+    for index, basin in candidate_features:
+        position_hz = _refined_peak_position(
             frequencies,
             whole_spectrum,
-            target_hz=float(frequencies[index]),
-            spectral_resolution_hz=resolution,
+            int(index),
         )
-        contrasts_db = _line_contrasts(
+        window_positions_hz = tuple(
+            _peak_position_in_bounds(frequencies, window, basin)
+            for window in windows
+        )
+        contrasts_db = _trajectory_line_contrasts(
             frequencies,
             independent_windows,
-            position_hz=position_hz,
+            positions_hz=np.asarray(window_positions_hz)[independent_indices],
             spectral_resolution_hz=resolution,
         )
         evidence_bic = _positive_mean_bic(
             contrasts_db,
             search_description_length=search_description_length,
         )
-        shape_bic = _line_shape_bic(
+        shape_bic = _trajectory_line_shape_bic(
             frequencies,
             whole_spectrum,
             position_hz=position_hz,
+            trajectory_positions_hz=window_positions_hz,
             spectral_resolution_hz=resolution,
             search_description_length=search_description_length,
+            independent_window_count=independent_indices.size,
         )
         least_favourable_bic = max(evidence_bic, shape_bic)
         if least_favourable_bic < 0.0:
-            selected.append((position_hz, least_favourable_bic))
+            selected.append(
+                (position_hz, least_favourable_bic, window_positions_hz)
+            )
 
     selected.sort()
-    positions_hz = tuple(position for position, _ in selected)
-    evidence_bic = tuple(value for _, value in selected)
+    positions_hz = tuple(position for position, _, _ in selected)
+    evidence_bic = tuple(value for _, value, _ in selected)
     window_positions = tuple(
-        tuple(
-            _local_peak_position(
-                frequencies,
-                window,
-                target_hz=position_hz,
-                spectral_resolution_hz=resolution,
-            )
-            for position_hz in positions_hz
-        )
-        for window in windows
+        tuple(trajectory[window_index] for _, _, trajectory in selected)
+        for window_index in range(windows.shape[0])
     )
     return IsolatedLineModel(positions_hz, evidence_bic, window_positions)
 
 
-def _line_shape_bic(
+def _candidate_features(
+    peak_indices: np.ndarray,
+    spectrum_db: np.ndarray,
+    *,
+    eligible_bins: np.ndarray,
+    first_index: int,
+    last_index: int,
+) -> tuple[tuple[int, tuple[int, int]], ...]:
+    """Distinct half-power features, strongest first where support overlaps."""
+    if eligible_bins.shape != spectrum_db.shape:
+        raise ValueError("Candidate eligibility must match the whole spectrum.")
+    features = []
+    strongest_first = sorted(
+        (int(index) for index in peak_indices),
+        key=lambda index: (-spectrum_db[index], index),
+    )
+    for peak_index in strongest_first:
+        basin = _candidate_basin(
+            spectrum_db,
+            peak_index,
+            eligible_bins=eligible_bins,
+            first_index=first_index,
+            last_index=last_index,
+        )
+        if any(
+            max(basin[0], existing[0]) <= min(basin[1], existing[1])
+            for _, existing in features
+        ):
+            continue
+        features.append((peak_index, basin))
+    return tuple(sorted(features))
+
+
+def _candidate_basin(
+    spectrum_db: np.ndarray,
+    peak_index: int,
+    *,
+    eligible_bins: np.ndarray,
+    first_index: int,
+    last_index: int,
+) -> tuple[int, int]:
+    """Contiguous half-power support around one whole-spectrum peak."""
+    half_power_floor_db = spectrum_db[peak_index] - 10.0 * np.log10(2.0)
+    low_index = peak_index
+    while (
+        low_index > first_index
+        and eligible_bins[low_index - 1]
+        and spectrum_db[low_index - 1] >= half_power_floor_db
+    ):
+        low_index -= 1
+    high_index = peak_index
+    while (
+        high_index < last_index
+        and eligible_bins[high_index + 1]
+        and spectrum_db[high_index + 1] >= half_power_floor_db
+    ):
+        high_index += 1
+    return low_index, high_index
+
+
+def _peak_position_in_bounds(
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    bounds: tuple[int, int],
+) -> float:
+    """Refine the strongest local position inside a measured spectral basin."""
+    low_index, high_index = bounds
+    index = low_index + int(np.argmax(spectrum_db[low_index : high_index + 1]))
+    return _refined_peak_position(frequencies_hz, spectrum_db, index)
+
+
+def _refined_peak_position(
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    index: int,
+) -> float:
+    from decomb.spectral import refine_peak_frequency
+
+    return refine_peak_frequency(frequencies_hz, spectrum_db, index)
+
+
+def _trajectory_line_shape_bic(
     frequencies_hz: np.ndarray,
     spectrum_db: np.ndarray,
     *,
     position_hz: float,
+    trajectory_positions_hz: Sequence[float],
     spectral_resolution_hz: float,
     search_description_length: float,
+    independent_window_count: int,
 ) -> float:
-    """Compare a resolution-limited Hann line with a smooth local spectrum."""
+    """Compare a tracked Hann-line mixture with a smooth local spectrum."""
+    trajectory = np.asarray(trajectory_positions_hz, dtype=float)
+    if trajectory.ndim != 1 or trajectory.size < 2 or not np.all(np.isfinite(trajectory)):
+        raise ValueError("A line trajectory requires at least two finite positions.")
+    if independent_window_count < 2:
+        raise ValueError("A line trajectory requires two independent windows.")
+
     radius_hz = 4.0 * spectral_resolution_hz
-    inside = np.abs(frequencies_hz - position_hz) <= radius_hz
+    low_hz = min(position_hz, float(np.min(trajectory))) - radius_hz
+    high_hz = max(position_hz, float(np.max(trajectory))) + radius_hz
+    inside = (frequencies_hz >= low_hz) & (frequencies_hz <= high_hz)
     local_frequencies_hz = frequencies_hz[inside]
     if local_frequencies_hz.size < 8:
         return float("inf")
 
     local_db = spectrum_db[inside]
     local_power = 10.0 ** ((local_db - np.max(local_db)) / 10.0)
-    scaled_frequency = (local_frequencies_hz - position_hz) / radius_hz
+    midpoint_hz = (low_hz + high_hz) / 2.0
+    half_span_hz = (high_hz - low_hz) / 2.0
+    scaled_frequency = (local_frequencies_hz - midpoint_hz) / half_span_hz
     smooth_design = np.column_stack(
         (
             np.ones(local_frequencies_hz.size),
@@ -369,13 +471,15 @@ def _line_shape_bic(
         return float("inf")
 
     bin_width_hz = float(frequencies_hz[1] - frequencies_hz[0])
-    bin_offset = (local_frequencies_hz - position_hz) / bin_width_hz
-    hann_amplitude = (
-        0.5 * np.sinc(bin_offset)
-        - 0.25 * np.sinc(bin_offset - 1.0)
-        - 0.25 * np.sinc(bin_offset + 1.0)
+    hann_power = np.mean(
+        [
+            _hann_power_response(
+                (local_frequencies_hz - trajectory_position_hz) / bin_width_hz
+            )
+            for trajectory_position_hz in trajectory
+        ],
+        axis=0,
     )
-    hann_power = (hann_amplitude / 0.5) ** 2
     line_design = np.column_stack((smooth_design, hann_power))
     line_coefficients, *_ = np.linalg.lstsq(
         line_design,
@@ -391,11 +495,23 @@ def _line_shape_bic(
         np.finfo(float).tiny,
     )
     count = local_frequencies_hz.size
+    trajectory_parameter_cost = independent_window_count * np.log(count)
     return float(
         count * np.log(alternative_residual_sum / null_residual_sum)
         + np.log(count)
         + search_description_length
+        + trajectory_parameter_cost
     )
+
+
+def _hann_power_response(bin_offset: np.ndarray) -> np.ndarray:
+    """Power response of the Hann periodogram around a sinusoidal line."""
+    hann_amplitude = (
+        0.5 * np.sinc(bin_offset)
+        + 0.25 * np.sinc(bin_offset - 1.0)
+        + 0.25 * np.sinc(bin_offset + 1.0)
+    )
+    return (hann_amplitude / 0.5) ** 2
 
 
 def _line_contrasts(
@@ -429,6 +545,29 @@ def _line_contrasts(
         ]
     )
     return centres_db - 0.5 * (left_db + right_db)
+
+
+def _trajectory_line_contrasts(
+    frequencies_hz: np.ndarray,
+    spectra_db: np.ndarray,
+    *,
+    positions_hz: np.ndarray,
+    spectral_resolution_hz: float,
+) -> np.ndarray:
+    """Resolution-scale contrast at each window's tracked line position."""
+    if positions_hz.shape != (spectra_db.shape[0],):
+        raise ValueError("Every spectrum requires one tracked line position.")
+    return np.asarray(
+        [
+            _line_contrasts(
+                frequencies_hz,
+                spectrum[np.newaxis, :],
+                position_hz=float(position_hz),
+                spectral_resolution_hz=spectral_resolution_hz,
+            )[0]
+            for spectrum, position_hz in zip(spectra_db, positions_hz)
+        ]
+    )
 
 
 def _positive_mean_bic(

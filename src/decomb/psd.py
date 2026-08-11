@@ -326,6 +326,20 @@ def figure_per_recording(
     plt.close(figure)
 
 
+def dataset_description(
+    recording_count: int,
+    participant_count: int,
+    total_duration_s: float,
+) -> str:
+    """Compact grammatically correct description for generated figure titles."""
+    recording_label = "recording" if recording_count == 1 else "recordings"
+    participant_label = "participant" if participant_count == 1 else "participants"
+    return (
+        f"{recording_count} {recording_label} from {participant_count} "
+        f"{participant_label} ({total_duration_s / 3600.0:.1f} h EEG)"
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     """Compare the source against every derivative that exists."""
     import time
@@ -337,7 +351,12 @@ def run(args: argparse.Namespace) -> None:
     source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
 
-    candidates = [("harmonic-notched", config.path("output_root"))]
+    candidates = [
+        (
+            "harmonic-notched",
+            config.path("output_root", override=getattr(args, "output_root", None)),
+        )
+    ]
     available = [(label, root) for label, root in candidates if root.is_dir()]
     if not available:
         raise FileNotFoundError(
@@ -375,9 +394,10 @@ def run(args: argparse.Namespace) -> None:
     }
     report_dir.mkdir(parents=True, exist_ok=True)
     participant_count = len({recordings.subject_of(vhdr) for vhdr in runs})
-    cohort_description = (
-        f"{len(runs)} recordings from {participant_count} participants "
-        f"({total_duration_s / 3600.0:.1f} h EEG)"
+    cohort_description = dataset_description(
+        len(runs),
+        participant_count,
+        total_duration_s,
     )
     figure_cohort(
         freqs,

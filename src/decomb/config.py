@@ -33,7 +33,7 @@ LOCAL_CONFIG_NAME = "decomb.yaml"
 
 #: Paths another path may refer to with a ``<name>`` placeholder.
 REFERENCEABLE = ("bids_root", "output_root")
-ALLOWED_TOP_LEVEL = {"paths", "removal", "frequency_bands", "simulation"}
+ALLOWED_TOP_LEVEL = {"paths", "removal", "frequency_bands"}
 ALLOWED_PATHS = {"bids_root", "output_root", "diagnosis_dir", "removal_dir"}
 ALLOWED_REMOVAL = {"estimation_window_s", "frequency_range_hz"}
 

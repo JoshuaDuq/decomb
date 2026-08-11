@@ -32,6 +32,28 @@ def _comb_spectrum(
     return frequencies_hz, spectrum_db
 
 
+def _add_hann_line(
+    frequencies_hz: np.ndarray,
+    background_db: np.ndarray,
+    *,
+    position_hz: float,
+    contrast_db: float,
+) -> np.ndarray:
+    """Add one sinusoidal Hann response in linear power."""
+    bin_width_hz = float(frequencies_hz[1] - frequencies_hz[0])
+    bin_offset = (frequencies_hz - position_hz) / bin_width_hz
+    hann_amplitude = (
+        0.5 * np.sinc(bin_offset)
+        + 0.25 * np.sinc(bin_offset - 1.0)
+        + 0.25 * np.sinc(bin_offset + 1.0)
+    )
+    hann_power = (hann_amplitude / 0.5) ** 2
+    background_power = 10.0 ** (background_db / 10.0)
+    local_background = np.interp(position_hz, frequencies_hz, background_power)
+    line_power = local_background * (10.0 ** (contrast_db / 10.0) - 1.0)
+    return spectral.to_db(background_power + line_power * hann_power)
+
+
 def test_model_selection_recovers_the_comb_without_a_nominal_frequency():
     frequencies_hz, spectrum_db = _comb_spectrum()
 
@@ -124,16 +146,23 @@ def test_window_localization_never_drops_an_authorized_harmonic():
 def test_stable_off_comb_line_is_selected_without_a_prominence_threshold():
     frequencies_hz, spectrum_db = _comb_spectrum()
     isolated_hz = 42.35
-    isolated_index = int(np.argmin(np.abs(frequencies_hz - isolated_hz)))
     windows = []
     for seed in range(12):
-        window = spectrum_db + np.random.default_rng(seed).normal(
+        background_db = spectrum_db + np.random.default_rng(seed).normal(
             scale=0.1,
             size=spectrum_db.size,
         )
-        window[isolated_index] += 10.0
-        windows.append(window)
-    whole = np.mean(windows, axis=0)
+        windows.append(
+            _add_hann_line(
+                frequencies_hz,
+                background_db,
+                position_hz=isolated_hz,
+                contrast_db=10.0,
+            )
+        )
+    whole = spectral.to_db(
+        np.mean(10.0 ** (np.asarray(windows) / 10.0), axis=0)
+    )
     comb = harmonics.estimate_comb(
         frequencies_hz,
         whole,
@@ -153,19 +182,107 @@ def test_stable_off_comb_line_is_selected_without_a_prominence_threshold():
     assert all(value < 0.0 for value in isolated.evidence_bic)
 
 
+def test_drifting_off_comb_line_is_selected_and_its_trajectory_is_localized():
+    frequencies_hz, background_db = _comb_spectrum()
+    line_positions_hz = np.linspace(42.30, 42.37, 12)
+    windows = [
+        _add_hann_line(
+            frequencies_hz,
+            background_db,
+            position_hz=position_hz,
+            contrast_db=18.0,
+        )
+        for position_hz in line_positions_hz
+    ]
+    whole_power = np.mean(10.0 ** (np.asarray(windows) / 10.0), axis=0)
+    whole_db = spectral.to_db(whole_power)
+    comb = harmonics.estimate_comb(
+        frequencies_hz,
+        whole_db,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
+    )
+
+    isolated = harmonics.detect_isolated_lines(
+        frequencies_hz,
+        whole_db,
+        windows,
+        comb=comb,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
+        independent_window_indices=tuple(range(0, len(windows), 2)),
+    )
+
+    assert any(abs(position_hz - 42.335) < 0.04 for position_hz in isolated.positions_hz)
+    line_index = int(np.argmin(np.abs(np.asarray(isolated.positions_hz) - 42.335)))
+    trajectory_hz = np.asarray(isolated.window_positions_hz)[:, line_index]
+    assert isolated.positions_hz[line_index] == pytest.approx(42.335, abs=0.04)
+    assert trajectory_hz[0] == pytest.approx(line_positions_hz[0], abs=0.02)
+    assert trajectory_hz[-1] == pytest.approx(line_positions_hz[-1], abs=0.02)
+
+
+def test_irregular_line_trajectory_is_not_split_at_a_shallow_spectral_valley():
+    frequencies_hz, background_db = _comb_spectrum()
+    line_positions_hz = np.array(
+        [42.35, 42.31, 42.37, 42.33, 42.39, 42.32, 42.36, 42.30, 42.38, 42.34, 42.37, 42.31]
+    )
+    windows = []
+    for seed, position_hz in enumerate(line_positions_hz):
+        noisy_background_db = background_db + np.random.default_rng(seed).normal(
+            scale=0.1,
+            size=background_db.size,
+        )
+        windows.append(
+            _add_hann_line(
+                frequencies_hz,
+                noisy_background_db,
+                position_hz=position_hz,
+                contrast_db=18.0,
+            )
+        )
+    whole_db = spectral.to_db(
+        np.mean(10.0 ** (np.asarray(windows) / 10.0), axis=0)
+    )
+    comb = harmonics.estimate_comb(
+        frequencies_hz,
+        whole_db,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
+    )
+
+    isolated = harmonics.detect_isolated_lines(
+        frequencies_hz,
+        whole_db,
+        windows,
+        comb=comb,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
+        independent_window_indices=tuple(range(0, len(windows), 2)),
+    )
+
+    assert any(abs(position_hz - 42.35) < 0.08 for position_hz in isolated.positions_hz)
+    line_index = int(np.argmin(np.abs(np.asarray(isolated.positions_hz) - 42.35)))
+    trajectory_hz = np.asarray(isolated.window_positions_hz)[:, line_index]
+    assert np.min(trajectory_hz) == pytest.approx(np.min(line_positions_hz), abs=0.02)
+    assert np.max(trajectory_hz) == pytest.approx(np.max(line_positions_hz), abs=0.02)
+
+
 def test_isolated_lines_outside_configured_frequency_range_are_ignored():
     frequencies_hz, spectrum_db = _comb_spectrum()
     isolated_hz = 42.35
-    isolated_index = int(np.argmin(np.abs(frequencies_hz - isolated_hz)))
     windows = []
     for seed in range(12):
-        window = spectrum_db + np.random.default_rng(seed).normal(
+        background_db = spectrum_db + np.random.default_rng(seed).normal(
             scale=0.1,
             size=spectrum_db.size,
         )
-        window[isolated_index] += 10.0
-        windows.append(window)
-    whole = np.mean(windows, axis=0)
+        windows.append(
+            _add_hann_line(
+                frequencies_hz,
+                background_db,
+                position_hz=isolated_hz,
+                contrast_db=10.0,
+            )
+        )
+    whole = spectral.to_db(
+        np.mean(10.0 ** (np.asarray(windows) / 10.0), axis=0)
+    )
     comb = harmonics.estimate_comb(
         frequencies_hz,
         whole,
@@ -214,6 +331,32 @@ def test_broad_stable_spectral_peak_is_not_an_isolated_line():
         independent_window_indices=tuple(range(0, len(windows), 2)),
     )
 
-    assert not any(
-        abs(position - broad_peak_hz) < 0.1 for position in isolated.positions_hz
+    assert not any(8.0 <= position <= 12.0 for position in isolated.positions_hz)
+
+
+def test_isolated_line_search_handles_a_peak_at_the_upper_analysis_edge():
+    frequencies_hz, spectrum_db = _comb_spectrum()
+    edge_peak_db = 8.0 * np.exp(-0.5 * ((frequencies_hz - 100.0) / 0.03) ** 2)
+    windows = [
+        spectrum_db
+        + edge_peak_db
+        + np.random.default_rng(seed).normal(scale=0.03, size=spectrum_db.size)
+        for seed in range(12)
+    ]
+    whole = np.mean(windows, axis=0)
+    comb = harmonics.estimate_comb(
+        frequencies_hz,
+        whole,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
     )
+
+    isolated = harmonics.detect_isolated_lines(
+        frequencies_hz,
+        whole,
+        windows,
+        comb=comb,
+        spectral_resolution_hz=spectral.hann_resolution_hz(54.0),
+        independent_window_indices=tuple(range(0, len(windows), 2)),
+    )
+
+    assert all(position_hz <= 100.0 for position_hz in isolated.positions_hz)

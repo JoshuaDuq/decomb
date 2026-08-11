@@ -171,6 +171,27 @@ def test_source_dataset_url_is_relative_to_the_published_derivative(tmp_path):
     )
 
 
+def test_adjacent_residual_excludes_every_notch_and_its_contrast_shoulders():
+    frequencies_hz = np.arange(0.0, 10.1, 0.1)
+    spectrum_db = np.zeros(frequencies_hz.size)
+    spectrum_db[np.argmin(np.abs(frequencies_hz - 4.6))] = 5.0
+    spectrum_db[np.argmin(np.abs(frequencies_hz - 5.3))] = 8.0
+    spectrum_db[np.argmin(np.abs(frequencies_hz - 5.5))] = 10.0
+    stopband = notch.HarmonicStopband((5,), 4.95, 5.05)
+
+    peak_hz, contrast_db = notch._adjacent_residual_peak(
+        frequencies_hz,
+        spectrum_db,
+        stopband,
+        unavailable_edges=((4.9, 5.1), (5.45, 5.65)),
+        search_hz=1.0,
+        spectral_resolution_hz=0.2,
+    )
+
+    assert peak_hz == pytest.approx(4.6)
+    assert contrast_db == pytest.approx(5.0)
+
+
 def test_derivative_description_records_computed_source_and_derived_method(tmp_path):
     staging = tmp_path / ".staging"
     staging.mkdir()

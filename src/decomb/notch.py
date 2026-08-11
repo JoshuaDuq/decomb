@@ -148,7 +148,7 @@ class HarmonicNotchPlan:
         )
 
 
-def _observed_harmonic_intervals(model, settings) -> list[HarmonicStopband]:
+def observed_line_intervals(model, settings) -> list[HarmonicStopband]:
     """Intervals supported by the whole run and localized in its adaptive windows."""
     whole_positions = dict(
         zip(
@@ -219,7 +219,7 @@ def plan_harmonic_stopbands(model, settings) -> HarmonicNotchPlan:
     """Build the narrowest plan justified by measured harmonic positions."""
     transition_bandwidth_hz = settings.transition_bandwidth_hz
     stopbands = _merge_stopbands(
-        _observed_harmonic_intervals(model, settings),
+        observed_line_intervals(model, settings),
         minimum_gap_hz=transition_bandwidth_hz,
     )
     return HarmonicNotchPlan(stopbands, transition_bandwidth_hz)
@@ -667,7 +667,7 @@ def _adjacent_residual_peak(
     frequencies_hz: np.ndarray,
     spectrum_db: np.ndarray,
     stopband: HarmonicStopband,
-    unavailable: tuple[float, float],
+    unavailable_edges: Sequence[tuple[float, float]],
     search_hz: float,
     spectral_resolution_hz: float,
 ) -> tuple[float, float]:
@@ -675,7 +675,12 @@ def _adjacent_residual_peak(
     search = (frequencies_hz >= stopband.low_hz - search_hz) & (
         frequencies_hz <= stopband.high_hz + search_hz
     )
-    available = (frequencies_hz < unavailable[0]) | (frequencies_hz > unavailable[1])
+    unavailable = np.zeros(frequencies_hz.shape, dtype=bool)
+    for low_hz, high_hz in unavailable_edges:
+        if not np.all(np.isfinite((low_hz, high_hz))) or high_hz <= low_hz:
+            raise ValueError("Unavailable intervals must be finite and increasing.")
+        unavailable |= (frequencies_hz >= low_hz) & (frequencies_hz <= high_hz)
+    available = ~unavailable
     candidate_indices = np.flatnonzero(search & available)
     offset_bins = int(
         np.ceil(spectral_resolution_hz / (frequencies_hz[1] - frequencies_hz[0]))
@@ -684,6 +689,11 @@ def _adjacent_residual_peak(
         candidate_indices < frequencies_hz.size - offset_bins
     )
     candidate_indices = candidate_indices[valid]
+    shoulders_available = (
+        ~unavailable[candidate_indices - offset_bins]
+        & ~unavailable[candidate_indices + offset_bins]
+    )
+    candidate_indices = candidate_indices[shoulders_available]
     candidates = (
         spectrum_db[candidate_indices]
         - 0.5
@@ -722,17 +732,18 @@ def verify_harmonic_run(
         raise ValueError("Source and cleaned prominence spectra use different grids.")
 
     fundamental_hz = float(manifest_rows[0]["fundamental_hz"])
+    unavailable_edges = plan.unavailable_edges()
     rows = []
     for stopband, unavailable, change_db in zip(
         plan.stopbands,
-        plan.unavailable_edges(),
+        unavailable_edges,
         changes_db,
     ):
         original_peak_hz, original_peak_db = _adjacent_residual_peak(
             original_frequencies_hz,
             original_spectrum_db,
             stopband,
-            unavailable,
+            unavailable_edges,
             fundamental_hz / 2.0,
             settings.spectral_resolution_hz,
         )
@@ -740,7 +751,7 @@ def verify_harmonic_run(
             cleaned_frequencies_hz,
             cleaned_spectrum_db,
             stopband,
-            unavailable,
+            unavailable_edges,
             fundamental_hz / 2.0,
             settings.spectral_resolution_hz,
         )

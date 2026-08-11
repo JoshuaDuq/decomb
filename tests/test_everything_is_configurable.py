@@ -81,3 +81,11 @@ def test_removed_threshold_sections_fail_during_config_loading(tmp_path):
 
     with pytest.raises(ValueError, match="Unknown config section"):
         load_config(path)
+
+
+def test_removed_simulation_section_fails_during_config_loading(tmp_path):
+    path = tmp_path / "decomb.yaml"
+    path.write_text("simulation:\n  duration_s: 120\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unknown config section"):
+        load_config(path)
