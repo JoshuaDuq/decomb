@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "decomb"
 version = "0.1.0"
-description = "Audited removal of narrowband line and comb artifacts from continuous EEG"
+description = "Audited removal of statistically supported sinusoidal artifacts from EEG"
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
@@ -13,7 +13,6 @@ requires-python = ">=3.11"
 authors = [{ name = "Joshua Duquette" }]
 keywords = ["eeg", "bids", "mne", "line noise", "harmonics", "artifact removal"]
 dependencies = [
-    "joblib>=1.3",
     "matplotlib>=3.8",
     "mne>=1.6",
     "mne-bids>=0.14",
@@ -56,8 +55,3 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-# zip(..., strict=True) is the better default, but turning it on across the numerical
-# code would convert a silently-truncating length mismatch into a mid-run exception on
-# a user's data. That is a behaviour change, and it belongs in a change that can be
-# validated against real recordings rather than in a lint sweep.
-ignore = ["B905"]

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from decomb import harmonics, notch
+from decomb import lines, notch
 from decomb.spectral import to_db
 
 MNE_DEFAULT_NOTCH_WIDTH_DIVISOR = 200.0
@@ -56,7 +56,7 @@ class MneFirGeometryAblation:
 
 
 def mne_default_parameter_stopbands(
-    model: harmonics.AdaptiveCombModel,
+    model: lines.ChannelArtifactModel,
     settings,
 ) -> tuple[notch.HarmonicStopband, ...]:
     """Construct unmerged stopbands from MNE's default width parameter."""
@@ -71,7 +71,7 @@ def mne_default_parameter_stopbands(
 
 
 def merged_mne_default_plan(
-    model: harmonics.AdaptiveCombModel,
+    model: lines.ChannelArtifactModel,
     settings,
 ) -> notch.HarmonicNotchPlan:
     """Make MNE's default parameters valid by explicitly merging overlaps."""
@@ -100,12 +100,9 @@ def _mne_default_parameter_stopband(
 
 
 def apply_literal_mne_defaults(raw, model, settings):
-    """Apply MNE defaults literally and let invalid dense geometries raise."""
-    import mne
-
-    picks = mne.pick_types(raw.info, eeg=True, exclude=())
-    if len(picks) == 0:
-        raise ValueError("MNE FIR geometry ablation requires at least one EEG channel.")
+    """Apply MNE defaults to the modeled channel and surface invalid geometry."""
+    if model.channel_name not in raw.ch_names:
+        raise ValueError(f"Recording does not contain EEG channel {model.channel_name!r}.")
     centres_hz = np.array(
         [
             stopband.centre_hz
@@ -115,7 +112,7 @@ def apply_literal_mne_defaults(raw, model, settings):
     )
     return raw.copy().notch_filter(
         freqs=centres_hz,
-        picks=picks,
+        picks=[model.channel_name],
         verbose="ERROR",
     )
 
@@ -137,11 +134,23 @@ def unavailable_width_hz(
 def measure_mne_fir_geometry_ablation(
     raw,
     settings,
+    *,
+    channel_name: str,
 ) -> MneFirGeometryAblation:
-    """Measure two MNE FIR geometries on one recording and one frequency grid."""
+    """Measure two FIR geometries on one explicitly selected affected channel."""
     from decomb import psd
 
-    model = notch.fit_harmonic_model(raw, settings)
+    recording_model = notch.fit_harmonic_model(raw, settings)
+    matching = tuple(
+        channel
+        for channel in recording_model.channels
+        if channel.channel_name == channel_name
+    )
+    if len(matching) != 1:
+        raise ValueError(
+            f"Channel {channel_name!r} does not have a statistically supported line."
+        )
+    model = matching[0]
     decomb_plan = notch.plan_harmonic_stopbands(model, settings)
     merged_default_plan = merged_mne_default_plan(model, settings)
     sampling_frequency_hz = float(raw.info["sfreq"])
@@ -153,23 +162,32 @@ def measure_mne_fir_geometry_ablation(
         sampling_frequency_hz,
         merged_default_plan,
     )
-    decomb_raw = notch.apply_harmonic_notches(raw, decomb_plan)
-    merged_mne_default_raw = notch.apply_harmonic_notches(
+    decomb_raw = notch.apply_channel_notches(
         raw,
-        merged_default_plan,
+        (notch.ChannelNotchPlan(channel_name, decomb_plan),),
+    )
+    merged_mne_default_raw = notch.apply_channel_notches(
+        raw,
+        (notch.ChannelNotchPlan(channel_name, merged_default_plan),),
     )
     psd_settings = psd.PsdSettings(
         window_s=settings.estimation_window_s,
         band_hz=settings.frequency_range_hz,
     )
 
-    frequencies_hz, source_psd = psd.channel_median_psd(raw, psd_settings)
+    source_channel = raw.copy().pick([channel_name])
+    decomb_channel = decomb_raw.copy().pick([channel_name])
+    default_channel = merged_mne_default_raw.copy().pick([channel_name])
+    frequencies_hz, source_psd = psd.channel_median_psd(
+        source_channel,
+        psd_settings,
+    )
     decomb_frequencies_hz, decomb_psd = psd.channel_median_psd(
-        decomb_raw,
+        decomb_channel,
         psd_settings,
     )
     merged_mne_default_frequencies_hz, merged_mne_default_psd = psd.channel_median_psd(
-        merged_mne_default_raw,
+        default_channel,
         psd_settings,
     )
     if not np.array_equal(frequencies_hz, decomb_frequencies_hz) or not np.array_equal(
@@ -336,7 +354,10 @@ def _window_geometry(
         return spans, "nothing removed here"
 
     widths_hz = [upper_hz - lower_hz for lower_hz, upper_hz in spans]
-    gaps_hz = [later[0] - earlier[1] for earlier, later in zip(spans, spans[1:])]
+    gaps_hz = [
+        later[0] - earlier[1]
+        for earlier, later in zip(spans[:-1], spans[1:], strict=True)
+    ]
     description = (
         f"{len(spans)} unavailable interval{'s' if len(spans) > 1 else ''} of "
     )
@@ -421,9 +442,6 @@ def figure_mne_fir_geometry_ablation(
     # so overplotting the three arms would hide two of them.  Small multiples of one
     # curve turn the comparison into what it actually is: how much of it is left.
     rows = (
-        # Named for what it is rather than "before correction": this recording already
-        # carries a comb of narrowband nulls at 0.9 s harmonics from upstream processing,
-        # so calling it uncorrected invites the reader to read those nulls as decomb's.
         (
             source_db,
             np.ones(frequencies_hz.size, bool),

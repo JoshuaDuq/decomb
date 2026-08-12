@@ -31,6 +31,8 @@ BRAINVISION_UNIT_FACTORS = {
     "N": 1.0,
 }
 
+ACQUISITION_BOUNDARY_ANNOTATIONS = ("edge", "bad_acq_skip")
+
 
 @dataclass(frozen=True)
 class BrainVisionChannelScaling:
@@ -38,19 +40,6 @@ class BrainVisionChannelScaling:
 
     channel_names: tuple[str, ...]
     calibrations: tuple[float, ...]
-
-
-@dataclass(frozen=True)
-class SessionRunSpectra:
-    """Whole-recording and overlapping-window evidence on one frequency grid."""
-
-    whole: tuple[np.ndarray, np.ndarray]
-    windows: tuple[tuple[np.ndarray, np.ndarray], ...]
-    bounds: tuple[tuple[int, int], ...]
-
-    def __post_init__(self) -> None:
-        if not self.windows or len(self.windows) != len(self.bounds):
-            raise ValueError("Every non-empty spectrum window requires one sample bound.")
 
 
 def read_bids_raw(vhdr_path: Path):
@@ -139,91 +128,87 @@ def overlapping_window_bounds(
     return tuple((start, start + window_samples) for start in starts)
 
 
-def non_overlapping_window_indices(
-    bounds: tuple[tuple[int, int], ...],
-) -> tuple[int, ...]:
-    """Greedily select independent windows, including no shifted overlapping tail."""
-    selected = []
-    previous_stop = -1
-    for index, (start, stop) in enumerate(bounds):
-        if stop <= start:
-            raise ValueError("Estimation-window bounds must be increasing.")
-        if start >= previous_stop:
-            selected.append(index)
-            previous_stop = stop
-    if len(selected) < 2:
-        raise ValueError("Line detection requires at least two non-overlapping windows.")
-    return tuple(selected)
+def acquisition_segments(raw) -> tuple[tuple[int, int], ...]:
+    """Return sample spans MNE filters as separate continuous acquisitions."""
+    valid_samples = np.ones(raw.n_times, dtype=bool)
+    split_samples: list[int] = []
+    prefixes = tuple(value.casefold() for value in ACQUISITION_BOUNDARY_ANNOTATIONS)
+    for onset_s, duration_s, description in zip(
+        raw.annotations.onset,
+        raw.annotations.duration,
+        raw.annotations.description,
+        strict=True,
+    ):
+        if not str(description).casefold().startswith(prefixes):
+            continue
+        relative_onset_s = float(onset_s) - float(raw.first_time)
+        start, stop = raw.time_as_index(
+            [relative_onset_s, relative_onset_s + float(duration_s)],
+            use_rounding=True,
+        )
+        start = int(np.clip(start, 0, raw.n_times))
+        stop = int(np.clip(stop, 0, raw.n_times))
+        if start == stop:
+            split_samples.append(start)
+        else:
+            valid_samples[start:stop] = False
+
+    padded = np.concatenate(([False], valid_samples, [False])).astype(np.int8)
+    changes = np.diff(padded)
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    segments = []
+    for start, stop in zip(starts, stops, strict=True):
+        boundaries = [
+            int(sample)
+            for sample in sorted(set(split_samples))
+            if start < sample < stop
+        ]
+        segment_starts = [int(start), *boundaries]
+        segment_stops = [*boundaries, int(stop)]
+        segments.extend(zip(segment_starts, segment_stops, strict=True))
+    return tuple(segments)
 
 
-def session_run_spectra(raw, settings) -> SessionRunSpectra:
-    """Measure channel-median Hann spectra for one run and its overlapping windows."""
-    import mne
-
-    picks = mne.pick_types(raw.info, eeg=True, exclude=())
-    if len(picks) == 0:
-        raise ValueError("Spectral estimation requires at least one EEG channel.")
-    sampling_frequency_hz = float(raw.info["sfreq"])
-    window_samples = estimation_window_samples(
-        sampling_frequency_hz,
-        settings.estimation_window_s,
-    )
-    data = raw.get_data(picks=picks)
-    if not np.all(np.isfinite(data)):
-        raise ValueError("EEG data must contain only finite values.")
-    bounds = overlapping_window_bounds(
-        n_times=data.shape[-1],
-        window_samples=window_samples,
-        overlap=settings.estimation_overlap,
-    )
-    windows = np.stack([data[:, start:stop] for start, stop in bounds], axis=1)
-    frequencies_hz, power = spectral.hann_periodogram(
-        windows,
-        sampling_frequency_hz,
-    )
-    whole_db = spectral.to_db(np.median(power.mean(axis=1), axis=0))
-    whole = (frequencies_hz, whole_db)
-    window_spectra = tuple(
-        (frequencies_hz, spectral.to_db(np.median(window_power, axis=0)))
-        for window_power in np.moveaxis(power, 1, 0)
-    )
-    return SessionRunSpectra(whole, window_spectra, bounds)
-
-
-def run_spectrum(raw, settings) -> tuple[np.ndarray, np.ndarray]:
-    """Return the whole-recording spectrum used by the harmonic estimator."""
-    return session_run_spectra(raw, settings).whole
+def valid_window_bounds(
+    raw,
+    *,
+    window_s: float,
+    overlap: float,
+) -> tuple[tuple[int, int], ...]:
+    """Place fixed windows wholly within MNE's continuous acquisition spans."""
+    window_samples = estimation_window_samples(float(raw.info["sfreq"]), window_s)
+    bounds = []
+    for segment_start, segment_stop in acquisition_segments(raw):
+        segment_samples = segment_stop - segment_start
+        if segment_samples < window_samples:
+            continue
+        bounds.extend(
+            (segment_start + start, segment_start + stop)
+            for start, stop in overlapping_window_bounds(
+                n_times=segment_samples,
+                window_samples=window_samples,
+                overlap=overlap,
+            )
+        )
+    if not bounds:
+        raise ValueError(
+            "No continuous acquisition span contains one complete "
+            f"{window_s:g} s estimation window."
+        )
+    return tuple(bounds)
 
 
 def psd(raw, picks, settings) -> tuple[np.ndarray, np.ndarray]:
     """Mean Hann power across complete estimation windows."""
-    return psd_array(
-        raw.get_data(picks=picks),
-        float(raw.info["sfreq"]),
-        settings.estimation_window_s,
+    sampling_frequency_hz = float(raw.info["sfreq"])
+    bounds = valid_window_bounds(
+        raw,
+        window_s=settings.estimation_window_s,
+        overlap=settings.estimation_overlap,
     )
-
-
-def psd_array(
-    data: np.ndarray,
-    sampling_frequency_hz: float,
-    window_s: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Mean per-channel Hann power on the correction's estimation grid."""
-    values = np.asarray(data, dtype=float)
-    if values.ndim != 2 or values.shape[0] < 1:
-        raise ValueError("PSD data must be a non-empty channel-by-time array.")
-    if not np.all(np.isfinite(values)):
-        raise ValueError("PSD data must contain only finite values.")
-    block_samples = estimation_window_samples(sampling_frequency_hz, window_s)
-    block_count = values.shape[-1] // block_samples
-    if block_count < 1:
-        raise ValueError("PSD data do not contain one complete estimation window.")
-    blocks = values[..., : block_count * block_samples].reshape(
-        values.shape[0],
-        block_count,
-        block_samples,
-    )
+    values = raw.get_data(picks=picks)
+    blocks = np.stack([values[:, start:stop] for start, stop in bounds], axis=1)
     frequencies_hz, power = spectral.hann_periodogram(
         blocks,
         sampling_frequency_hz,

@@ -39,7 +39,12 @@ class TestSettings:
 
     @pytest.mark.parametrize(
         "kwargs",
-        [{"window_s": 0.0}, {"window_s": -1.0}],
+        [
+            {"window_s": 0.0},
+            {"window_s": -1.0},
+            {"band_hz": (-1.0, 80.0)},
+            {"band_hz": (80.0, 20.0)},
+        ],
     )
     def test_an_impossible_setting_is_refused(self, kwargs):
         with pytest.raises(ValueError):
@@ -109,6 +114,45 @@ class TestSpectrum:
         freqs, _ = psd.channel_median_psd(raw, _settings(window_s=20.0))
 
         assert freqs.min() >= 0.0 and freqs.max() <= 100.0
+
+    def test_requested_band_above_100_hz_is_limited_only_by_nyquist(self):
+        raw, _ = _raw(sfreq=500.0)
+
+        freqs, _ = psd.channel_median_psd(
+            raw,
+            _settings(window_s=20.0, band_hz=(0.0, 180.0)),
+        )
+
+        assert freqs.max() == pytest.approx(180.0)
+
+    def test_acquisition_skip_samples_do_not_enter_the_psd(self):
+        import mne
+
+        sampling_frequency_hz = 250.0
+        times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
+        clean = np.random.default_rng(8).normal(scale=1e-6, size=(2, times_s.size))
+        contaminated = clean.copy()
+        skipped = (times_s >= 40.0) & (times_s < 80.0)
+        contaminated[:, skipped] += 1e-2 * np.sin(
+            2.0 * np.pi * 30.0 * times_s[skipped]
+        )
+        info = mne.create_info(["C3", "C4"], sampling_frequency_hz, "eeg")
+        clean_raw = mne.io.RawArray(clean, info, verbose="ERROR")
+        contaminated_raw = mne.io.RawArray(contaminated, info, verbose="ERROR")
+        annotation = mne.Annotations([40.0], [40.0], ["BAD_ACQ_SKIP"])
+        clean_raw.set_annotations(annotation)
+        contaminated_raw.set_annotations(annotation)
+
+        _, clean_psd = psd.channel_median_psd(
+            clean_raw,
+            _settings(window_s=20.0),
+        )
+        _, contaminated_psd = psd.channel_median_psd(
+            contaminated_raw,
+            _settings(window_s=20.0),
+        )
+
+        assert np.array_equal(contaminated_psd, clean_psd)
 
 
 def _bids(root: Path, *, line_amplitude: float) -> Path:

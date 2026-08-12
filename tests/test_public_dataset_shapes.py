@@ -117,9 +117,50 @@ def test_desc_brainvision_derivative_is_readable_by_mne_bids(tmp_path):
     )
 
 
-def test_independent_windows_never_overlap_after_tail_alignment():
-    bounds = ((0, 10), (5, 15), (10, 20), (13, 23), (20, 30))
+def test_estimation_windows_do_not_cross_acquisition_boundaries():
+    import mne
 
-    indices = recordings.non_overlapping_window_indices(bounds)
+    sampling_frequency_hz = 100.0
+    raw = mne.io.RawArray(
+        np.zeros((1, int(180.0 * sampling_frequency_hz))),
+        mne.create_info(["Cz"], sampling_frequency_hz, "eeg"),
+        verbose="ERROR",
+    )
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[50.0, 120.0],
+            duration=[30.0, 0.0],
+            description=["BAD_ACQ_SKIP", "EDGE boundary"],
+        )
+    )
 
-    assert indices == (0, 2, 4)
+    bounds = recordings.valid_window_bounds(raw, window_s=20.0, overlap=0.5)
+
+    excluded = (5_000, 8_000)
+    split = 12_000
+    assert bounds
+    assert all(stop <= excluded[0] or start >= excluded[1] for start, stop in bounds)
+    assert all(not (start < split < stop) for start, stop in bounds)
+
+
+def test_boundary_prefixes_match_mne_case_insensitively():
+    import mne
+
+    raw = mne.io.RawArray(
+        np.zeros((1, 1_000)),
+        mne.create_info(["Cz"], 100.0, "eeg"),
+        verbose="ERROR",
+    )
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[2.0, 6.0],
+            duration=[1.0, 0.0],
+            description=["bad_acq_skip pump", "Edge"],
+        )
+    )
+
+    assert recordings.acquisition_segments(raw) == (
+        (0, 200),
+        (300, 600),
+        (600, 1_000),
+    )

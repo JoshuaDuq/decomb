@@ -35,7 +35,11 @@ LOCAL_CONFIG_NAME = "decomb.yaml"
 REFERENCEABLE = ("bids_root", "output_root")
 ALLOWED_TOP_LEVEL = {"paths", "removal", "frequency_bands"}
 ALLOWED_PATHS = {"bids_root", "output_root", "diagnosis_dir", "removal_dir"}
-ALLOWED_REMOVAL = {"estimation_window_s", "frequency_range_hz"}
+ALLOWED_REMOVAL = {
+    "estimation_window_s",
+    "familywise_error_rate",
+    "frequency_range_hz",
+}
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

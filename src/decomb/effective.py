@@ -30,10 +30,6 @@ DERIVED: tuple[tuple[str, str], ...] = (
         "removal.per_edge_transition_bandwidth_hz",
         "transition_bandwidth_hz / 2; MNE FIR length uses this width",
     ),
-    (
-        "removal.minimum_stopband_width_hz",
-        "Hann half-power spectral_resolution_hz",
-    ),
     ("removal.frequency_bin_width_hz", "1 / estimation_window_s"),
 )
 

@@ -18,8 +18,13 @@ removal:
   # validated 54 s method default requires no per-dataset tuning.
   estimation_window_s: 54.0
 
-  # Study span eligible for detection and removal. The upper edge cannot exceed 100 Hz
-  # and is also clipped to the recording's Nyquist limit.
+  # Per-EEG-channel probability of authorizing any false sinusoidal component. Holm
+  # correction covers every estimation window and eligible Fourier frequency in that
+  # channel. Channels are separate inferential and filtering units.
+  familywise_error_rate: 0.05
+
+  # Study span eligible for detection and removal. Each recording clips the upper edge
+  # to frequencies strictly below its Nyquist limit.
   frequency_range_hz: [0.0, 100.0]
 
 # Optional study definitions used only to report unavailable bandwidth. They never decide

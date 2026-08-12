@@ -3,7 +3,7 @@
     decomb psd
 
 Answers the question a reader asks first: what did this actually take out? Three figures
-from Welch spectra computed by ``Raw.compute_psd`` on the source and harmonic-notch
+from Welch spectra computed with MNE on the source and line-notch
 derivative: an overview, readable frequency tiles, and one panel per recording.
 
 The tiled figure exists because the overview cannot answer the second question. Drawing
@@ -54,9 +54,12 @@ class PsdSettings:
     def __post_init__(self) -> None:
         if not np.isfinite(self.window_s) or self.window_s <= 0.0:
             raise ValueError("window_s must be finite and positive.")
-        low_hz, high_hz = self.band_hz
-        if not 0.0 <= low_hz < high_hz <= 100.0:
-            raise ValueError("band_hz must increase inside [0, 100] Hz.")
+        values = np.asarray(self.band_hz, dtype=float)
+        if values.shape != (2,) or not np.all(np.isfinite(values)):
+            raise ValueError("band_hz must contain two finite values.")
+        low_hz, high_hz = values
+        if not 0.0 <= low_hz < high_hz:
+            raise ValueError("band_hz must contain increasing non-negative values.")
 
     @property
     def overlap(self) -> float:
@@ -78,7 +81,7 @@ class PsdSettings:
 
 
 def channel_median_psd(raw, settings: PsdSettings) -> tuple[np.ndarray, np.ndarray]:
-    """Welch PSD of the EEG channels, and their median, via ``Raw.compute_psd``.
+    """Welch PSD of the EEG channels via MNE, followed by their median.
 
     EEG only: ECG and EOG carry different units and amplitudes, and averaging them in would
     put a millivolt trace on the same axis as a microvolt one.
@@ -94,18 +97,29 @@ def channel_median_psd(raw, settings: PsdSettings) -> tuple[np.ndarray, np.ndarr
             f"{settings.window_s:g} s Welch segment. Lower "
             "`removal.estimation_window_s`."
         )
-    spectrum = raw.compute_psd(
-        method="welch",
-        picks="eeg",
+    import mne
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude=())
+    if len(picks) == 0:
+        raise ValueError("PSD estimation requires at least one EEG channel.")
+    bounds = recordings.valid_window_bounds(
+        raw,
+        window_s=settings.window_s,
+        overlap=settings.overlap,
+    )
+    data = raw.get_data(picks=picks)
+    windows = np.stack([data[:, start:stop] for start, stop in bounds], axis=0)
+    spectra, freqs = mne.time_frequency.psd_array_welch(
+        windows,
+        sfreq=sampling_frequency_hz,
         fmin=settings.band_hz[0],
         fmax=min(settings.band_hz[1], np.nextafter(sampling_frequency_hz / 2.0, 0.0)),
         n_fft=n_fft,
-        n_overlap=int(round(n_fft * settings.overlap)),
+        n_overlap=0,
         n_per_seg=n_fft,
         verbose="ERROR",
     )
-    psd, freqs = spectrum.get_data(return_freqs=True)
-    return freqs, np.median(psd, axis=0)
+    return freqs, np.median(spectra.mean(axis=0), axis=0)
 
 
 def compare_recording(
@@ -229,7 +243,7 @@ ARM_STYLE = {
     # which matters wherever the source spectrum already carried structure this pass never
     # aimed at, such as the periodic residue of an upstream gradient correction.
     "source": ("#F3A28E", "before correction", 2.2),
-    "harmonic-notched": ("#111827", "after automatic line notches", 0.7),
+    "line-notched": ("#111827", "after automatic line notches", 0.7),
 }
 DEFAULT_STYLE = ("#6B7280", "", 0.7)
 
@@ -353,7 +367,7 @@ def run(args: argparse.Namespace) -> None:
 
     candidates = [
         (
-            "harmonic-notched",
+            "line-notched",
             config.path("output_root", override=getattr(args, "output_root", None)),
         )
     ]

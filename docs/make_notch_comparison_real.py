@@ -14,6 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--subject", required=True, help="BIDS subject label, including sub-")
+    parser.add_argument("--channel", required=True, help="affected EEG channel to compare")
     parser.add_argument(
         "--recording-index",
         type=int,
@@ -48,9 +49,13 @@ def main() -> None:
 
     source_vhdr = runs[args.recording_index - 1]
     raw = recordings.read_bids_raw(source_vhdr)
-    measured = comparison.measure_mne_fir_geometry_ablation(raw, settings)
+    measured = comparison.measure_mne_fir_geometry_ablation(
+        raw,
+        settings,
+        channel_name=args.channel,
+    )
     duration_minutes = measured.duration_s / 60.0
-    description = f"{source_vhdr.stem} ({duration_minutes:.1f} min)"
+    description = f"{source_vhdr.stem}, {args.channel} ({duration_minutes:.1f} min)"
     comparison.figure_mne_fir_geometry_ablation(
         measured,
         args.output,
@@ -68,6 +73,7 @@ def main() -> None:
     )
     print("experiment: MNE FIR geometry ablation")
     print(f"recording: {source_vhdr}")
+    print(f"channel: {args.channel}")
     print(f"decomb unavailable: {decomb_width_hz:.3f} Hz")
     print(f"decomb FIR duration: {measured.decomb_filter.length_s:.3f} s")
     print("reference: MNE default parameters, overlap-merged by decomb")

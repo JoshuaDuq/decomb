@@ -1,0 +1,342 @@
+"""Multiplicity-controlled Thomson multitaper line detection."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from decomb import lines
+
+
+def _windows(*, line_hz: float | None, seed: int = 0) -> tuple[np.ndarray, float]:
+    sampling_frequency_hz = 200.0
+    sample_count = int(4.0 * sampling_frequency_hz)
+    times_s = np.arange(sample_count) / sampling_frequency_hz
+    data = np.random.default_rng(seed).normal(
+        scale=1.0,
+        size=(3, 2, sample_count),
+    )
+    if line_hz is not None:
+        data += 8.0 * np.sin(2.0 * np.pi * line_hz * times_s)
+    return data, sampling_frequency_hz
+
+
+def test_channel_holm_test_detects_an_isolated_line():
+    data, sampling_frequency_hz = _windows(line_hz=37.25)
+
+    result = lines.detect_lines(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+        familywise_error_rate=0.05,
+    )
+
+    assert result.detections
+    assert any(
+        abs(detection.frequency_hz - 37.25) <= 1.0 / 4.0
+        for detection in result.detections
+    )
+    assert all(
+        detection.corrected_p_value < 0.05
+        for detection in result.detections
+    )
+
+
+def test_channel_holm_test_does_not_invent_a_line_in_deterministic_noise():
+    data, sampling_frequency_hz = _windows(line_hz=None, seed=11)
+
+    result = lines.detect_lines(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+        familywise_error_rate=0.05,
+    )
+
+    assert result.detections == ()
+
+
+def test_null_detection_builds_an_explicit_clean_recording_model():
+    data, sampling_frequency_hz = _windows(line_hz=None, seed=11)
+    result = lines.detect_lines(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+        familywise_error_rate=0.05,
+    )
+
+    model = lines.build_artifact_model(
+        result,
+        channel_names=("C3", "C4"),
+        frequency_bin_width_hz=0.25,
+        spectral_resolution_hz=0.36,
+        familywise_error_rate=0.05,
+    )
+
+    assert model.channels == ()
+    assert model.line_count == 0
+    assert model.channel_count == 2
+
+
+def test_reported_p_values_use_each_channels_window_frequency_family():
+    data, sampling_frequency_hz = _windows(line_hz=37.25)
+    frequencies_hz, raw_p_values = lines.thomson_f_p_values(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+    )
+
+    result = lines.detect_lines(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+        familywise_error_rate=0.05,
+    )
+
+    assert raw_p_values.shape == (*data.shape[:2], frequencies_hz.size)
+    assert result.total_test_count == raw_p_values.size
+    assert result.test_count_per_channel == raw_p_values[:, 0, :].size
+    strongest = min(result.detections, key=lambda detection: detection.corrected_p_value)
+    expected = min(
+        1.0,
+        float(np.min(raw_p_values)) * result.test_count_per_channel,
+    )
+    assert strongest.corrected_p_value == expected
+
+
+def test_holm_correction_controls_each_channel_family(monkeypatch):
+    frequencies_hz = np.array([10.0, 20.0])
+    raw_p_values = np.array(
+        [
+            [[0.01, 0.50], [0.50, 0.60]],
+            [[0.02, 0.80], [0.70, 0.90]],
+        ]
+    )
+
+    monkeypatch.setattr(
+        lines,
+        "thomson_f_p_values",
+        lambda *args, **kwargs: (frequencies_hz, raw_p_values),
+    )
+
+    result = lines.detect_lines(
+        np.zeros((2, 2, 8)),
+        8.0,
+        frequency_range_hz=(1.0, 3.0),
+        familywise_error_rate=0.05,
+    )
+
+    assert result.test_count_per_channel == 4
+    assert result.total_test_count == 8
+    assert len(result.detections) == 1
+    detection = result.detections[0]
+    assert detection.channel_index == 0
+    assert detection.frequency_hz == 10.0
+    assert detection.raw_p_value == 0.01
+    assert detection.corrected_p_value == 0.04
+
+
+def test_bonferroni_correction_controls_each_channel_family(monkeypatch):
+    frequencies_hz = np.array([10.0, 20.0])
+    raw_p_values = np.array(
+        [
+            [[0.01, 0.50], [0.50, 0.60]],
+            [[0.02, 0.80], [0.70, 0.90]],
+        ]
+    )
+
+    monkeypatch.setattr(
+        lines,
+        "thomson_f_p_values",
+        lambda *args, **kwargs: (frequencies_hz, raw_p_values),
+    )
+
+    result = lines.detect_lines(
+        np.zeros((2, 2, 8)),
+        8.0,
+        frequency_range_hz=(1.0, 3.0),
+        familywise_error_rate=0.05,
+        correction="bonferroni",
+    )
+
+    assert len(result.detections) == 1
+    detection = result.detections[0]
+    assert detection.channel_index == 0
+    assert detection.frequency_hz == 10.0
+    assert detection.raw_p_value == 0.01
+    assert detection.corrected_p_value == 0.04
+
+
+def test_uncorrected_detection_thresholds_raw_p_values_directly(monkeypatch):
+    frequencies_hz = np.array([10.0, 20.0])
+    raw_p_values = np.array(
+        [
+            [[0.01, 0.03], [0.50, 0.60]],
+            [[0.02, 0.80], [0.70, 0.90]],
+        ]
+    )
+
+    monkeypatch.setattr(
+        lines,
+        "thomson_f_p_values",
+        lambda *args, **kwargs: (frequencies_hz, raw_p_values),
+    )
+
+    result = lines.detect_lines(
+        np.zeros((2, 2, 8)),
+        8.0,
+        frequency_range_hz=(1.0, 3.0),
+        familywise_error_rate=0.05,
+        correction="none",
+    )
+
+    detected = {
+        (detection.window_index, detection.channel_index, detection.frequency_hz)
+        for detection in result.detections
+    }
+    assert detected == {(0, 0, 10.0), (0, 0, 20.0), (1, 0, 10.0)}
+    assert all(
+        detection.corrected_p_value == detection.raw_p_value
+        for detection in result.detections
+    )
+
+
+def test_detect_lines_matches_the_split_shared_p_value_path():
+    data, sampling_frequency_hz = _windows(line_hz=37.25, seed=4)
+
+    combined = lines.detect_lines(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+        familywise_error_rate=0.05,
+        correction="bonferroni",
+    )
+    frequencies_hz, p_values = lines.thomson_f_p_values(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(1.0, 80.0),
+    )
+    split = lines.detect_lines_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=0.05,
+        correction="bonferroni",
+    )
+
+    assert combined.detections == split.detections
+    assert combined.tested_frequencies_hz == split.tested_frequencies_hz
+
+
+def test_unknown_correction_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="correction"):
+        lines.detect_lines(
+            np.random.default_rng(0).normal(size=(1, 1, 32)),
+            8.0,
+            frequency_range_hz=(1.0, 3.0),
+            familywise_error_rate=0.05,
+            correction="fdr",
+        )
+
+
+def test_dc_is_not_treated_as_a_sinusoidal_line():
+    data = np.ones((2, 3, 2_000))
+
+    frequencies_hz, p_values = lines.thomson_f_p_values(
+        data,
+        200.0,
+        frequency_range_hz=(0.0, 80.0),
+    )
+
+    assert frequencies_hz[0] > 0.0
+    assert np.all(p_values == 1.0)
+
+
+def _result(*frequencies_hz: float) -> lines.LineDetectionResult:
+    tested_frequencies_hz = tuple(index / 50.0 for index in range(50, 4_001))
+    return lines.LineDetectionResult(
+        tuple(
+            lines.LineDetection(
+                frequency_hz=frequency_hz,
+                raw_p_value=1e-15,
+                corrected_p_value=1e-12,
+                window_index=0,
+                channel_index=0,
+            )
+            for frequency_hz in frequencies_hz
+        ),
+        tested_frequencies_hz=tested_frequencies_hz,
+        window_count=6,
+        channel_count=1,
+    )
+
+
+def test_one_supported_frequency_is_classified_as_isolated():
+    classification = lines.classify_harmonics(
+        _result(60.0),
+        frequency_bin_width_hz=0.02,
+        spectral_resolution_hz=0.03,
+        familywise_error_rate=0.05,
+    )
+
+    assert classification.fundamental_hz is None
+    assert classification.harmonics == (None,)
+
+
+def test_harmonic_classification_never_invents_an_absent_multiple():
+    classification = lines.classify_harmonics(
+        _result(20.0, 30.0, 40.0),
+        frequency_bin_width_hz=0.02,
+        spectral_resolution_hz=0.03,
+        familywise_error_rate=0.05,
+    )
+
+    assert classification.fundamental_hz == 10.0
+    assert classification.harmonics == (2, 3, 4)
+    assert 5 not in classification.harmonics
+
+
+def test_comb_test_requires_two_multiplicity_corrected_harmonic_components():
+    tested_frequencies_hz = tuple(np.arange(1.0, 81.0))
+    result = lines.LineDetectionResult(
+        (
+            lines.LineDetection(20.0, 0.0, 0.0, 0, 0),
+            lines.LineDetection(30.0, 0.001, 0.04, 0, 0),
+        ),
+        tested_frequencies_hz=tested_frequencies_hz,
+        window_count=1,
+        channel_count=1,
+    )
+
+    classification = lines.classify_harmonics(
+        result,
+        frequency_bin_width_hz=1.0,
+        spectral_resolution_hz=0.5,
+        familywise_error_rate=0.05,
+    )
+
+    assert classification.fundamental_hz is None
+
+
+def test_underflowed_p_value_remains_valid_statistical_evidence():
+    model = lines.build_artifact_model(
+        lines.LineDetectionResult(
+            (
+                lines.LineDetection(
+                    frequency_hz=40.0,
+                    raw_p_value=0.0,
+                    corrected_p_value=0.0,
+                    window_index=0,
+                    channel_index=0,
+                ),
+            ),
+            tested_frequencies_hz=tuple(np.arange(1.0, 101.0)),
+            window_count=10,
+            channel_count=1,
+        ),
+        channel_names=("Cz",),
+        frequency_bin_width_hz=0.02,
+        spectral_resolution_hz=0.03,
+        familywise_error_rate=0.05,
+    )
+
+    assert model.channels[0].lines[0].corrected_p_value == 0.0

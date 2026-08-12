@@ -22,8 +22,10 @@ def test_correction_config_contains_only_irreducible_user_choices():
 
     assert {field.name for field in fields(settings)} == {
         "estimation_window_s",
+        "familywise_error_rate",
         "frequency_range_hz",
     }
+    assert settings.familywise_error_rate == 0.05
 
 
 @pytest.mark.parametrize(
@@ -65,6 +67,22 @@ def test_detection_frequency_range_is_a_deliberate_user_choice(tmp_path):
     )
 
     assert settings.frequency_range_hz == (1.0, 80.0)
+
+
+def test_frequency_range_has_no_arbitrary_100_hz_ceiling(tmp_path):
+    settings = notch.HarmonicNotchSettings.from_config(
+        _config(tmp_path, {"removal": {"frequency_range_hz": [1.0, 180.0]}})
+    )
+
+    assert settings.frequency_range_hz == (1.0, 180.0)
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0, -0.1, 1.1])
+def test_familywise_error_rate_must_be_a_probability(tmp_path, value):
+    with pytest.raises(ValueError, match="familywise_error_rate"):
+        notch.HarmonicNotchSettings.from_config(
+            _config(tmp_path, {"removal": {"familywise_error_rate": value}})
+        )
 
 
 @pytest.mark.parametrize("value", [50.0, [0.0], [0.0, 50.0, 100.0], [80.0, 20.0]])

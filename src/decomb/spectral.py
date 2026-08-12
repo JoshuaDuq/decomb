@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 
 
@@ -36,30 +34,6 @@ def to_db(power: np.ndarray) -> np.ndarray:
     if np.any(values < 0.0):
         raise ValueError("power must be non-negative.")
     return 10.0 * np.log10(np.maximum(values, np.finfo(float).tiny))
-
-
-def refine_peak_frequency(
-    frequencies_hz: Sequence[float],
-    spectrum_db: Sequence[float],
-    index: int,
-) -> float:
-    """Refine a local maximum with a three-point parabola in decibel space."""
-    frequencies = np.asarray(frequencies_hz, dtype=float)
-    spectrum = np.asarray(spectrum_db, dtype=float)
-    if frequencies.shape != spectrum.shape:
-        raise ValueError("frequencies_hz and spectrum_db must have the same shape.")
-    if not 0 < index < spectrum.size - 1:
-        raise ValueError("index must have a neighbour on either side.")
-
-    left, centre, right = spectrum[index - 1 : index + 2]
-    denominator = left - 2.0 * centre + right
-    if denominator == 0.0:
-        return float(frequencies[index])
-    shift = 0.5 * (left - right) / denominator
-    if not np.isfinite(shift) or abs(shift) > 0.5:
-        return float(frequencies[index])
-    bin_width_hz = float(frequencies[1] - frequencies[0])
-    return float(frequencies[index] + shift * bin_width_hz)
 
 
 def hann_resolution_hz(segment_seconds: float) -> float:

@@ -56,26 +56,6 @@ def test_hann_periodogram_doubles_the_last_positive_bin_for_odd_sample_counts():
     assert np.allclose(observed, expected)
 
 
-def test_peak_refinement_improves_an_off_bin_tone():
-    sfreq = 500.0
-    n_times = 10_800
-    true_hz = 57.1759 + 0.017
-    frequencies_hz, power = spectral.hann_periodogram(
-        _tone(true_hz, sfreq, n_times),
-        sfreq,
-    )
-    spectrum_db = spectral.to_db(power)
-    peak = int(np.argmax(spectrum_db))
-
-    refined_hz = spectral.refine_peak_frequency(
-        frequencies_hz,
-        spectrum_db,
-        peak,
-    )
-
-    assert abs(refined_hz - true_hz) < abs(frequencies_hz[peak] - true_hz)
-
-
 def test_hann_resolution_scales_inversely_with_duration():
     assert spectral.hann_resolution_hz(21.6) == pytest.approx(
         spectral.hann_resolution_hz(10.8) / 2.0

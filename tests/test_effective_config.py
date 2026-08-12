@@ -55,6 +55,7 @@ class TestTheReport:
         names = {name for name, _, _ in table}
 
         assert "removal.estimation_window_s" in names
+        assert "removal.familywise_error_rate" in names
         assert "removal.transition_bandwidth_hz" in names
         assert "frequency_bands.gamma" in names
 

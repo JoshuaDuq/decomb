@@ -5,27 +5,45 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from decomb import comparison, harmonics, notch
+from decomb import comparison, lines, notch
 from decomb.config import load_config
 
 
-def _model() -> harmonics.AdaptiveCombModel:
-    whole = harmonics.CombEstimate(
+def _model() -> lines.ChannelArtifactModel:
+    return lines.ChannelArtifactModel(
+        channel_index=0,
+        channel_name="Cz",
+        lines=(
+            lines.ArtifactLine(20.0, 1e-15, 1e-12, (0,), 2),
+            lines.ArtifactLine(30.0, 1e-15, 1e-12, (0,), 3),
+            lines.ArtifactLine(35.5, 1e-15, 1e-12, (0,), None),
+            lines.ArtifactLine(40.0, 1e-15, 1e-12, (0,), 4),
+        ),
         fundamental_hz=10.0,
-        harmonics=(2, 3, 4),
-        positions_hz=(20.0, 30.0, 40.0),
-        evidence_bic=-20.0,
+        comb_corrected_p_value=1e-10,
     )
-    windows = (
-        harmonics.HarmonicEvidence((2, 3, 4), (19.98, 30.01, 40.01)),
-        harmonics.HarmonicEvidence((2, 3, 4), (20.03, 29.99, 40.00)),
+
+
+def _dense_model() -> lines.ChannelArtifactModel:
+    return lines.ChannelArtifactModel(
+        channel_index=0,
+        channel_name="Cz",
+        lines=(
+            lines.ArtifactLine(20.0, 1e-15, 1e-12, (0,), 40),
+            lines.ArtifactLine(20.5, 1e-15, 1e-12, (0,), 41),
+        ),
+        fundamental_hz=0.5,
+        comb_corrected_p_value=1e-10,
     )
-    isolated = harmonics.IsolatedLineModel(
-        (35.5,),
-        (-10.0,),
-        ((35.49,), (35.52,)),
+
+
+def _recording_model() -> lines.ArtifactModel:
+    return lines.ArtifactModel(
+        channels=(_model(),),
+        window_count=2,
+        channel_count=2,
+        test_count_per_channel=100_000,
     )
-    return harmonics.AdaptiveCombModel(whole, windows, isolated)
 
 
 def _settings() -> notch.HarmonicNotchSettings:
@@ -47,20 +65,7 @@ def test_merged_mne_default_plan_uses_the_same_centres_and_default_parameters():
 
 
 def test_merged_mne_default_plan_combines_overlapping_transitions():
-    whole = harmonics.CombEstimate(
-        fundamental_hz=0.5,
-        harmonics=(40, 41),
-        positions_hz=(20.0, 20.5),
-        evidence_bic=-20.0,
-    )
-    windows = (harmonics.HarmonicEvidence((40, 41), (20.0, 20.5)),) * 2
-    model = harmonics.AdaptiveCombModel(
-        whole,
-        windows,
-        harmonics.IsolatedLineModel((), (), ((), ())),
-    )
-
-    plan = comparison.merged_mne_default_plan(model, _settings())
+    plan = comparison.merged_mne_default_plan(_dense_model(), _settings())
 
     assert len(plan.stopbands) == 1
     assert plan.stopbands[0].harmonics == (40, 41)
@@ -87,18 +92,7 @@ def test_sparse_mne_defaults_equal_the_overlap_merged_geometry():
 def test_literal_dense_mne_defaults_surface_the_design_error():
     import mne
 
-    whole = harmonics.CombEstimate(
-        fundamental_hz=0.5,
-        harmonics=(40, 41),
-        positions_hz=(20.0, 20.5),
-        evidence_bic=-20.0,
-    )
-    windows = (harmonics.HarmonicEvidence((40, 41), (20.0, 20.5)),) * 2
-    model = harmonics.AdaptiveCombModel(
-        whole,
-        windows,
-        harmonics.IsolatedLineModel((), (), ((), ())),
-    )
+    model = _dense_model()
     raw = mne.io.RawArray(
         np.zeros((1, 5000)),
         mne.create_info(["Cz"], 250.0, "eeg"),
@@ -186,9 +180,17 @@ def test_both_arms_are_measured_on_the_same_real_samples(monkeypatch):
         mne.create_info(["Cz", "Pz"], sampling_frequency_hz, "eeg"),
         verbose="ERROR",
     )
-    monkeypatch.setattr(comparison.notch, "fit_harmonic_model", lambda raw, settings: _model())
+    monkeypatch.setattr(
+        comparison.notch,
+        "fit_harmonic_model",
+        lambda raw, settings: _recording_model(),
+    )
 
-    result = comparison.measure_mne_fir_geometry_ablation(raw, _settings())
+    result = comparison.measure_mne_fir_geometry_ablation(
+        raw,
+        _settings(),
+        channel_name="Cz",
+    )
 
     assert result.source_psd.shape == result.decomb_psd.shape
     assert result.source_psd.shape == result.merged_mne_default_psd.shape
