@@ -367,7 +367,7 @@ def _draw_geometry_panel(
         ),
     )
     bar_height = 0.26
-    for plan, _name, y_position, colour in rows:
+    for plan, name, y_position, colour in rows:
         spans, description = _window_geometry(plan, detail_range_hz)
         axis.broken_barh(
             [(low_hz, high_hz - low_hz) for low_hz, high_hz in spans],
@@ -376,24 +376,28 @@ def _draw_geometry_panel(
             edgecolor=_SURFACE_COLOUR,
             linewidth=0.4,
         )
-        axis.annotate(
-            description,
-            xy=(detail_range_hz[1], y_position + bar_height / 2.0),
-            xytext=(0.0, 5.0),
-            textcoords="offset points",
-            ha="right",
-            va="bottom",
-            fontsize=10,
-            color=colour,
-        )
+        # Name on the left, measurement on the right, both on one line above the bar.
+        # As y-tick labels these names are the widest thing in the figure, and a shared
+        # gridspec column sizes its left margin to fit them, so they were taking a
+        # quarter of the canvas away from the three spectra that share that column.
+        for text, edge_hz, alignment in (
+            (name, detail_range_hz[0], "left"),
+            (description, detail_range_hz[1], "right"),
+        ):
+            axis.annotate(
+                text,
+                xy=(edge_hz, y_position + bar_height / 2.0),
+                xytext=(0.0, 5.0),
+                textcoords="offset points",
+                ha=alignment,
+                va="bottom",
+                fontsize=10,
+                color=colour,
+            )
 
-    axis.set_yticks([y_position for _, _, y_position, _ in rows], [name for _, name, _, _ in rows])
-    for tick_label, (_, _, _, colour) in zip(axis.get_yticklabels(), rows):
-        tick_label.set_color(colour)
-        tick_label.set_fontsize(10)
+    axis.set_yticks([])
     axis.set_ylim(-0.56, 0.62)
     axis.set_xlim(detail_range_hz)
-    axis.tick_params(axis="y", length=0.0)
     axis.spines["left"].set_visible(False)
     axis.set_xlabel("frequency (Hz)", fontsize=9, color=_MUTED_COLOUR)
 
