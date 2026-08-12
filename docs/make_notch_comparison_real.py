@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the README notch-geometry comparison from one real BIDS recording."""
+"""Build the README MNE FIR geometry ablation from one real BIDS recording."""
 
 from __future__ import annotations
 
@@ -48,10 +48,10 @@ def main() -> None:
 
     source_vhdr = runs[args.recording_index - 1]
     raw = recordings.read_bids_raw(source_vhdr)
-    measured = comparison.measure_notch_comparison(raw, settings)
+    measured = comparison.measure_mne_fir_geometry_ablation(raw, settings)
     duration_minutes = measured.duration_s / 60.0
     description = f"{source_vhdr.stem} ({duration_minutes:.1f} min)"
-    comparison.figure_notch_comparison(
+    comparison.figure_mne_fir_geometry_ablation(
         measured,
         args.output,
         recording_description=description,
@@ -62,13 +62,20 @@ def main() -> None:
         measured.decomb_plan,
         frequency_range_hz,
     )
-    traditional_width_hz = comparison.unavailable_width_hz(
-        measured.traditional_plan,
+    merged_default_width_hz = comparison.unavailable_width_hz(
+        measured.merged_mne_default_plan,
         frequency_range_hz,
     )
+    print("experiment: MNE FIR geometry ablation")
     print(f"recording: {source_vhdr}")
     print(f"decomb unavailable: {decomb_width_hz:.3f} Hz")
-    print(f"MNE defaults unavailable: {traditional_width_hz:.3f} Hz")
+    print(f"decomb FIR duration: {measured.decomb_filter.length_s:.3f} s")
+    print("reference: MNE default parameters, overlap-merged by decomb")
+    print(f"reference unavailable: {merged_default_width_hz:.3f} Hz")
+    print(
+        "reference FIR duration: "
+        f"{measured.merged_mne_default_filter.length_s:.3f} s"
+    )
     print(f"wrote {args.output}")
 
 

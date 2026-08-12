@@ -193,22 +193,45 @@ products. The manifest records targets, model evidence, interval geometry, FIR r
 attenuation, and unavailable bandwidth. Floating-point geometry is written with 17
 significant digits.
 
-## Real-data comparison
+## MNE FIR geometry ablation
 
-The demonstration uses one 8.2-minute EEG recording. Both filter arms receive the same
-detected targets, trajectory-envelope centres, real samples, and Welch grid. The decomb
-arm uses measured stopband widths and the transition rule described above. The reference
-arm uses the documented MNE defaults of centre frequency divided by 200 for notch width
-and 1 Hz total transition bandwidth. Reference bands are merged wherever their
-transitions overlap because MNE rejects overlapping FIR stopbands
-[[10](#user-content-ref-10), [11](#user-content-ref-11)].
+This conditional ablation uses one 8.2-minute EEG recording. Both arms use MNE's FIR
+implementation with the same decomb-detected centres, real samples, EEG channels, filter
+design, and Welch grid. Only stopband width and transition rules differ. The decomb arm
+uses measured trajectory envelopes and the transition rule described above. The
+counterfactual arm starts from MNE's default parameters of centre frequency divided by
+200 for notch width and 1 Hz total transition bandwidth, then decomb merges overlapping
+transitions so that MNE can design one valid multiband FIR
+[[10](#user-content-ref-10), [11](#user-content-ref-11)]. This is an MNE FIR geometry
+ablation, not a decomb-versus-MNE method benchmark.
 
-The measured decomb geometry makes 10.5 Hz unavailable. MNE default geometry makes
-96.4 Hz unavailable, forms one continuous stopband above 40.2 Hz, and retains no
-frequency above 39.0 Hz. Retained frequencies reproduce the uncorrected spectrum within
-0.07 dB at the 95th percentile in both arms.
+The literal unmerged MNE-default call is inapplicable to this dense target set: its
+default transition intervals overlap and MNE raises a filter-design `ValueError`. The
+reference shown here is therefore **MNE default parameters, overlap-merged by decomb**,
+not a literal MNE-default method.
 
-![Decomb and MNE default notch geometry on one real EEG recording](docs/notch_comparison_real.png)
+The measured decomb geometry makes 10.5 Hz unavailable and requires a 108.0 s FIR. The
+overlap-merged MNE-default-parameter geometry makes 96.4 Hz unavailable with a 6.6 s
+FIR, forms one continuous stopband above 40.2 Hz, and retains no frequency above 39.0
+Hz. This is the frequency-selectivity versus temporal-extent trade-off. Retained
+frequencies reproduce the input spectrum within 0.07 dB at the 95th percentile in both
+arms.
+
+The input recording is not raw, and its spectrum shows this. It already carries a comb of
+narrowband nulls at harmonics of a 0.9 s period, spaced 1.11111 Hz with a median depth of
+10.3 dB, which is characteristic of the periodic template subtraction used for gradient
+artifact correction. Those nulls precede both filter arms. The comb corrected here is a
+separate residual near 1.2 Hz: its stopbands sit a median 279 mHz from the nearest
+pre-existing null, against a stopband half-width of 28 mHz. This section therefore
+demonstrates correction of the residual periodic artifact, not of the gradient artifact.
+
+Unavailable bandwidth is decomb's conservative inference policy: it counts every full
+stopband and transition. It is not a measurement of neural information destroyed by
+MNE. Each spectrum panel is drawn only where its arm declares the band available, so the
+gaps show this policy rather than measured attenuation. The lowest panel draws both
+filter geometries to scale over one 6 Hz window.
+
+![MNE FIR geometry ablation on one real EEG recording](docs/notch_comparison_real.png)
 
 The participant audit comprised 90 recordings from 15 participants and 12.1 hours of
 EEG. Verification reconstructed 8,120 stopbands and measured a median stopband power

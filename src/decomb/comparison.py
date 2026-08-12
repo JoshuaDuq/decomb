@@ -1,10 +1,9 @@
-"""Fair real-data comparison with conventional MNE notch defaults.
+"""Shared-input ablation of two MNE FIR notch geometries.
 
-Both arms remove the frequencies selected by decomb.  Only filter geometry differs:
-decomb uses the measured trajectory envelopes, while the reference arm uses MNE's
-documented default width (frequency / 200) and 1 Hz transition bandwidth.  Reference
-bands are merged when their transitions overlap because MNE refuses overlapping FIR
-stopbands.
+Both arms use MNE's FIR implementation on the frequencies selected by decomb. Decomb's
+arm uses measured trajectory envelopes. The counterfactual arm uses MNE's default width
+(frequency / 200) and 1 Hz transition bandwidth, with overlaps explicitly merged by
+decomb so the dense geometry can be designed.
 """
 
 from __future__ import annotations
@@ -23,19 +22,25 @@ MNE_DEFAULT_TRANSITION_BANDWIDTH_HZ = 1.0
 
 
 @dataclass(frozen=True)
-class NotchComparison:
-    """Real spectrum and filter geometry for two notch implementations."""
+class MneFirGeometryAblation:
+    """Matched spectra and exact designs for two MNE FIR geometries."""
 
     frequencies_hz: np.ndarray
     source_psd: np.ndarray
     decomb_psd: np.ndarray
-    traditional_psd: np.ndarray
+    merged_mne_default_psd: np.ndarray
     decomb_plan: notch.HarmonicNotchPlan
-    traditional_plan: notch.HarmonicNotchPlan
+    merged_mne_default_plan: notch.HarmonicNotchPlan
+    decomb_filter: notch.HarmonicFilterDesign
+    merged_mne_default_filter: notch.HarmonicFilterDesign
     duration_s: float
 
     def __post_init__(self) -> None:
-        spectra = (self.source_psd, self.decomb_psd, self.traditional_psd)
+        spectra = (
+            self.source_psd,
+            self.decomb_psd,
+            self.merged_mne_default_psd,
+        )
         if self.frequencies_hz.ndim != 1 or self.frequencies_hz.size < 2:
             raise ValueError("Comparison frequencies must be a one-dimensional grid.")
         if any(spectrum.shape != self.frequencies_hz.shape for spectrum in spectra):
@@ -50,21 +55,28 @@ class NotchComparison:
             raise ValueError("Comparison duration must be finite and positive.")
 
 
-def traditional_notch_plan(
+def mne_default_parameter_stopbands(
     model: harmonics.AdaptiveCombModel,
     settings,
-) -> notch.HarmonicNotchPlan:
-    """Use decomb's detected centres with conventional MNE FIR geometry."""
-    stopbands = [
-        _traditional_stopband(
+) -> tuple[notch.HarmonicStopband, ...]:
+    """Construct unmerged stopbands from MNE's default width parameter."""
+    return tuple(
+        _mne_default_parameter_stopband(
             measured_band.centre_hz,
             measured_band.harmonics,
             measured_band.kind,
         )
         for measured_band in notch.observed_line_intervals(model, settings)
-    ]
+    )
+
+
+def merged_mne_default_plan(
+    model: harmonics.AdaptiveCombModel,
+    settings,
+) -> notch.HarmonicNotchPlan:
+    """Make MNE's default parameters valid by explicitly merging overlaps."""
     merged = notch._merge_stopbands(
-        stopbands,
+        list(mne_default_parameter_stopbands(model, settings)),
         minimum_gap_hz=MNE_DEFAULT_TRANSITION_BANDWIDTH_HZ,
     )
     return notch.HarmonicNotchPlan(
@@ -73,7 +85,7 @@ def traditional_notch_plan(
     )
 
 
-def _traditional_stopband(
+def _mne_default_parameter_stopband(
     position_hz: float,
     harmonic_numbers: tuple[int, ...],
     kind: str,
@@ -84,6 +96,27 @@ def _traditional_stopband(
         position_hz - width_hz / 2.0,
         position_hz + width_hz / 2.0,
         kind=kind,
+    )
+
+
+def apply_literal_mne_defaults(raw, model, settings):
+    """Apply MNE defaults literally and let invalid dense geometries raise."""
+    import mne
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude=())
+    if len(picks) == 0:
+        raise ValueError("MNE FIR geometry ablation requires at least one EEG channel.")
+    centres_hz = np.array(
+        [
+            stopband.centre_hz
+            for stopband in mne_default_parameter_stopbands(model, settings)
+        ],
+        dtype=float,
+    )
+    return raw.copy().notch_filter(
+        freqs=centres_hz,
+        picks=picks,
+        verbose="ERROR",
     )
 
 
@@ -101,15 +134,30 @@ def unavailable_width_hz(
     )
 
 
-def measure_notch_comparison(raw, settings) -> NotchComparison:
-    """Apply both notch geometries to one in-memory recording and measure them equally."""
+def measure_mne_fir_geometry_ablation(
+    raw,
+    settings,
+) -> MneFirGeometryAblation:
+    """Measure two MNE FIR geometries on one recording and one frequency grid."""
     from decomb import psd
 
     model = notch.fit_harmonic_model(raw, settings)
     decomb_plan = notch.plan_harmonic_stopbands(model, settings)
-    traditional_plan = traditional_notch_plan(model, settings)
+    merged_default_plan = merged_mne_default_plan(model, settings)
+    sampling_frequency_hz = float(raw.info["sfreq"])
+    decomb_filter = notch.characterize_harmonic_filter(
+        sampling_frequency_hz,
+        decomb_plan,
+    )
+    merged_mne_default_filter = notch.characterize_harmonic_filter(
+        sampling_frequency_hz,
+        merged_default_plan,
+    )
     decomb_raw = notch.apply_harmonic_notches(raw, decomb_plan)
-    traditional_raw = notch.apply_harmonic_notches(raw, traditional_plan)
+    merged_mne_default_raw = notch.apply_harmonic_notches(
+        raw,
+        merged_default_plan,
+    )
     psd_settings = psd.PsdSettings(
         window_s=settings.estimation_window_s,
         band_hz=settings.frequency_range_hz,
@@ -120,22 +168,24 @@ def measure_notch_comparison(raw, settings) -> NotchComparison:
         decomb_raw,
         psd_settings,
     )
-    traditional_frequencies_hz, traditional_psd = psd.channel_median_psd(
-        traditional_raw,
+    merged_mne_default_frequencies_hz, merged_mne_default_psd = psd.channel_median_psd(
+        merged_mne_default_raw,
         psd_settings,
     )
     if not np.array_equal(frequencies_hz, decomb_frequencies_hz) or not np.array_equal(
         frequencies_hz,
-        traditional_frequencies_hz,
+        merged_mne_default_frequencies_hz,
     ):
         raise ValueError("Notch comparison arms landed on different frequency grids.")
-    return NotchComparison(
+    return MneFirGeometryAblation(
         frequencies_hz=frequencies_hz,
         source_psd=source_psd,
         decomb_psd=decomb_psd,
-        traditional_psd=traditional_psd,
+        merged_mne_default_psd=merged_mne_default_psd,
         decomb_plan=decomb_plan,
-        traditional_plan=traditional_plan,
+        merged_mne_default_plan=merged_default_plan,
+        decomb_filter=decomb_filter,
+        merged_mne_default_filter=merged_mne_default_filter,
         duration_s=raw.n_times / float(raw.info["sfreq"]),
     )
 
@@ -145,7 +195,7 @@ _GRID_COLOUR = "#E3E2DD"
 _MUTED_COLOUR = "#52514E"
 _SOURCE_COLOUR = "#EB6834"
 _DECOMB_COLOUR = "#0B0B0B"
-_TRADITIONAL_COLOUR = "#2A78D6"
+_MERGED_MNE_DEFAULT_COLOUR = "#2A78D6"
 _FONT_STACK = ("Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans")
 
 # One window this wide spans several detected lines while still rendering a single
@@ -180,7 +230,7 @@ def _available_mask(
 
 
 def _detail_window_hz(
-    comparison: NotchComparison,
+    comparison: MneFirGeometryAblation,
     frequency_range_hz: tuple[float, float],
 ) -> tuple[float, float]:
     """Pick the window where the two geometries differ most and both stay legible."""
@@ -189,15 +239,23 @@ def _detail_window_hz(
         return (low_hz, high_hz)
 
     decomb_edges = comparison.decomb_plan.unavailable_edges()
-    traditional_edges = comparison.traditional_plan.unavailable_edges()
+    merged_default_edges = comparison.merged_mne_default_plan.unavailable_edges()
     best_start_hz: float | None = None
     best_score_hz = 0.0
     for start_hz in np.arange(low_hz, high_hz - _DETAIL_WINDOW_HZ, 0.25):
         stop_hz = start_hz + _DETAIL_WINDOW_HZ
-        traditional_hz = _covered_width_hz(traditional_edges, start_hz, stop_hz)
-        if traditional_hz > _DETAIL_SATURATION_SHARE * _DETAIL_WINDOW_HZ:
+        merged_default_hz = _covered_width_hz(
+            merged_default_edges,
+            start_hz,
+            stop_hz,
+        )
+        if merged_default_hz > _DETAIL_SATURATION_SHARE * _DETAIL_WINDOW_HZ:
             continue
-        score_hz = traditional_hz - _covered_width_hz(decomb_edges, start_hz, stop_hz)
+        score_hz = merged_default_hz - _covered_width_hz(
+            decomb_edges,
+            start_hz,
+            stop_hz,
+        )
         if score_hz > best_score_hz:
             best_score_hz = score_hz
             best_start_hz = float(start_hz)
@@ -251,6 +309,18 @@ def _draw_retained_row(
         )
 
 
+def _arm_summary(
+    available_width_hz: float,
+    analysed_width_hz: float,
+    filter_design: notch.HarmonicFilterDesign,
+) -> str:
+    """Summarize the frequency and temporal costs of one FIR geometry."""
+    return (
+        f"{available_width_hz:.1f} Hz of {analysed_width_hz:.0f} Hz available"
+        f" · {filter_design.length_s:.1f} s FIR"
+    )
+
+
 def _window_geometry(
     plan: notch.HarmonicNotchPlan,
     detail_range_hz: tuple[float, float],
@@ -267,7 +337,9 @@ def _window_geometry(
 
     widths_hz = [upper_hz - lower_hz for lower_hz, upper_hz in spans]
     gaps_hz = [later[0] - earlier[1] for earlier, later in zip(spans, spans[1:])]
-    description = f"{len(spans)} stopband{'s' if len(spans) > 1 else ''} of "
+    description = (
+        f"{len(spans)} unavailable interval{'s' if len(spans) > 1 else ''} of "
+    )
     description += f"{np.median(widths_hz):.2f} Hz"
     if gaps_hz:
         description += f", leaving {np.median(gaps_hz):.2f} Hz gaps"
@@ -276,7 +348,7 @@ def _window_geometry(
 
 def _draw_geometry_panel(
     axis,
-    comparison: NotchComparison,
+    comparison: MneFirGeometryAblation,
     detail_range_hz: tuple[float, float],
 ) -> None:
     """Why the rows above differ: both filters over one window, drawn to scale.
@@ -286,8 +358,13 @@ def _draw_geometry_panel(
     curve that changes colour, which reads as one recoloured line rather than as three.
     """
     rows = (
-        (comparison.decomb_plan, "decomb", 0.3, _DECOMB_COLOUR),
-        (comparison.traditional_plan, "MNE defaults", -0.3, _TRADITIONAL_COLOUR),
+        (comparison.decomb_plan, "decomb measured geometry", 0.3, _DECOMB_COLOUR),
+        (
+            comparison.merged_mne_default_plan,
+            "MNE default parameters, overlap-merged by decomb",
+            -0.3,
+            _MERGED_MNE_DEFAULT_COLOUR,
+        ),
     )
     bar_height = 0.26
     for plan, _name, y_position, colour in rows:
@@ -321,13 +398,13 @@ def _draw_geometry_panel(
     axis.set_xlabel("frequency (Hz)", fontsize=9, color=_MUTED_COLOUR)
 
 
-def figure_notch_comparison(
-    comparison: NotchComparison,
+def figure_mne_fir_geometry_ablation(
+    comparison: MneFirGeometryAblation,
     path: Path,
     *,
     recording_description: str,
 ) -> None:
-    """Plot the spectrum each notch geometry leaves behind, and one window up close."""
+    """Plot available spectra and exact geometry for two MNE FIR designs."""
     import matplotlib.pyplot as plt
 
     frequencies_hz = comparison.frequencies_hz
@@ -340,20 +417,32 @@ def figure_notch_comparison(
     # so overplotting the three arms would hide two of them.  Small multiples of one
     # curve turn the comparison into what it actually is: how much of it is left.
     rows = (
-        (source_db, np.ones(frequencies_hz.size, bool), _SOURCE_COLOUR, "before correction", None),
+        # Named for what it is rather than "before correction": this recording already
+        # carries a comb of narrowband nulls at 0.9 s harmonics from upstream processing,
+        # so calling it uncorrected invites the reader to read those nulls as decomb's.
+        (
+            source_db,
+            np.ones(frequencies_hz.size, bool),
+            _SOURCE_COLOUR,
+            "input recording, before either filter",
+            None,
+            None,
+        ),
         (
             to_db(comparison.decomb_psd),
             _available_mask(comparison.decomb_plan, frequencies_hz),
             _DECOMB_COLOUR,
-            "after decomb measured-width notches",
+            "after decomb measured geometry",
             comparison.decomb_plan,
+            comparison.decomb_filter,
         ),
         (
-            to_db(comparison.traditional_psd),
-            _available_mask(comparison.traditional_plan, frequencies_hz),
-            _TRADITIONAL_COLOUR,
-            "after MNE default notch geometry",
-            comparison.traditional_plan,
+            to_db(comparison.merged_mne_default_psd),
+            _available_mask(comparison.merged_mne_default_plan, frequencies_hz),
+            _MERGED_MNE_DEFAULT_COLOUR,
+            "after MNE default parameters, overlap-merged by decomb",
+            comparison.merged_mne_default_plan,
+            comparison.merged_mne_default_filter,
         ),
     )
 
@@ -363,7 +452,14 @@ def figure_notch_comparison(
         grid = figure.add_gridspec(4, 1, height_ratios=(1.0, 1.0, 1.0, 0.8), hspace=0.06)
 
         retained_axes = []
-        for index, (spectrum_db, mask, colour, name, plan) in enumerate(rows):
+        for index, (
+            spectrum_db,
+            mask,
+            colour,
+            name,
+            plan,
+            filter_design,
+        ) in enumerate(rows):
             shared = {"sharex": retained_axes[0], "sharey": retained_axes[0]} if index else {}
             axis = figure.add_subplot(grid[index], **shared)
             retained_axes.append(axis)
@@ -372,16 +468,18 @@ def figure_notch_comparison(
             axis.set_axisbelow(True)
             _draw_retained_row(axis, frequencies_hz, spectrum_db, mask, colour)
 
-            available_hz = (
-                span_hz
-                if plan is None
-                else span_hz - unavailable_width_hz(plan, frequency_range_hz)
-            )
+            available_hz = span_hz
+            if plan is not None:
+                available_hz -= unavailable_width_hz(plan, frequency_range_hz)
             # Both row labels sit on the title baseline above the axes, so the curve
             # keeps the whole row instead of giving up headroom to text.
             axis.set_title(name, fontsize=10, color=colour, loc="left", pad=6.0)
             axis.annotate(
-                f"{available_hz:.1f} Hz of {span_hz:.0f} Hz left to analyse",
+                (
+                    f"{available_hz:.1f} Hz input span"
+                    if filter_design is None
+                    else _arm_summary(available_hz, span_hz, filter_design)
+                ),
                 xy=(1.0, 1.0),
                 xycoords="axes fraction",
                 xytext=(0.0, 6.0),
@@ -429,7 +527,8 @@ def figure_notch_comparison(
         )
 
         figure.suptitle(
-            "Both arms remove the same detected lines. Only the filter geometry differs.",
+            "MNE FIR geometry ablation: shared detected centres, "
+            "different width and transition rules.",
             fontsize=13.5,
             color=_DECOMB_COLOUR,
         )
@@ -442,10 +541,11 @@ def figure_notch_comparison(
             dpi=200,
             facecolor=_SURFACE_COLOUR,
             metadata={
-                "Title": "decomb measured-width notches versus MNE default notch geometry",
+                "Title": "MNE FIR geometry ablation on shared decomb-detected centres",
                 "Description": (
                     f"{recording_description} · real EEG · identical detected centres · "
-                    "each spectrum is drawn only where that arm leaves the band usable"
+                    "MNE default parameters are overlap-merged by decomb · "
+                    "availability counts each full stopband and transition"
                 ),
             },
         )
