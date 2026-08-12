@@ -17,6 +17,11 @@ import pandas as pd
 
 from decomb import __version__, harmonics, recordings, spectral
 
+FIR_DESIGN = "firwin"
+FIR_PAD = "reflect_limited"
+FIR_PHASE = "zero"
+FIR_WINDOW = "hamming"
+
 
 @dataclass(frozen=True)
 class HarmonicNotchSettings:
@@ -48,8 +53,13 @@ class HarmonicNotchSettings:
 
     @property
     def transition_bandwidth_hz(self) -> float:
-        # MNE firwin's automatic Hamming length is 3.3 / transition bandwidth.
+        """Total notch transition width across both edges."""
         return 3.3 / self.estimation_window_s
+
+    @property
+    def per_edge_transition_bandwidth_hz(self) -> float:
+        """Transition width MNE uses to derive the automatic FIR length."""
+        return self.transition_bandwidth_hz / 2.0
 
     @property
     def minimum_stopband_width_hz(self) -> float:
@@ -146,6 +156,118 @@ class HarmonicNotchPlan:
             )
             for stopband in self.stopbands
         )
+
+
+@dataclass(frozen=True)
+class HarmonicFilterDesign:
+    """Exact length and measured response of MNE's FIR design."""
+
+    length_samples: int
+    length_s: float
+    minimum_stopband_attenuation_db: float
+    maximum_passband_deviation_db: float
+
+    def manifest_fields(self) -> dict[str, float | int]:
+        """Machine-readable filter properties repeated for each recording row."""
+        return {
+            "fir_filter_length_samples": self.length_samples,
+            "fir_filter_length_s": self.length_s,
+            "fir_minimum_stopband_attenuation_db": (
+                self.minimum_stopband_attenuation_db
+            ),
+            "fir_maximum_passband_deviation_db": self.maximum_passband_deviation_db,
+        }
+
+
+def _mne_passband_edges(
+    plan: HarmonicNotchPlan,
+) -> tuple[np.ndarray, np.ndarray]:
+    """MNE band-stop passband edges around the declared unavailable intervals."""
+    half_transition_hz = plan.transition_bandwidth_hz / 2.0
+    low_pass_edges_hz = np.array(
+        [stopband.low_hz - half_transition_hz for stopband in plan.stopbands],
+        dtype=float,
+    )
+    high_pass_edges_hz = np.array(
+        [stopband.high_hz + half_transition_hz for stopband in plan.stopbands],
+        dtype=float,
+    )
+    return low_pass_edges_hz, high_pass_edges_hz
+
+
+def characterize_harmonic_filter(
+    sampling_frequency_hz: float,
+    plan: HarmonicNotchPlan,
+) -> HarmonicFilterDesign:
+    """Design MNE's exact FIR coefficients and summarize their response."""
+    import mne
+    from scipy.fft import next_fast_len
+    from scipy.signal import freqz
+
+    if not np.isfinite(sampling_frequency_hz) or sampling_frequency_hz <= 0.0:
+        raise ValueError("The sampling frequency must be finite and positive.")
+    nyquist_hz = sampling_frequency_hz / 2.0
+    unavailable_edges = plan.unavailable_edges()
+    if unavailable_edges[0][0] <= 0.0 or unavailable_edges[-1][1] >= nyquist_hz:
+        raise ValueError("The notch transitions must lie strictly inside (0, Nyquist).")
+
+    low_pass_edges_hz, high_pass_edges_hz = _mne_passband_edges(plan)
+    per_edge_transition_hz = plan.transition_bandwidth_hz / 2.0
+    coefficients = mne.filter.create_filter(
+        data=None,
+        sfreq=sampling_frequency_hz,
+        l_freq=high_pass_edges_hz,
+        h_freq=low_pass_edges_hz,
+        filter_length="auto",
+        l_trans_bandwidth=per_edge_transition_hz,
+        h_trans_bandwidth=per_edge_transition_hz,
+        method="fir",
+        phase=FIR_PHASE,
+        fir_window=FIR_WINDOW,
+        fir_design=FIR_DESIGN,
+        verbose="ERROR",
+    )
+
+    response_points = next_fast_len(max(16_384, 8 * len(coefficients)))
+    frequencies_hz, response = freqz(
+        coefficients,
+        worN=response_points,
+        fs=sampling_frequency_hz,
+    )
+    boundary_frequencies_hz = np.array(
+        [
+            0.0,
+            nyquist_hz,
+            *(edge for stopband in plan.stopbands for edge in (stopband.low_hz, stopband.high_hz)),
+            *(edge for unavailable in unavailable_edges for edge in unavailable),
+        ],
+        dtype=float,
+    )
+    _, boundary_response = freqz(
+        coefficients,
+        worN=boundary_frequencies_hz,
+        fs=sampling_frequency_hz,
+    )
+    frequencies_hz = np.concatenate((frequencies_hz, boundary_frequencies_hz))
+    response = np.concatenate((response, boundary_response))
+    gain_db = 20.0 * np.log10(np.maximum(np.abs(response), np.finfo(float).tiny))
+
+    inside_stopband = np.zeros(frequencies_hz.shape, dtype=bool)
+    unavailable = np.zeros(frequencies_hz.shape, dtype=bool)
+    for stopband, unavailable_interval in zip(plan.stopbands, unavailable_edges):
+        inside_stopband |= (frequencies_hz >= stopband.low_hz) & (
+            frequencies_hz <= stopband.high_hz
+        )
+        unavailable |= (frequencies_hz >= unavailable_interval[0]) & (
+            frequencies_hz <= unavailable_interval[1]
+        )
+
+    return HarmonicFilterDesign(
+        length_samples=len(coefficients),
+        length_s=len(coefficients) / sampling_frequency_hz,
+        minimum_stopband_attenuation_db=float(-np.max(gain_db[inside_stopband])),
+        maximum_passband_deviation_db=float(np.max(np.abs(gain_db[~unavailable]))),
+    )
 
 
 def observed_line_intervals(model, settings) -> list[HarmonicStopband]:
@@ -314,7 +436,10 @@ def apply_harmonic_notches(raw, plan: HarmonicNotchPlan):
         trans_bandwidth=plan.transition_bandwidth_hz,
         method="fir",
         filter_length="auto",
-        phase="zero",
+        phase=FIR_PHASE,
+        fir_window=FIR_WINDOW,
+        fir_design=FIR_DESIGN,
+        pad=FIR_PAD,
         n_jobs=-1,
         verbose="ERROR",
     )
@@ -467,17 +592,30 @@ def clean_harmonic_run(
     raw = recordings.read_bids_raw(vhdr)
     model = fit_harmonic_model(raw, settings)
     plan = plan_harmonic_stopbands(model, settings)
+    filter_design = characterize_harmonic_filter(float(raw.info["sfreq"]), plan)
     filtered = apply_harmonic_notches(raw, plan)
 
-    relative_header = vhdr.relative_to(source_root)
-    destination = output_root / relative_header.with_suffix(".eeg")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    recordings.write_eeg_binary(vhdr, destination, filtered.get_data())
+    destination_vhdr = recordings.derivative_vhdr_path(
+        vhdr,
+        source_root,
+        output_root,
+    )
+    recordings.write_brainvision_sidecars(vhdr, destination_vhdr)
+    recordings.write_eeg_binary(
+        destination_vhdr,
+        destination_vhdr.with_suffix(".eeg"),
+        filtered.get_data(),
+        filtered.ch_names,
+    )
 
-    written = recordings.read_bids_raw(output_root / relative_header)
+    written = recordings.read_bids_raw(destination_vhdr)
     expected = filtered.get_data()
     deviation_v = float(np.max(np.abs(written.get_data() - expected)))
-    representable = recordings.quantized_eeg_data(vhdr, expected)
+    representable = recordings.quantized_eeg_data(
+        destination_vhdr,
+        expected,
+        filtered.ch_names,
+    )
     quantization_deviation_v = float(np.max(np.abs(representable - expected)))
     tolerance_v = float(np.nextafter(quantization_deviation_v, np.inf))
     if deviation_v > tolerance_v:
@@ -489,6 +627,7 @@ def clean_harmonic_run(
     rows = harmonic_exclusion_rows(vhdr.stem, plan, analysed_bands)
     changes_db = _measure_stopband_changes(raw, filtered, plan, settings)
     for row, stopband, change_db in zip(rows, plan.stopbands, changes_db):
+        row.update(filter_design.manifest_fields())
         isolated_targets = [
             (position_hz, evidence_bic)
             for position_hz, evidence_bic in zip(
@@ -554,7 +693,11 @@ def write_harmonic_derivative_description(
             ),
             "Parameters": {
                 "method": "fir",
-                "phase": "zero",
+                "filter_length": "auto",
+                "phase": FIR_PHASE,
+                "fir_window": FIR_WINDOW,
+                "fir_design": FIR_DESIGN,
+                "pad": FIR_PAD,
                 **{
                     name: list(value) if isinstance(value, tuple) else value
                     for name, value in asdict(settings).items()
@@ -562,6 +705,9 @@ def write_harmonic_derivative_description(
                 "spectral_resolution_hz": settings.spectral_resolution_hz,
                 "minimum_stopband_width_hz": settings.minimum_stopband_width_hz,
                 "transition_bandwidth_hz": settings.transition_bandwidth_hz,
+                "per_edge_transition_bandwidth_hz": (
+                    settings.per_edge_transition_bandwidth_hz
+                ),
             },
         }
     )
@@ -571,6 +717,55 @@ def write_harmonic_derivative_description(
     described["SourceDatasets"] = [{"URL": source_dataset_url}]
     path.write_text(json.dumps(described, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def settings_for_verification(
+    derivative_root: Path,
+    current_settings: HarmonicNotchSettings,
+) -> HarmonicNotchSettings:
+    """Return immutable apply-time settings, refusing a current-config mismatch."""
+    import json
+
+    path = derivative_root / "dataset_description.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"No derivative description at {path}.")
+    described = json.loads(path.read_text(encoding="utf-8"))
+    generated_by = described.get("GeneratedBy")
+    if not isinstance(generated_by, list):
+        raise ValueError("The derivative description must contain a GeneratedBy list.")
+    decomb_entries = [
+        entry
+        for entry in generated_by
+        if isinstance(entry, Mapping) and entry.get("Name") == "decomb"
+    ]
+    if len(decomb_entries) != 1:
+        raise ValueError("The derivative description must contain one decomb GeneratedBy entry.")
+    parameters = decomb_entries[0].get("Parameters")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("The decomb GeneratedBy entry must contain Parameters.")
+    try:
+        applied_settings = HarmonicNotchSettings(
+            estimation_window_s=float(parameters["estimation_window_s"]),
+            frequency_range_hz=tuple(
+                float(value) for value in parameters["frequency_range_hz"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "The decomb derivative does not contain valid apply-time settings."
+        ) from error
+
+    mismatches = [
+        field.name
+        for field in fields(HarmonicNotchSettings)
+        if getattr(current_settings, field.name) != getattr(applied_settings, field.name)
+    ]
+    if mismatches:
+        raise ValueError(
+            f"Current removal setting(s) {mismatches} do not match those recorded "
+            "during apply. Verify with the original configuration."
+        )
+    return applied_settings
 
 
 def run(args: argparse.Namespace) -> None:
@@ -784,7 +979,8 @@ def run_verify(args: argparse.Namespace) -> None:
     source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
     cleaned_root = config.path("output_root", override=getattr(args, "output_root", None))
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
-    settings = HarmonicNotchSettings.from_config(config)
+    current_settings = HarmonicNotchSettings.from_config(config)
+    settings = settings_for_verification(cleaned_root, current_settings)
     runs = recordings.discover_runs(source_root, subjects=None, task="*")
     manifest_path = cleaned_root / "harmonic_notch_manifest.tsv"
     if not manifest_path.is_file():
@@ -800,6 +996,10 @@ def run_verify(args: argparse.Namespace) -> None:
         "stopband_low_hz",
         "stopband_high_hz",
         "transition_bandwidth_hz",
+        "fir_filter_length_samples",
+        "fir_filter_length_s",
+        "fir_minimum_stopband_attenuation_db",
+        "fir_maximum_passband_deviation_db",
     }
     missing = required - set(manifest.columns)
     if missing:
@@ -814,7 +1014,7 @@ def run_verify(args: argparse.Namespace) -> None:
         rows.extend(
             verify_harmonic_run(
                 vhdr,
-                cleaned_root / vhdr.relative_to(source_root),
+                recordings.derivative_vhdr_path(vhdr, source_root, cleaned_root),
                 block.to_dict("records"),
                 settings,
             )

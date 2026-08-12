@@ -84,6 +84,39 @@ def test_an_absent_task_reports_the_requested_task(tmp_path):
         recordings.discover_runs(tmp_path, subjects=None, task="not-a-task")
 
 
+def test_desc_brainvision_derivative_is_readable_by_mne_bids(tmp_path):
+    source_root = tmp_path / "source"
+    derivative_root = tmp_path / "derivative"
+    _write_run(source_root, "0001", "rest", run="1")
+    source_vhdr = recordings.discover_runs(source_root, None, task="rest")[0]
+    source = recordings.read_bids_raw(source_vhdr)
+    recordings.mirror_sidecars(source_root, derivative_root)
+    destination_vhdr = recordings.derivative_vhdr_path(
+        source_vhdr,
+        source_root,
+        derivative_root,
+    )
+    recordings.write_brainvision_sidecars(source_vhdr, destination_vhdr)
+    recordings.write_eeg_binary(
+        destination_vhdr,
+        destination_vhdr.with_suffix(".eeg"),
+        source.get_data(),
+        source.ch_names,
+    )
+
+    derivative = recordings.read_bids_raw(destination_vhdr)
+
+    assert derivative.ch_names == source.ch_names
+    assert np.array_equal(
+        derivative.get_data(),
+        recordings.quantized_eeg_data(
+            destination_vhdr,
+            source.get_data(),
+            source.ch_names,
+        ),
+    )
+
+
 def test_independent_windows_never_overlap_after_tail_alignment():
     bounds = ((0, 10), (5, 15), (10, 20), (13, 23), (20, 30))
 

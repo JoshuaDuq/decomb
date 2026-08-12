@@ -375,7 +375,13 @@ def run(args: argparse.Namespace) -> None:
     freqs = None
     for index, vhdr in enumerate(runs, start=1):
         started = time.time()
-        derivatives = [(label, root / vhdr.relative_to(source_root)) for label, root in available]
+        derivatives = [
+            (
+                label,
+                recordings.derivative_vhdr_path(vhdr, source_root, root),
+            )
+            for label, root in available
+        ]
         missing = [str(path) for _, path in derivatives if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"{vhdr.stem}: derivative missing at {missing[0]}")

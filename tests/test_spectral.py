@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.signal import periodogram
 
 from decomb import spectral
 
@@ -35,6 +36,24 @@ def test_hann_periodogram_recovers_a_tone_and_leading_dimensions():
 def test_hann_periodogram_rejects_non_finite_data():
     with pytest.raises(ValueError, match="finite"):
         spectral.hann_periodogram(np.array([1.0, np.nan, 2.0]), 500.0)
+
+
+def test_hann_periodogram_doubles_the_last_positive_bin_for_odd_sample_counts():
+    sample_count = 9
+    sampling_frequency_hz = 100.0
+    data = np.random.default_rng(7).normal(size=sample_count)
+
+    _, observed = spectral.hann_periodogram(data, sampling_frequency_hz)
+    _, expected = periodogram(
+        data,
+        fs=sampling_frequency_hz,
+        window=np.hanning(sample_count),
+        detrend=False,
+        return_onesided=True,
+        scaling="density",
+    )
+
+    assert np.allclose(observed, expected)
 
 
 def test_peak_refinement_improves_an_off_bin_tone():

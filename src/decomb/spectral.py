@@ -22,8 +22,10 @@ def hann_periodogram(data: np.ndarray, sfreq: float) -> tuple[np.ndarray, np.nda
     normalisation = sfreq * float(np.sum(window**2))
     spectrum = np.fft.rfft(values * window, axis=-1)
     power = np.abs(spectrum) ** 2 / normalisation
-    if power.shape[-1] > 2:
+    if sample_count % 2 == 0:
         power[..., 1:-1] *= 2.0
+    else:
+        power[..., 1:] *= 2.0
     frequencies_hz = np.fft.rfftfreq(sample_count, d=1.0 / sfreq)
     return frequencies_hz, power
 

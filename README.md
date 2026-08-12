@@ -17,10 +17,47 @@ gradient and pulse artifact correction [[1](#user-content-ref-1),
 sources [[3](#user-content-ref-3), [4](#user-content-ref-4)]. Their frequencies can drift
 within a recording and can occur as a harmonic series or as isolated narrowband lines.
 
-Filtering removes the measured signal within every stopband and transition. These
-frequencies are classified as unavailable for inference. The method does not estimate
-the neural activity that occupied them. Physical attribution requires independent
-evidence, and source control remains appropriate when the source is known
+At an affected frequency and time window, the electrode-space Fourier coefficient is
+only the observed sum of neural and artifactual contributions,
+
+$$
+\mathbf{X}(f,t)=\mathbf{N}(f,t)+\mathbf{A}(f,t).
+$$
+
+This observation does not identify either summand. For any complex-valued
+$\boldsymbol{\Delta}(f,t)$, the alternative decomposition
+
+$$
+\mathbf{X}=(\mathbf{N}+\boldsymbol{\Delta})
+          +(\mathbf{A}-\boldsymbol{\Delta})
+$$
+
+produces exactly the same recording. Harmonic regularity and frequency trajectories
+can therefore identify *where* a narrow contaminant is present, but they do not provide
+the missing independent observation needed to determine how much of the coefficient
+was neural. Multichannel source-separation methods add assumptions such as statistical
+independence, non-Gaussianity, or distinct spatial mixing; they do not make an
+overlapping neural and artifactual component uniquely recoverable when those assumptions
+cannot be established from the recording [[20](#user-content-ref-20)].
+
+A notch filter makes this loss explicit. In the frequency domain its output is
+$\mathbf{Y}(f)=H(f)\mathbf{X}(f)$. Where $H(f)$ is zero, the mapping is non-invertible;
+where it is merely small, inversion restores the contaminated mixture and amplifies
+error rather than separating $\mathbf{N}$ from $\mathbf{A}$. The filter consequently
+attenuates any neural activity in its stopband together with the artifact. Narrower
+frequency rejection reduces the discarded bandwidth but introduces the familiar
+frequency-selectivity versus temporal-ringing trade-off; it does not recover the neural
+realization at the rejected frequencies [[6](#user-content-ref-6),
+[21](#user-content-ref-21), [22](#user-content-ref-22)].
+
+Regression, interpolation, source separation, or a learned model can generate an
+estimate only by supplying additional assumptions or information. Without a clean
+reference, a known artifact waveform or spatial field, repeated measurements, or other
+independent constraints, a plausible replacement cannot be verified as the neural
+signal that actually occurred. `decomb` therefore does not impute or claim neural
+recovery. It minimizes the rejected bandwidth, records every stopband and transition as
+unavailable for inference, and leaves physical attribution to independent evidence.
+Source control remains preferable when the source is known
 [[5](#user-content-ref-5)].
 
 ## Scope
@@ -366,6 +403,15 @@ computation.
 19. <a name="ref-19"></a>BIDS Contributors. BIDS Derivatives. *Brain Imaging Data Structure specification*.
     Version 1.11.1.
     [Specification](https://bids-specification.readthedocs.io/en/stable/derivatives/introduction.html)
+20. <a name="ref-20"></a>Hyvärinen A, Oja E. Independent component analysis, algorithms and applications.
+    *Neural Networks*. 2000, 13, 411 to 430.
+    [DOI](https://doi.org/10.1016/S0893-6080(00)00026-5)
+21. <a name="ref-21"></a>de Cheveigné A, Nelken I. Filters, when, why, and how not to use them. *Neuron*.
+    2019, 102, 280 to 293.
+    [DOI](https://doi.org/10.1016/j.neuron.2019.02.039)
+22. <a name="ref-22"></a>Leske S, Dalal SS. Reducing power line noise in EEG and MEG data via spectrum
+    interpolation. *NeuroImage*. 2019, 189, 763 to 776.
+    [DOI](https://doi.org/10.1016/j.neuroimage.2019.01.026)
 
 MNE implementation details are documented in the
 [notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html), the

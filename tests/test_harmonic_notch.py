@@ -50,6 +50,32 @@ def test_plan_contains_every_authorized_harmonic_and_isolated_line():
     assert planned_harmonics == {2, 3, 4}
     assert sum(stopband.kind == "isolated" for stopband in plan.stopbands) == 1
     assert plan.transition_bandwidth_hz == pytest.approx(3.3 / 54.0)
+    assert _settings().per_edge_transition_bandwidth_hz == pytest.approx(3.3 / 108.0)
+
+
+def test_mne_filter_design_reports_its_exact_length_and_response():
+    settings = _settings()
+    plan = notch.HarmonicNotchPlan(
+        (notch.HarmonicStopband((2,), 19.95, 20.05),),
+        transition_bandwidth_hz=settings.transition_bandwidth_hz,
+    )
+
+    design = notch.characterize_harmonic_filter(500.0, plan)
+
+    assert design.length_samples == 54_001
+    assert design.length_s == pytest.approx(108.002)
+    assert design.minimum_stopband_attenuation_db > 50.0
+    assert design.maximum_passband_deviation_db < 0.03
+    assert design.manifest_fields() == {
+        "fir_filter_length_samples": 54_001,
+        "fir_filter_length_s": pytest.approx(108.002),
+        "fir_minimum_stopband_attenuation_db": pytest.approx(
+            design.minimum_stopband_attenuation_db
+        ),
+        "fir_maximum_passband_deviation_db": pytest.approx(
+            design.maximum_passband_deviation_db
+        ),
+    }
 
 
 def test_stopband_covers_every_observed_position_and_bin_uncertainty():
@@ -208,6 +234,44 @@ def test_derivative_description_records_computed_source_and_derived_method(tmp_p
     parameters = written["GeneratedBy"][-1]["Parameters"]
     assert parameters["estimation_window_s"] == 54.0
     assert parameters["transition_bandwidth_hz"] == pytest.approx(3.3 / 54.0)
+    assert parameters["per_edge_transition_bandwidth_hz"] == pytest.approx(3.3 / 108.0)
+    assert parameters["filter_length"] == "auto"
+    assert parameters["fir_window"] == "hamming"
+    assert parameters["fir_design"] == "firwin"
+    assert parameters["pad"] == "reflect_limited"
+
+
+def test_verification_accepts_the_settings_recorded_during_apply(tmp_path):
+    derivative_root = tmp_path / "derivative"
+    derivative_root.mkdir()
+    (derivative_root / "dataset_description.json").write_text(
+        json.dumps({"Name": "source", "BIDSVersion": "1.10.0"}),
+        encoding="utf-8",
+    )
+    applied = _settings()
+    notch.write_harmonic_derivative_description(derivative_root, "../source", applied)
+
+    verified = notch.settings_for_verification(derivative_root, applied)
+
+    assert verified == applied
+
+
+def test_verification_refuses_settings_changed_after_apply(tmp_path):
+    derivative_root = tmp_path / "derivative"
+    derivative_root.mkdir()
+    (derivative_root / "dataset_description.json").write_text(
+        json.dumps({"Name": "source", "BIDSVersion": "1.10.0"}),
+        encoding="utf-8",
+    )
+    applied = _settings()
+    current = notch.HarmonicNotchSettings(
+        estimation_window_s=108.0,
+        frequency_range_hz=applied.frequency_range_hz,
+    )
+    notch.write_harmonic_derivative_description(derivative_root, "../source", applied)
+
+    with pytest.raises(ValueError, match="estimation_window_s.*apply"):
+        notch.settings_for_verification(derivative_root, current)
 
 
 def test_public_pipeline_has_one_automatic_correction_stage():

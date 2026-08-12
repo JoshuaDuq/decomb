@@ -24,7 +24,11 @@ DERIVED: tuple[tuple[str, str], ...] = (
     ("removal.spectral_resolution_hz", "1.4382 / estimation_window_s"),
     (
         "removal.transition_bandwidth_hz",
-        "MNE firwin Hamming constant 3.3 / estimation_window_s",
+        "total notch transition: 3.3 / estimation_window_s",
+    ),
+    (
+        "removal.per_edge_transition_bandwidth_hz",
+        "transition_bandwidth_hz / 2; MNE FIR length uses this width",
     ),
     (
         "removal.minimum_stopband_width_hz",

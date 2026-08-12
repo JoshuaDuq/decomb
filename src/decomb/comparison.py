@@ -140,88 +140,282 @@ def measure_notch_comparison(raw, settings) -> NotchComparison:
     )
 
 
+_SURFACE_COLOUR = "#FCFCFB"
+_GRID_COLOUR = "#E3E2DD"
+_MUTED_COLOUR = "#52514E"
+_SOURCE_COLOUR = "#EB6834"
+_DECOMB_COLOUR = "#0B0B0B"
+_TRADITIONAL_COLOUR = "#2A78D6"
+_FONT_STACK = ("Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans")
+
+# One window this wide spans several detected lines while still rendering a single
+# stopband wider than a pixel, which a 0-100 Hz axis cannot do at README width.
+_DETAIL_WINDOW_HZ = 6.0
+
+# A window the reference arm has covered above this share shows one solid block rather
+# than individual stopbands, so it cannot carry the per-notch geometry.
+_DETAIL_SATURATION_SHARE = 0.95
+
+
+def _covered_width_hz(
+    edges: Sequence[tuple[float, float]],
+    low_hz: float,
+    high_hz: float,
+) -> float:
+    """Total width of non-overlapping intervals inside a range."""
+    return sum(
+        max(0.0, min(high_hz, upper_hz) - max(low_hz, lower_hz)) for lower_hz, upper_hz in edges
+    )
+
+
+def _available_mask(
+    plan: notch.HarmonicNotchPlan,
+    frequencies_hz: np.ndarray,
+) -> np.ndarray:
+    """Grid points that survive a plan: outside every stopband and every transition."""
+    mask = np.ones(frequencies_hz.size, dtype=bool)
+    for low_hz, high_hz in plan.unavailable_edges():
+        mask &= ~((frequencies_hz >= low_hz) & (frequencies_hz <= high_hz))
+    return mask
+
+
+def _detail_window_hz(
+    comparison: NotchComparison,
+    frequency_range_hz: tuple[float, float],
+) -> tuple[float, float]:
+    """Pick the window where the two geometries differ most and both stay legible."""
+    low_hz, high_hz = frequency_range_hz
+    if high_hz - low_hz <= _DETAIL_WINDOW_HZ:
+        return (low_hz, high_hz)
+
+    decomb_edges = comparison.decomb_plan.unavailable_edges()
+    traditional_edges = comparison.traditional_plan.unavailable_edges()
+    best_start_hz: float | None = None
+    best_score_hz = 0.0
+    for start_hz in np.arange(low_hz, high_hz - _DETAIL_WINDOW_HZ, 0.25):
+        stop_hz = start_hz + _DETAIL_WINDOW_HZ
+        traditional_hz = _covered_width_hz(traditional_edges, start_hz, stop_hz)
+        if traditional_hz > _DETAIL_SATURATION_SHARE * _DETAIL_WINDOW_HZ:
+            continue
+        score_hz = traditional_hz - _covered_width_hz(decomb_edges, start_hz, stop_hz)
+        if score_hz > best_score_hz:
+            best_score_hz = score_hz
+            best_start_hz = float(start_hz)
+    if best_start_hz is None:
+        return (high_hz - _DETAIL_WINDOW_HZ, high_hz)
+    return (best_start_hz, best_start_hz + _DETAIL_WINDOW_HZ)
+
+
+def _style_axis(axis) -> None:
+    """Recessive chrome: hairline rules, no top or right spine, muted ticks."""
+    axis.set_facecolor(_SURFACE_COLOUR)
+    for side in ("top", "right"):
+        axis.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        axis.spines[side].set_color(_GRID_COLOUR)
+        axis.spines[side].set_linewidth(0.8)
+    axis.tick_params(colors=_MUTED_COLOUR, labelsize=9, length=3, width=0.8)
+
+
+def _draw_retained_row(
+    axis,
+    frequencies_hz: np.ndarray,
+    spectrum_db: np.ndarray,
+    mask: np.ndarray,
+    colour: str,
+) -> None:
+    """Draw a spectrum only where it survives, so the gaps carry the message.
+
+    Drawing the notches themselves is what turns a 0-100 Hz axis into a barcode, and
+    the dive carries nothing: what a reader needs is which frequencies are left.
+    """
+    axis.plot(
+        frequencies_hz,
+        np.where(mask, spectrum_db, np.nan),
+        color=colour,
+        linewidth=0.9,
+        solid_capstyle="round",
+    )
+    # A surviving sliver can be one grid point wide, and a one-point run has no length
+    # to stroke, so those would silently vanish from the row that most depends on them.
+    isolated = mask & ~np.r_[False, mask[:-1]] & ~np.r_[mask[1:], False]
+    if isolated.any():
+        axis.plot(
+            frequencies_hz[isolated],
+            spectrum_db[isolated],
+            linestyle="none",
+            marker=".",
+            markersize=1.8,
+            markeredgewidth=0.0,
+            color=colour,
+        )
+
+
+def _draw_detail_panel(
+    axis,
+    comparison: NotchComparison,
+    detail_range_hz: tuple[float, float],
+) -> None:
+    """The same two geometries at a scale where one stopband is wider than a pixel.
+
+    Only the reference footprint is shaded.  Shading both arms puts ink over blue and
+    reads as mud, and the decomb trace already shows its own width.
+    """
+    frequencies_hz = comparison.frequencies_hz
+    for low_hz, high_hz in comparison.traditional_plan.unavailable_edges():
+        axis.axvspan(low_hz, high_hz, color=_TRADITIONAL_COLOUR, alpha=0.13, linewidth=0.0)
+
+    axis.plot(
+        frequencies_hz,
+        to_db(comparison.source_psd),
+        color=_SOURCE_COLOUR,
+        linewidth=2.4,
+        solid_capstyle="round",
+        label="before correction",
+    )
+    axis.plot(
+        frequencies_hz,
+        to_db(comparison.traditional_psd),
+        color=_TRADITIONAL_COLOUR,
+        linewidth=1.3,
+        label="MNE default geometry",
+    )
+    axis.plot(
+        frequencies_hz,
+        to_db(comparison.decomb_psd),
+        color=_DECOMB_COLOUR,
+        linewidth=1.3,
+        label="decomb measured widths",
+    )
+
+    detail_mask = (frequencies_hz >= detail_range_hz[0]) & (frequencies_hz <= detail_range_hz[1])
+    axis.set_xlim(detail_range_hz)
+    axis.set_ylim(
+        to_db(comparison.decomb_psd)[detail_mask].min() - 4.0,
+        to_db(comparison.source_psd)[detail_mask].max() + 13.0,
+    )
+    axis.set_ylabel("median PSD (dB re 1 V²/Hz)", fontsize=9, color=_MUTED_COLOUR)
+    axis.set_xlabel("frequency (Hz)", fontsize=9, color=_MUTED_COLOUR)
+
+
 def figure_notch_comparison(
     comparison: NotchComparison,
     path: Path,
     *,
     recording_description: str,
 ) -> None:
-    """Plot real-data outcomes and the bandwidth each notch geometry invalidates."""
+    """Plot the spectrum each notch geometry leaves behind, and one window up close."""
     import matplotlib.pyplot as plt
 
     frequencies_hz = comparison.frequencies_hz
     frequency_range_hz = (float(frequencies_hz[0]), float(frequencies_hz[-1]))
-    figure, axes = plt.subplots(
-        2,
-        1,
-        figsize=(13.0, 7.2),
-        sharex=True,
-        height_ratios=(2.4, 1.0),
-        layout="constrained",
+    span_hz = frequency_range_hz[1] - frequency_range_hz[0]
+    detail_range_hz = _detail_window_hz(comparison, frequency_range_hz)
+    source_db = to_db(comparison.source_psd)
+
+    # The retained samples sit on the uncorrected spectrum to within hundredths of a dB,
+    # so overplotting the three arms would hide two of them.  Small multiples of one
+    # curve turn the comparison into what it actually is: how much of it is left.
+    rows = (
+        (source_db, np.ones(frequencies_hz.size, bool), _SOURCE_COLOUR, "before correction", None),
+        (
+            to_db(comparison.decomb_psd),
+            _available_mask(comparison.decomb_plan, frequencies_hz),
+            _DECOMB_COLOUR,
+            "after decomb measured-width notches",
+            comparison.decomb_plan,
+        ),
+        (
+            to_db(comparison.traditional_psd),
+            _available_mask(comparison.traditional_plan, frequencies_hz),
+            _TRADITIONAL_COLOUR,
+            "after MNE default notch geometry",
+            comparison.traditional_plan,
+        ),
     )
 
-    spectrum_axis, geometry_axis = axes
-    spectrum_axis.plot(
-        frequencies_hz,
-        to_db(comparison.source_psd),
-        color="#F3A28E",
-        linewidth=2.2,
-        label="before correction",
-    )
-    spectrum_axis.plot(
-        frequencies_hz,
-        to_db(comparison.decomb_psd),
-        color="#111827",
-        linewidth=0.8,
-        label="decomb measured-width notches",
-    )
-    spectrum_axis.plot(
-        frequencies_hz,
-        to_db(comparison.traditional_psd),
-        color="#2563A6",
-        linewidth=0.8,
-        linestyle="--",
-        label="same centres, MNE default notch geometry",
-    )
-    spectrum_axis.set_ylabel("median PSD (dB re 1 V²/Hz)")
-    spectrum_axis.set_title(
-        "Measured narrow notches versus conventional notch geometry\n"
-        f"{recording_description}; real EEG; identical detected centres"
-    )
-    spectrum_axis.legend(loc="upper right", fontsize=8)
+    with plt.rc_context({"font.family": "sans-serif", "font.sans-serif": _FONT_STACK}):
+        figure = plt.figure(figsize=(11.5, 8.8), layout="constrained")
+        figure.set_facecolor(_SURFACE_COLOUR)
+        grid = figure.add_gridspec(4, 1, height_ratios=(1.0, 1.0, 1.0, 2.3), hspace=0.06)
 
-    geometries = (
-        (comparison.decomb_plan, 1.0, "#111827"),
-        (comparison.traditional_plan, 0.0, "#2563A6"),
-    )
-    for plan, y_position, colour in geometries:
-        for low_hz, high_hz in plan.unavailable_edges():
-            clipped_low_hz = max(frequency_range_hz[0], low_hz)
-            clipped_high_hz = min(frequency_range_hz[1], high_hz)
-            if clipped_high_hz > clipped_low_hz:
-                geometry_axis.hlines(
-                    y_position,
-                    clipped_low_hz,
-                    clipped_high_hz,
-                    color=colour,
-                    linewidth=7.0,
-                )
-        width_hz = unavailable_width_hz(plan, frequency_range_hz)
-        geometry_axis.text(
-            frequency_range_hz[1],
-            y_position + 0.16,
-            f"{width_hz:.1f} Hz unavailable",
-            ha="right",
-            va="bottom",
-            fontsize=8,
-            color=colour,
+        retained_axes = []
+        for index, (spectrum_db, mask, colour, name, plan) in enumerate(rows):
+            shared = {"sharex": retained_axes[0], "sharey": retained_axes[0]} if index else {}
+            axis = figure.add_subplot(grid[index], **shared)
+            retained_axes.append(axis)
+            _style_axis(axis)
+            axis.grid(axis="y", color=_GRID_COLOUR, linewidth=0.6)
+            axis.set_axisbelow(True)
+            _draw_retained_row(axis, frequencies_hz, spectrum_db, mask, colour)
+
+            available_hz = (
+                span_hz
+                if plan is None
+                else span_hz - unavailable_width_hz(plan, frequency_range_hz)
+            )
+            # Both row labels sit on the title baseline above the axes, so the curve
+            # keeps the whole row instead of giving up headroom to text.
+            axis.set_title(name, fontsize=10, color=colour, loc="left", pad=6.0)
+            axis.annotate(
+                f"{available_hz:.1f} Hz of {span_hz:.0f} Hz left to analyse",
+                xy=(1.0, 1.0),
+                xycoords="axes fraction",
+                xytext=(0.0, 6.0),
+                textcoords="offset points",
+                ha="right",
+                va="baseline",
+                fontsize=10,
+                color=colour,
+            )
+            axis.yaxis.set_major_locator(plt.MaxNLocator(3))
+            if index < len(rows) - 1:
+                axis.tick_params(labelbottom=False)
+
+        retained_axes[0].set_xlim(frequency_range_hz)
+        retained_axes[0].set_ylim(source_db.min() - 4.0, source_db.max() + 4.0)
+        retained_axes[1].set_ylabel("median PSD (dB re 1 V²/Hz)", fontsize=9, color=_MUTED_COLOUR)
+        retained_axes[-1].set_xlabel("frequency (Hz)", fontsize=9, color=_MUTED_COLOUR)
+
+        detail_axis = figure.add_subplot(grid[3])
+        _style_axis(detail_axis)
+        _draw_detail_panel(detail_axis, comparison, detail_range_hz)
+        detail_axis.set_title(
+            f"why: one 6 Hz window at {detail_range_hz[0]:.1f}–{detail_range_hz[1]:.1f} Hz   ·   "
+            "shading marks the bandwidth the MNE defaults remove",
+            fontsize=9.5,
+            color=_MUTED_COLOUR,
+            loc="left",
+            pad=10.0,
         )
-    geometry_axis.set_yticks([0.0, 1.0], ["MNE defaults", "decomb"])
-    geometry_axis.set_ylim(-0.45, 1.5)
-    geometry_axis.set_xlabel("frequency (Hz)")
-    geometry_axis.set_ylabel("stopbands + transitions")
-    geometry_axis.set_xlim(frequency_range_hz)
+        legend = detail_axis.legend(
+            loc="upper right",
+            ncols=3,
+            fontsize=9.5,
+            handlelength=1.6,
+            columnspacing=1.6,
+            borderaxespad=0.2,
+            facecolor=_SURFACE_COLOUR,
+            edgecolor="none",
+            framealpha=0.92,
+        )
+        for text in legend.get_texts():
+            text.set_color(_MUTED_COLOUR)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, dpi=200)
-    plt.close(figure)
+        figure.suptitle(
+            "Both arms remove the same detected lines. Only the filter geometry differs.",
+            fontsize=13.5,
+            color=_DECOMB_COLOUR,
+        )
+        # supxlabel rather than a free figure.text: the layout engine reserves room for
+        # it, so the caption cannot land on top of the detail panel's own axis label.
+        figure.supxlabel(
+            f"{recording_description} · real EEG · identical detected centres · each "
+            "spectrum is drawn only where that arm leaves the band usable for inference",
+            fontsize=9,
+            color=_MUTED_COLOUR,
+        )
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=200, facecolor=_SURFACE_COLOUR)
+        plt.close(figure)
