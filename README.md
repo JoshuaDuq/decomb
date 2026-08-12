@@ -293,6 +293,12 @@ The measured decomb geometry makes 10.5 Hz unavailable. MNE default geometry mak
 frequency above 39.0 Hz. Retained frequencies reproduce the uncorrected spectrum within
 0.07 dB at the 95th percentile in both arms.
 
+The three spectrum panels draw each spectrum only where its own arm leaves the band
+available, so the gaps are the removed bandwidth rather than measured attenuation. The
+lowest panel is the two filter geometries themselves over one 6 Hz window, drawn to
+scale: decomb places five stopbands of 0.11 Hz and leaves 1.09 Hz gaps, while the MNE
+defaults place five of 1.10 Hz and leave 0.10 Hz gaps.
+
 ![Decomb and MNE default notch geometry on one real EEG recording](docs/notch_comparison_real.png)
 
 The figure can be regenerated from a configured source dataset.
