@@ -16,21 +16,26 @@ tests, figures, and other files will remain untouched.
 The README will contain the following sections.
 
 1. Logo and scientific summary
-2. Scope
-3. Installation
-4. Quick start
-5. Configuration
-6. Methods
-7. Outputs and provenance
-8. Real-data comparison
-9. Software and testing
-10. References
-11. License
+2. Problem statement
+3. Scope
+4. Installation
+5. Quick start
+6. Configuration
+7. Methods
+8. Outputs and provenance
+9. Real-data comparison
+10. Software and testing
+11. References
+12. License
 
 ## Content requirements
 
 The existing logo will remain at the top. The README will contain one scientific plot,
 which will be the real-data comparison with MNE default notch geometry.
+
+The problem statement will describe the residual narrowband harmonic and isolated
+artifacts addressed by the software, the intended EEG context, and the inferential
+limits of stopband filtering.
 
 Equations and mathematical notation will be removed. Each method will be described in
 concise natural language. The descriptions will retain the estimation-window procedure,
