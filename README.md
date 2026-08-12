@@ -17,46 +17,15 @@ gradient and pulse artifact correction [[1](#user-content-ref-1),
 sources [[3](#user-content-ref-3), [4](#user-content-ref-4)]. Their frequencies can drift
 within a recording and can occur as a harmonic series or as isolated narrowband lines.
 
-At an affected frequency and time window, the electrode-space Fourier coefficient is
-only the observed sum of neural and artifactual contributions,
-
-$$
-\mathbf{X}(f,t)=\mathbf{N}(f,t)+\mathbf{A}(f,t).
-$$
-
-This observation does not identify either summand. For any complex-valued
-$\boldsymbol{\Delta}(f,t)$, the alternative decomposition
-
-$$
-\mathbf{X}=(\mathbf{N}+\boldsymbol{\Delta})
-          +(\mathbf{A}-\boldsymbol{\Delta})
-$$
-
-produces exactly the same recording. Harmonic regularity and frequency trajectories
-can therefore identify *where* a narrow contaminant is present, but they do not provide
-the missing independent observation needed to determine how much of the coefficient
-was neural. Multichannel source-separation methods add assumptions such as statistical
-independence, non-Gaussianity, or distinct spatial mixing; they do not make an
-overlapping neural and artifactual component uniquely recoverable when those assumptions
-cannot be established from the recording [[20](#user-content-ref-20)].
-
-A notch filter makes this loss explicit. In the frequency domain its output is
-$\mathbf{Y}(f)=H(f)\mathbf{X}(f)$. Where $H(f)$ is zero, the mapping is non-invertible;
-where it is merely small, inversion restores the contaminated mixture and amplifies
-error rather than separating $\mathbf{N}$ from $\mathbf{A}$. The filter consequently
-attenuates any neural activity in its stopband together with the artifact. Narrower
-frequency rejection reduces the discarded bandwidth but introduces the familiar
-frequency-selectivity versus temporal-ringing trade-off; it does not recover the neural
-realization at the rejected frequencies [[6](#user-content-ref-6),
+The recording alone does not uniquely separate neural and artifactual contributions at
+the same frequency. Source-separation methods require additional assumptions and cannot
+establish unique recovery when those assumptions are unsupported
+[[20](#user-content-ref-20)]. Filtering attenuates neural activity together with the
+artifact and does not reconstruct the rejected signal [[6](#user-content-ref-6),
 [21](#user-content-ref-21), [22](#user-content-ref-22)].
 
-Regression, interpolation, source separation, or a learned model can generate an
-estimate only by supplying additional assumptions or information. Without a clean
-reference, a known artifact waveform or spatial field, repeated measurements, or other
-independent constraints, a plausible replacement cannot be verified as the neural
-signal that actually occurred. `decomb` therefore does not impute or claim neural
-recovery. It minimizes the rejected bandwidth, records every stopband and transition as
-unavailable for inference, and leaves physical attribution to independent evidence.
+`decomb` therefore records every stopband and transition as unavailable for inference
+and does not impute neural activity. Physical attribution requires independent evidence.
 Source control remains preferable when the source is known
 [[5](#user-content-ref-5)].
 
@@ -64,8 +33,7 @@ Source control remains preferable when the source is known
 
 Input recordings must use BrainVision format in an EEG-BIDS dataset
 [[12](#user-content-ref-12), [14](#user-content-ref-14)]. Subject directories may contain
-optional session and run entities. MNE-BIDS reads each recording with data preloaded.
-Channel metadata mismatches raise an error.
+optional session and run entities. Channel metadata mismatches raise an error.
 
 All channels typed as EEG are included in spectral estimation. Recordings must contain
 finite values and at least one complete estimation window. Isolated-line detection
@@ -74,8 +42,7 @@ annotations are not used.
 
 The method identifies narrow spectral structure. Broad rhythms and transient artifacts
 require temporal or spatial methods [[7](#user-content-ref-7)]. A detected comb does not
-identify its physical source. Neural and artifactual activity at the same frequency
-cannot be separated from one EEG recording.
+identify its physical source.
 
 ## Installation
 
@@ -85,12 +52,6 @@ Python 3.11 or newer is required.
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
-```
-
-Development dependencies are installed from the source checkout.
-
-```bash
-python3 -m pip install -e '.[dev]'
 ```
 
 ## Quick start
@@ -131,14 +92,6 @@ frequency spacing, resolution, stopband width, transition width, and FIR duratio
 packaged defaults. Optional `frequency_bands` entries report unavailable and retained
 bandwidth and do not affect detection.
 
-Configuration is resolved in this order.
-
-1. Command-line path overrides
-2. The file supplied with `--config`
-3. The `DECOMB_CONFIG` environment variable
-4. `decomb.yaml` in the working directory
-5. Packaged defaults
-
 Unknown and obsolete settings raise an error. The upper analysis frequency cannot
 exceed 100 Hz and is limited by the available spectrum and recording Nyquist frequency.
 
@@ -150,52 +103,37 @@ The configured duration is converted to the nearest whole number of samples. Win
 overlap by 50 percent, and the final window is aligned with the end of the recording. A
 greedy non-overlapping subset supplies independent observations for model comparison.
 
-Each EEG window is multiplied by a Hann window. A one-sided periodogram is normalized by
-sampling frequency and Hann energy. Zero frequency and even-length Nyquist bins retain
-their original power. Every other stored positive-frequency bin is doubled, including
-the final bin for odd-length windows. Window spectra are summarized by their channel
-median. The whole-recording spectrum averages window power within each channel before
-the channel median is calculated.
-
-Power is represented in decibels. Local maxima are refined by three-point parabolic
-interpolation in decibel space. The Hann half-power resolution follows Harris
-[[8](#user-content-ref-8)].
+Each EEG window is multiplied by a Hann window. A normalized one-sided periodogram is
+summarized by the channel median. The whole-recording spectrum averages window power
+within each channel before calculating the channel median. Power is represented in
+decibels, and local maxima are refined by three-point parabolic interpolation. Hann
+resolution follows Harris [[8](#user-content-ref-8)].
 
 ### Comb selection
 
-Candidate fundamentals begin at twice the Hann half-power resolution and end at one
-quarter of the upper analysis frequency. This range requires at least four observable
-harmonics. Candidate spacing becomes finer as the highest observable harmonic
-increases.
-
-For every candidate, power on the harmonic grid is compared with power halfway between
-adjacent grid positions. A zero-mean model is compared with a model containing one
-positive shared mean. The Bayesian information criterion includes the fitted mean, the
-number of evaluated harmonics, and a penalty for the number of candidate fundamentals
-searched [[9](#user-content-ref-9)]. Supported candidates have a lower criterion value
-than the zero-mean model. They are ranked by mean grid contrast weighted by the square
-root of the harmonic count, with the criterion value resolving ties.
+Candidate fundamentals must place at least four harmonics in the analysis range. Power
+on each harmonic grid is compared with power halfway between adjacent grid positions. A
+zero-mean model is compared with a positive shared-mean model by Bayesian information
+criterion, including a penalty for the number of candidates searched
+[[9](#user-content-ref-9)]. Supported candidates are ranked by mean grid contrast
+weighted by harmonic count.
 
 Every integer multiple of the selected fundamental within the analysis range is
 retained. Each harmonic is localized within one Hann half-power resolution of its
 predicted position in the whole-recording spectrum and every overlapping window.
-Amplitude, prominence, prevalence, and harmonic-number thresholds do not decide
-admission.
 
 ### Isolated-line selection
 
 SciPy `find_peaks` finds local maxima outside the selected comb
-[[16](#user-content-ref-16)]. Each maximum is assigned its contiguous half-power basin.
-Overlapping basins are represented by their strongest maximum. The strongest maximum
-inside each basin is localized independently in every window.
+[[16](#user-content-ref-16)]. Each candidate is assigned a half-power basin and localized
+independently in every window.
 
 Two Bayesian information criterion comparisons are required. The temporal comparison
 tests whether power at the tracked peak is consistently greater than power two Hann
 resolutions to either side in independent windows. The shape comparison tests a
 positive Hann line response against a quadratic background in linear power. The shape
-fit uses at least eight local frequency bins and charges one position parameter for each
-independent window. Both comparisons must support the line. The least favorable result
-is written to the manifest.
+fit uses at least eight local frequency bins and accounts for each independently fitted
+window position. Both comparisons must support the line.
 
 ### Stopbands and FIR filtering
 
@@ -221,17 +159,9 @@ passed to MNE `Raw.notch_filter` in one call, and only EEG channels are modified
 | `pad` | `reflect_limited` |
 | `n_jobs` | `-1` |
 
-This is a one-pass, zero-phase, noncausal FIR design with delay compensation. MNE reports
-0.0194 dB passband ripple and 53 dB stopband attenuation for the Hamming `firwin` design
-[[6](#user-content-ref-6)]. Automatic length uses the per-edge transition width and is
-approximately twice the estimation-window duration. The default duration therefore
-produces a filter of approximately 108 seconds, with sample rounding to an odd
-coefficient count.
-
-Before filtering, `decomb` constructs the same design with MNE `create_filter`. The
-manifest records its exact sample count, duration, minimum measured stopband attenuation,
-and maximum measured passband deviation. A transition reaching zero frequency or
-Nyquist raises an error.
+This is a one-pass, zero-phase, noncausal FIR design with delay compensation. The
+manifest records its exact sample count and measured response. A transition reaching
+zero frequency or Nyquist raises an error [[6](#user-content-ref-6)].
 
 ### Attenuation and verification
 
@@ -240,43 +170,28 @@ channels. Source and derivative spectra use complete, non-overlapping Hann block
 the configured duration. Samples outside the final complete block are excluded. The
 reported change is the decibel ratio of derivative power to source power.
 
-The derivative uses multiplexed little-endian BrainVision `IEEE_FLOAT_32` data and
-`_desc-decomb_eeg.vhdr`, `.vmrk`, and `.eeg` filenames. Internal BrainVision references
-are rewritten. Every channel retains its declared unit and resolution. Each written
-recording is read from disk and compared with the expected quantized values. A deviation
-above the float32 quantization bound raises an error.
-
-Independent verification first compares the current scientific settings with the
-apply-time settings in `dataset_description.json`. It then checks channel names, channel
-types, sample count, sampling frequency, and spectral grids. Stopband attenuation and
-the largest adjacent available-line contrast are recomputed from disk without fitting
-new targets.
+Each derivative recording is read from disk and checked against the expected values.
+Independent verification confirms that scientific settings and recording metadata match
+the apply stage, then recomputes stopband attenuation and adjacent available-line
+contrast without fitting new targets.
 
 Quality-control spectra use MNE `Raw.compute_psd` with Welch estimation
 [[18](#user-content-ref-18)]. Source and derivative files use identical EEG channels,
 samples, segment duration, 50 percent overlap, frequency range, and frequency grid. MNE
-defaults provide a Hamming segment window, mean removal within each segment, mean
-aggregation, and omission of spans marked by bad annotations. The channel median
-produces one spectrum per recording.
+defaults provide a Hamming segment window, segment mean removal, mean aggregation, and
+omission of spans marked by bad annotations. The channel median produces one spectrum
+per recording.
 
 ## Outputs and provenance
 
 The output follows EEG-BIDS and BIDS derivative conventions
 [[12](#user-content-ref-12), [13](#user-content-ref-13),
-[19](#user-content-ref-19)]. Unchanged metadata files are copied. Hidden, backup,
-temporary, lock, and source BrainVision files are excluded. Corrected triplets receive a
-`_desc-decomb` entity.
-
-| Output | Contents |
-| --- | --- |
-| `harmonic_notch_manifest.tsv` | Targets, evidence, intervals, FIR response, attenuation, and quantization |
-| `dataset_description.json` | Derivative declaration, version, settings, and source URL |
-| `effective_config_apply.txt` | Apply-time values and their packaged, user, or derived origin |
-| `effective_config_verify.txt` | Verification-time values and their packaged, user, or derived origin |
-| `harmonic_notch_verification.tsv` | Independently measured attenuation and adjacent available-line contrast |
-| PSD outputs | Matched figures and numerical source and derivative spectra |
-
-Floating-point geometry is written with 17 significant digits.
+[19](#user-content-ref-19)]. Corrected BrainVision triplets receive a `_desc-decomb`
+entity. The derivative includes a stopband manifest, `dataset_description.json`, apply
+and verification configurations, an independent verification table, and matched PSD
+products. The manifest records targets, model evidence, interval geometry, FIR response,
+attenuation, and unavailable bandwidth. Floating-point geometry is written with 17
+significant digits.
 
 ## Real-data comparison
 
@@ -293,61 +208,25 @@ The measured decomb geometry makes 10.5 Hz unavailable. MNE default geometry mak
 frequency above 39.0 Hz. Retained frequencies reproduce the uncorrected spectrum within
 0.07 dB at the 95th percentile in both arms.
 
-The three spectrum panels draw each spectrum only where its own arm leaves the band
-available, so the gaps are the removed bandwidth rather than measured attenuation. The
-lowest panel is the two filter geometries themselves over one 6 Hz window, drawn to
-scale: decomb places five stopbands of 0.11 Hz and leaves 1.09 Hz gaps, while the MNE
-defaults place five of 1.10 Hz and leave 0.10 Hz gaps.
-
 ![Decomb and MNE default notch geometry on one real EEG recording](docs/notch_comparison_real.png)
 
-The figure can be regenerated from a configured source dataset.
-
-```bash
-python3 docs/make_notch_comparison_real.py \
-  --config decomb.yaml --subject sub-0011 --recording-index 1
-```
-
 The participant audit comprised 90 recordings from 15 participants and 12.1 hours of
-EEG. All recordings selected 83 harmonics, with fitted fundamentals from 1.199659 to
-1.200551 Hz. Verification reconstructed 8,120 stopbands and measured a median stopband
-power change of -28.64 dB.
+EEG. Verification reconstructed 8,120 stopbands and measured a median stopband power
+change of -28.64 dB.
 
 ## Software and testing
 
-The project version is `0.1.0`. Minimum runtime versions reproduce the constraints in
-`pyproject.toml`.
-
-The numerical stack uses NumPy [[15](#user-content-ref-15)], SciPy
-[[16](#user-content-ref-16)], MNE-Python [[10](#user-content-ref-10),
-[11](#user-content-ref-11)], MNE-BIDS [[14](#user-content-ref-14)], and Matplotlib
-[[17](#user-content-ref-17)].
-
-| Software | Minimum version | Use |
-| --- | --- | --- |
-| Python | 3.11 | Runtime and command-line interface |
-| NumPy | 1.24 | Arrays, FFT, least squares, interpolation, and summaries |
-| SciPy | 1.11 | Local-maximum detection with `find_peaks` |
-| MNE-Python | 1.6 | EEG selection, FIR filtering, filter construction, and Welch spectra |
-| MNE-BIDS | 0.14 | BIDS path parsing and BrainVision reading |
-| pandas | 2.0 | Manifest and report tables |
-| PyYAML | 6.0 | Configuration loading |
-| Matplotlib | 3.8 | Noninteractive figures |
-| joblib | 1.3 | Parallel execution backend |
-| pybv | 0.7.5 | BrainVision test and export support |
-
-Resolved versions for an analysis can be recorded with `python3 -m pip freeze`.
+Version `0.1.0` requires Python 3.11, NumPy 1.24
+[[15](#user-content-ref-15)], SciPy 1.11 [[16](#user-content-ref-16)], MNE-Python 1.6
+[[10](#user-content-ref-10), [11](#user-content-ref-11)], MNE-BIDS 0.14
+[[14](#user-content-ref-14)], pandas 2.0, PyYAML 6.0, Matplotlib 3.8
+[[17](#user-content-ref-17)], joblib 1.3, and pybv 0.7.5. Package roles and constraints are
+declared in [`pyproject.toml`](pyproject.toml).
 
 ```bash
 .venv/bin/pytest -q
 .venv/bin/ruff check src tests
 ```
-
-The tests cover spectral scaling, peak refinement, comb and isolated-line selection,
-window independence, stopband geometry, MNE filtering, BIDS discovery and naming,
-unit-aware quantization, sidecar rewriting, configuration validation, immutable
-verification settings, FIR response provenance, command routing, and matched PSD
-computation.
 
 ## References
 
