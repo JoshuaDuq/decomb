@@ -1,16 +1,9 @@
-"""Detection-procedure ablations sharing decomb's own tests, windows, and FIR geometry.
+"""Complete-family Bonferroni ablation of decomb's Holm procedure.
 
-Isolates the effect of the per-channel multiplicity procedure -- Holm (decomb's real
-pipeline), plain Bonferroni, or no correction at all (matching MNE's uncorrected
-``spectrum_fit`` threshold) -- by holding every other stage fixed: the same Thomson
-F-test, the same windows, and the same stopband-width and merge rule.
-
-Harmonic classification is intentionally skipped here. It is a descriptive label that
-never changes which frequencies get filtered (decomb's own README states this: "either
-way, exactly the same significant frequencies are filtered"), and its candidate-
-fundamental search scales with detection count -- fine under Holm's real-world sparsity,
-but combinatorially expensive once an ablation deliberately removes multiplicity control
-and produces thousands of nominal detections on ordinary data.
+Both procedures share the Thomson tests, windows, channel families, stopband geometry,
+recording-wide filtering, and terminal-null convergence rule. Harmonic classification is
+omitted from the Bonferroni arm because it is descriptive and cannot change the filtered
+frequencies.
 """
 
 from __future__ import annotations
@@ -79,38 +72,47 @@ def isolated_model(
     )
 
 
-def fit_ablation_model(raw, settings, *, correction: str) -> lines.ArtifactModel:
-    """Fit an isolated-line-only model with a chosen per-channel correction procedure."""
-    result = notch.detect_channel_lines(raw, settings, correction=correction)
+def fit_bonferroni_model(raw, settings) -> lines.ArtifactModel:
+    """Fit the first-round recording-family Bonferroni ablation."""
+    round_settings = settings.for_round(1)
+    frequencies_hz, p_values = notch._thomson_f_p_values(raw, round_settings)
+    result = lines.detect_lines_with_bonferroni_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=round_settings.familywise_error_rate,
+    )
     return isolated_model(result, channel_names=notch.eeg_channel_names(raw))
 
 
-def fit_model(raw, settings, *, correction: str) -> lines.ArtifactModel:
-    """Fit the model decomb would filter from, for any of the three ablation arms.
-
-    Holm keeps decomb's real pipeline, including harmonic classification, since Holm's
-    false-positive control keeps its detection counts small. Bonferroni and uncorrected
-    detection use the cheaper isolated-only model for the reason above.
-    """
-    if correction == "holm":
-        return notch.fit_harmonic_model(raw, settings, correction="holm")
-    return fit_ablation_model(raw, settings, correction=correction)
-
-
-def fit_models_every_correction(raw, settings) -> dict[str, lines.ArtifactModel]:
-    """One model per correction procedure, from one shared Thomson F-test pass."""
+def fit_holm_and_bonferroni_models(raw, settings) -> dict[str, lines.ArtifactModel]:
+    """Holm and Bonferroni models from one shared Thomson F-test pass."""
+    round_settings = settings.for_round(1)
     channel_names = notch.eeg_channel_names(raw)
-    results = notch.detect_channel_lines_every_correction(raw, settings)
-    models = {
-        correction: isolated_model(result, channel_names=channel_names)
-        for correction, result in results.items()
-        if correction != "holm"
-    }
-    models["holm"] = lines.build_artifact_model(
+    results = notch.detect_channel_lines_holm_and_bonferroni(raw, round_settings)
+    holm_model = lines.build_artifact_model(
         results["holm"],
         channel_names=channel_names,
-        frequency_bin_width_hz=settings.frequency_bin_width_hz,
-        spectral_resolution_hz=settings.spectral_resolution_hz,
-        familywise_error_rate=settings.familywise_error_rate,
+        frequency_bin_width_hz=round_settings.frequency_bin_width_hz,
+        spectral_resolution_hz=round_settings.frequency_bin_width_hz,
+        familywise_error_rate=round_settings.familywise_error_rate,
     )
-    return models
+    bonferroni_model = isolated_model(
+        results["bonferroni"],
+        channel_names=channel_names,
+    )
+    return {"holm": holm_model, "bonferroni": bonferroni_model}
+
+
+def clean_until_no_bonferroni_lines(raw, settings) -> notch.HarmonicCleaningResult:
+    """Apply recording-wide FIR rounds until a fresh Bonferroni fit is null."""
+    return notch._clean_until_model_null(
+        raw,
+        settings,
+        lines.detect_lines_with_bonferroni_from_p_values,
+        _isolated_model_from_detection,
+    )
+
+
+def _isolated_model_from_detection(raw, result, settings) -> lines.ArtifactModel:
+    del settings
+    return isolated_model(result, channel_names=notch.eeg_channel_names(raw))

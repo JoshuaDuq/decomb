@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
+import mne
 import pandas as pd
 
 from decomb import notch, recordings
@@ -29,10 +30,16 @@ def _diagnose_recording(
     raw = recordings.read_bids_raw(vhdr)
     model = notch.fit_harmonic_model(raw, settings)
     plans = notch.plan_channel_notches(model, settings)
-    unavailable_channel_bandwidth_hz = sum(
-        high_hz - low_hz
-        for plan in plans
-        for low_hz, high_hz in plan.geometry.unavailable_edges()
+    filter_plan = (
+        notch.recording_plan_from_channel_plans(plans) if plans else None
+    )
+    filtered_eeg_channel_count = len(
+        mne.pick_types(raw.info, eeg=True, exclude=())
+    )
+    unavailable_bandwidth_hz = (
+        0.0
+        if filter_plan is None
+        else sum(high_hz - low_hz for low_hz, high_hz in filter_plan.unavailable_edges())
     )
     harmonic_line_count = sum(
         line.harmonic is not None
@@ -49,10 +56,18 @@ def _diagnose_recording(
         "n_detected_channel_lines": model.line_count,
         "n_harmonic_lines": harmonic_line_count,
         "n_isolated_lines": model.line_count - harmonic_line_count,
-        "n_channel_stopbands": sum(
-            len(plan.geometry.stopbands) for plan in plans
+        "n_recording_stopbands": (
+            0 if filter_plan is None else len(filter_plan.stopbands)
         ),
-        "unavailable_channel_bandwidth_hz": unavailable_channel_bandwidth_hz,
+        "n_filtered_eeg_channels": filtered_eeg_channel_count,
+        "n_channel_stopbands": (
+            0
+            if filter_plan is None
+            else len(filter_plan.stopbands) * filtered_eeg_channel_count
+        ),
+        "unavailable_channel_bandwidth_hz": (
+            unavailable_bandwidth_hz * filtered_eeg_channel_count
+        ),
         "estimation_window_count": model.window_count,
         "detection_test_count_per_channel": model.test_count_per_channel,
         "total_detection_test_count": (

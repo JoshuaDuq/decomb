@@ -38,6 +38,13 @@ def test_hann_periodogram_rejects_non_finite_data():
         spectral.hann_periodogram(np.array([1.0, np.nan, 2.0]), 500.0)
 
 
+def test_hann_periodogram_removes_each_windows_dc_level():
+    frequencies_hz, power = spectral.hann_periodogram(np.ones(128), 128.0)
+
+    assert frequencies_hz.shape == power.shape
+    np.testing.assert_array_equal(power, np.zeros_like(power))
+
+
 def test_hann_periodogram_doubles_the_last_positive_bin_for_odd_sample_counts():
     sample_count = 9
     sampling_frequency_hz = 100.0
@@ -48,15 +55,9 @@ def test_hann_periodogram_doubles_the_last_positive_bin_for_odd_sample_counts():
         data,
         fs=sampling_frequency_hz,
         window=np.hanning(sample_count),
-        detrend=False,
+        detrend="constant",
         return_onesided=True,
         scaling="density",
     )
 
     assert np.allclose(observed, expected)
-
-
-def test_hann_resolution_scales_inversely_with_duration():
-    assert spectral.hann_resolution_hz(21.6) == pytest.approx(
-        spectral.hann_resolution_hz(10.8) / 2.0
-    )

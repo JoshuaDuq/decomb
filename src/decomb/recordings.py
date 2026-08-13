@@ -91,7 +91,13 @@ def estimation_window_samples(sampling_frequency_hz: float, window_s: float) -> 
         raise ValueError("The sampling frequency must be finite and positive.")
     if not np.isfinite(window_s) or window_s <= 0.0:
         raise ValueError("The estimation window must be finite and positive.")
-    samples = int(round(window_s * sampling_frequency_hz))
+    requested_samples = window_s * sampling_frequency_hz
+    samples = int(round(requested_samples))
+    if not np.isclose(requested_samples, samples, rtol=0.0, atol=1e-9):
+        raise ValueError(
+            f"estimation_window_s={window_s:g} s is not a whole number of samples "
+            f"at {sampling_frequency_hz:g} Hz."
+        )
     if samples < 2:
         raise ValueError(
             f"estimation_window_s={window_s:g} s is under two samples at "

@@ -132,10 +132,9 @@ def surrogate_raw(
     """
     import mne
 
-    picks = mne.pick_types(raw.info, eeg=True, exclude=())
+    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
     if len(picks) == 0:
-        raise ValueError("Surrogate generation requires at least one EEG channel.")
-    channel_names = [raw.ch_names[index] for index in picks]
+        raise ValueError("Surrogate generation requires at least one non-bad EEG channel.")
     sampling_frequency_hz = float(raw.info["sfreq"])
     surrogate_data = surrogate_eeg_data(
         raw.get_data(picks=picks),
@@ -143,12 +142,8 @@ def surrogate_raw(
         rng,
         smoothing_hz=smoothing_hz,
     )
-    surrogate = mne.io.RawArray(
-        surrogate_data,
-        mne.create_info(channel_names, sampling_frequency_hz, "eeg"),
-        verbose="ERROR",
-    )
-    surrogate.set_annotations(raw.annotations.copy())
+    surrogate = raw.copy().pick(picks).load_data()
+    surrogate._data[:] = surrogate_data
     return surrogate
 
 

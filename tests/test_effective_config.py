@@ -57,6 +57,7 @@ class TestTheReport:
         assert "removal.estimation_window_s" in names
         assert "removal.familywise_error_rate" in names
         assert "removal.transition_bandwidth_hz" in names
+        assert "removal.alpha_spending_rule" in names
         assert "frequency_bands.gamma" in names
 
     def test_derived_values_appear_with_the_expression_that_made_them(self, tmp_path):
@@ -77,7 +78,7 @@ class TestTheReport:
 
         table = {name: value for name, value, _ in effective.rows(config, settings)}
 
-        assert float(table["removal.spectral_resolution_hz"]) == pytest.approx(1.4382 / 108.0)
+        assert float(table["removal.frequency_bin_width_hz"]) == pytest.approx(1.0 / 108.0)
 
     def test_it_is_written_where_the_outputs_go(self, tmp_path):
         config = _config(tmp_path, {})

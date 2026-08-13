@@ -21,7 +21,6 @@ from decomb.config import DecombConfig
 #: Settings the workflow computes rather than reads, with the expression that produces
 #: each. These appear in no config file, so without this they are invisible to a reader.
 DERIVED: tuple[tuple[str, str], ...] = (
-    ("removal.spectral_resolution_hz", "1.4382 / estimation_window_s"),
     (
         "removal.transition_bandwidth_hz",
         "total notch transition: 3.3 / estimation_window_s",
@@ -31,6 +30,10 @@ DERIVED: tuple[tuple[str, str], ...] = (
         "transition_bandwidth_hz / 2; MNE FIR length uses this width",
     ),
     ("removal.frequency_bin_width_hz", "1 / estimation_window_s"),
+    (
+        "removal.alpha_spending_rule",
+        "familywise alpha / (round * (round + 1))",
+    ),
 )
 
 

@@ -1,30 +1,23 @@
-"""Before-and-after power spectra of the removal, computed with MNE.
+"""Before-and-after power spectra of the removal, drawn by MNE.
 
     decomb psd
 
-Answers the question a reader asks first: what did this actually take out? Three figures
-from Welch spectra computed with MNE on the source and line-notch
-derivative: an overview, readable frequency tiles, and one panel per recording.
+Two figures from one recording: the source spectrum and the line-notch derivative's,
+each an MNE per-channel Welch spectrum with sensor-position colours and the sensor
+inset. Nothing else is drawn, so what a reader compares is the same plot twice.
 
-The tiled figure exists because the overview cannot answer the second question. Drawing
-the whole band on one axis puts several frequency bins in every pixel, so a comb line is
-sub-pixel from its neighbour: the overview shows that the lines went, and cannot show
-whether they went surgically or took their surroundings with them.
-
-It runs after ``apply`` and compares the source against the single delivered derivative.
+The pair is only worth reading if both sides were measured identically, so the spectra
+are computed with one set of parameters, on the same channels, over the same samples,
+and on one shared decibel scale. The stage refuses when the recordings do not
+correspond, and it runs after ``apply``.
 
 Unlike the stages that transform or certify, this one accepts ``--subjects``: a figure of
 part of a cohort is a smaller figure, not a false claim about the whole one.
-
-The comparison is only worth reading if both sides were measured identically, so the
-spectra are computed with one set of parameters, on the same channels, over the same
-samples, and the stage refuses when the recordings do not correspond.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +29,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from decomb import recordings  # noqa: E402
-from decomb.spectral import to_db  # noqa: E402
+
+BEFORE_NAME = "psd_before.png"
+AFTER_NAME = "psd_after.png"
 
 
 @dataclass(frozen=True)
@@ -65,10 +60,6 @@ class PsdSettings:
     def overlap(self) -> float:
         return 0.5
 
-    @property
-    def panel_span_hz(self) -> float:
-        return 10.0
-
     @classmethod
     def from_config(cls, config) -> PsdSettings:
         from decomb.notch import HarmonicNotchSettings
@@ -80,17 +71,20 @@ class PsdSettings:
         )
 
 
-def channel_median_psd(raw, settings: PsdSettings) -> tuple[np.ndarray, np.ndarray]:
-    """Welch PSD of the EEG channels via MNE, followed by their median.
+def channel_spectrum(raw, settings: PsdSettings):
+    """Per-channel Welch spectrum of the EEG channels, computed by MNE.
 
-    EEG only: ECG and EOG carry different units and amplitudes, and averaging them in would
-    put a millivolt trace on the same axis as a microvolt one.
+    Every channel is kept rather than reduced to one summary trace, because the figure's
+    subject is what the removal did to each channel.
 
-    The median rather than the mean across channels, because one bad channel should not set
-    the level of a cohort figure.
+    EEG only: ECG and EOG carry different units and amplitudes, and drawing them on the
+    same axis would put a millivolt trace beside a microvolt one.
     """
     sampling_frequency_hz = float(raw.info["sfreq"])
-    n_fft = int(round(settings.window_s * sampling_frequency_hz))
+    n_fft = recordings.estimation_window_samples(
+        sampling_frequency_hz,
+        settings.window_s,
+    )
     if n_fft > raw.n_times:
         raise ValueError(
             f"The recording holds {raw.n_times} samples, fewer than the {n_fft} of one "
@@ -108,354 +102,171 @@ def channel_median_psd(raw, settings: PsdSettings) -> tuple[np.ndarray, np.ndarr
         overlap=settings.overlap,
     )
     data = raw.get_data(picks=picks)
-    windows = np.stack([data[:, start:stop] for start, stop in bounds], axis=0)
-    spectra, freqs = mne.time_frequency.psd_array_welch(
+    windows = np.stack(
+        [data[:, start:stop] for start, stop in bounds],
+        axis=1,
+    )
+    power, frequencies_hz = mne.time_frequency.psd_array_welch(
         windows,
-        sfreq=sampling_frequency_hz,
+        sampling_frequency_hz,
         fmin=settings.band_hz[0],
         fmax=min(settings.band_hz[1], np.nextafter(sampling_frequency_hz / 2.0, 0.0)),
         n_fft=n_fft,
-        n_overlap=0,
         n_per_seg=n_fft,
+        n_overlap=0,
+        average="mean",
+        window="hamming",
+        remove_dc=True,
         verbose="ERROR",
     )
-    return freqs, np.median(spectra.mean(axis=0), axis=0)
+    channel_info = mne.pick_info(raw.info, picks, copy=True)
+    return mne.time_frequency.SpectrumArray(
+        power.mean(axis=1),
+        channel_info,
+        frequencies_hz,
+        verbose="ERROR",
+    )
 
 
-def compare_recording(
-    source_vhdr: Path,
-    derivative_vhdrs: Sequence[tuple[str, Path]],
-    settings: PsdSettings,
-) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
-    """One recording's spectrum before and after each derivative, on one frequency grid.
+def require_correspondence(source, derivative, label: str) -> None:
+    """Refuse a pair that is two different recordings rather than one comparison."""
+    if derivative.ch_names != source.ch_names:
+        raise ValueError(f"{label}: channel set differs from the source.")
+    if derivative.n_times != source.n_times:
+        raise ValueError(f"{label}: length differs from the source.")
+    if not np.isclose(derivative.info["sfreq"], source.info["sfreq"]):
+        raise ValueError(f"{label}: sampling rate differs from the source.")
 
-    Every arm is read through the same BIDS reader and measured with the same parameters,
-    and the geometry is checked rather than assumed: a derivative that has drifted in
-    channel set, length or sampling rate is not a comparison, it is two different
-    recordings on one axis.
+
+def align_bad_channels(source, derivative) -> tuple[str, ...]:
+    """Give both sides one set of bad channels, so the pair draws them the same way.
+
+    MNE draws bad channels in grey dashes and open sensors in the inset. A derivative that
+    lost the source's marking would render those channels as ordinary coloured traces, and
+    the pair would then differ by which channels are bad as well as by the correction. The
+    union is used so a channel either side distrusts is never quietly drawn as good.
     """
-    source = recordings.read_bids_raw(source_vhdr)
-    duration_s = source.n_times / float(source.info["sfreq"])
-    freqs, source_psd = channel_median_psd(source, settings)
-    spectra = {"source": source_psd}
-    for label, path in derivative_vhdrs:
-        derivative = recordings.read_bids_raw(path)
-        if derivative.ch_names != source.ch_names:
-            raise ValueError(f"{label} {path.name}: channel set differs from the source.")
-        if derivative.n_times != source.n_times:
-            raise ValueError(f"{label} {path.name}: length differs from the source.")
-        if not np.isclose(derivative.info["sfreq"], source.info["sfreq"]):
-            raise ValueError(f"{label} {path.name}: sampling rate differs from the source.")
-        derivative_freqs, psd = channel_median_psd(derivative, settings)
-        if not np.array_equal(derivative_freqs, freqs):
-            raise ValueError(f"{label} {path.name}: spectra landed on a different grid.")
-        spectra[label] = psd
-        del derivative
-    del source
-    return freqs, spectra, duration_s
-
-
-def analysis_bands_from_config(config) -> tuple[tuple[str, float, float], ...]:
-    """The study's own bands where it defines them, so the labels match its analyses."""
-    defined = config.get("frequency_bands") or {}
-    if not isinstance(defined, dict):
-        raise ValueError("frequency_bands must be a mapping of name to [low, high].")
-    bands = []
-    for name, edges in defined.items():
-        low_hz, high_hz = (float(value) for value in edges)
-        if high_hz <= low_hz:
-            raise ValueError(f"frequency_bands.{name} must have increasing edges.")
-        bands.append((str(name), low_hz, high_hz))
-    return tuple(bands)
-
-
-def panel_edges(band_hz: tuple[float, float], span_hz: float) -> tuple[tuple[float, float], ...]:
-    """Consecutive equal spans tiling the plotted band, the last one truncated."""
-    low_hz, high_hz = band_hz
-    starts = np.arange(low_hz, high_hz, span_hz)
-    return tuple((float(start), float(min(start + span_hz, high_hz))) for start in starts)
-
-
-def bands_covering(low_hz: float, high_hz: float, bands) -> str:
-    """The named bands a span overlaps, for the panel label."""
-    return ", ".join(
-        name
-        for name, band_low, band_high in bands
-        if min(high_hz, band_high) > max(low_hz, band_low)
+    union = tuple(
+        sorted(set(source.info["bads"]) | set(derivative.info["bads"]))
     )
+    source.info["bads"] = list(union)
+    derivative.info["bads"] = list(union)
+    return union
 
 
-def figure_band_panels(
-    freqs,
-    arms: dict[str, np.ndarray],
-    path: Path,
-    *,
-    settings: PsdSettings,
-    cohort_description: str,
-    bands=(),
-) -> None:
-    """The same spectra tiled into readable spans, one panel per range.
+def figure_spectrum(spectrum, path: Path, *, title: str, ylim=None, dpi: int = 200):
+    """One MNE spectrum figure, per channel, in sensor-position colours.
 
-    Each panel autoscales on its own contents, so a deep notch in one span does not
-    flatten the spectrum in another.
+    ``spatial_colors`` is what makes a channel identifiable: its line takes the colour of
+    its position in the inset, so a channel that moved can be found on the head rather
+    than merely counted. Bad channels stay in MNE's grey dashes.
     """
-    edges = panel_edges((float(freqs[0]), float(freqs[-1])), settings.panel_span_hz)
-    figure, axes = plt.subplots(len(edges), 1, figsize=(13, 1.9 * len(edges)), squeeze=False)
-    medians = {label: to_db(np.median(stack, axis=0)) for label, stack in arms.items()}
-    for index, (low_hz, high_hz) in enumerate(edges):
-        axis = axes[index][0]
-        inside = (freqs >= low_hz) & (freqs <= high_hz)
-        for label in _draw_order(medians):
-            colour, name, width = _style(label)
-            axis.plot(freqs[inside], medians[label][inside], color=colour, lw=width, label=name)
-        axis.set_xlim(low_hz, high_hz)
-        covered = bands_covering(low_hz, high_hz, bands)
-        axis.set_ylabel(f"{low_hz:g}-{high_hz:g} Hz", fontsize=8)
-        if covered:
-            axis.text(
-                0.995,
-                0.93,
-                covered,
-                transform=axis.transAxes,
-                ha="right",
-                va="top",
-                fontsize=7,
-                color="#6B7280",
-            )
-        if index == 0:
-            axis.legend(loc="upper left", fontsize=8)
-        axis.tick_params(labelsize=8)
-    axes[0][0].set_title(
-        f"Power spectra before and after removal: {cohort_description}. "
-        f"{settings.panel_span_hz:g} Hz per panel; Welch via MNE."
+    figure = spectrum.plot(
+        spatial_colors=True,
+        dB=True,
+        amplitude=False,
+        show=False,
     )
-    axes[-1][0].set_xlabel("frequency (Hz)")
-    figure.supylabel("median PSD (dB re 1 V²/Hz)")
-    figure.tight_layout()
-    figure.savefig(path, dpi=180)
+    if ylim is not None:
+        for axis in figure.axes:
+            if axis.get_ylabel():
+                axis.set_ylim(ylim)
+    figure.suptitle(title, fontsize=12, fontweight="bold")
+    figure.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
+    return path
 
 
-ARM_STYLE = {
-    # The source is drawn wide and pale beneath the derivatives, so where nothing changed
-    # it survives as a halo instead of vanishing under the trace on top. Without that,
-    # "this line was removed" and "this feature was already here" render identically --
-    # which matters wherever the source spectrum already carried structure this pass never
-    # aimed at, such as the periodic residue of an upstream gradient correction.
-    "source": ("#F3A28E", "before correction", 2.2),
-    "line-notched": ("#111827", "after automatic line notches", 0.7),
-}
-DEFAULT_STYLE = ("#6B7280", "", 0.7)
+def shared_decibel_limits(*spectra) -> tuple[float, float]:
+    """One decibel scale for every figure in the pair.
 
-
-def _style(label: str) -> tuple[str, str, float]:
-    colour, name, width = ARM_STYLE.get(label, DEFAULT_STYLE)
-    return colour, name or label, width
-
-
-def _draw_order(arms) -> tuple[str, ...]:
-    """Source first so everything else lands on top of it."""
-    return ("source", *(label for label in arms if label != "source"))
-
-
-def figure_cohort(
-    freqs,
-    arms: dict[str, np.ndarray],
-    path: Path,
-    *,
-    cohort_description: str,
-) -> None:
-    """Cohort median spectrum, and what the removal took, on one frequency axis."""
-    figure, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True, height_ratios=[2, 1])
-    for label in _draw_order(arms):
-        colour, name, width = _style(label)
-        axes[0].plot(
-            freqs, to_db(np.median(arms[label], axis=0)), color=colour, lw=width, label=name
+    Two spectra on two autoscaled axes cannot be compared by eye: the removal would move
+    the axis as much as it moves the data, and a deep notch would redraw the baseline it
+    is supposed to be measured against.
+    """
+    lows, highs = [], []
+    for spectrum in spectra:
+        # MNE plots decibels relative to 1 µV²/Hz, so the same scaling is applied here
+        # rather than reading limits back off a drawn axis. Bad channels are included
+        # because the figure draws them: get_data drops them by default, which would set
+        # a scale that clips the very traces sitting furthest from the rest.
+        decibels = 10.0 * np.log10(
+            np.maximum(spectrum.get_data(exclude=()) * 1e12, 1e-30)
         )
-    axes[0].legend(loc="upper right", fontsize=9)
-    axes[0].set_ylabel("median PSD (dB re 1 V²/Hz)")
-    axes[0].set_title(
-        f"Power spectra before and after removal: {cohort_description}. Welch via MNE."
-    )
-
-    # What changed, which is the question the top panel only implies. Negative is removed.
-    source = to_db(np.median(arms["source"], axis=0))
-    for label in _draw_order(arms)[1:]:
-        colour, name, _ = _style(label)
-        stack = arms[label]
-        change = to_db(np.median(stack, axis=0)) - source
-        axes[1].plot(freqs, change, color=colour, lw=0.6, label=name)
-        # "Added power here" and "removed power here" are different claims and should not
-        # render identically. Over-subtraction against a cluster is what produces the first.
-        gained = change > 0.0
-        axes[1].plot(
-            freqs[gained],
-            change[gained],
-            linestyle="none",
-            marker="|",
-            markersize=3,
-            color="#C1442E",
-        )
-    axes[1].axhline(0.0, color="#6B7280", lw=0.6, ls="--")
-    axes[1].set_xlabel("frequency (Hz)")
-    axes[1].set_ylabel("change (dB)")
-    axes[1].set_xlim(freqs[0], freqs[-1])
-    figure.tight_layout()
-    figure.savefig(path, dpi=200)
-    plt.close(figure)
-
-
-def figure_per_recording(
-    freqs,
-    per_recording: dict[str, dict[str, np.ndarray]],
-    path: Path,
-    *,
-    cohort_description: str,
-) -> None:
-    """One panel per recording, so a single bad one cannot hide inside a cohort median."""
-    names = sorted(per_recording)
-    columns = min(3, len(names))
-    rows = int(np.ceil(len(names) / columns))
-    figure, axes = plt.subplots(
-        rows,
-        columns,
-        figsize=(5.5 * columns, 2.8 * rows),
-        squeeze=False,
-        sharex=True,
-    )
-    for index, name in enumerate(names):
-        axis = axes[index // columns][index % columns]
-        for label in _draw_order(per_recording[name]):
-            colour, _, width = _style(label)
-            axis.plot(freqs, to_db(per_recording[name][label]), color=colour, lw=width * 0.7)
-        axis.set_title(name, fontsize=8)
-        axis.set_xlim(freqs[0], freqs[-1])
-    for index in range(len(names), rows * columns):
-        axes[index // columns][index % columns].axis("off")
-    figure.supxlabel("frequency (Hz)")
-    figure.supylabel("median PSD (dB re 1 V²/Hz)")
-    figure.suptitle(f"Before and after automatic line notching: {cohort_description}")
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.995))
-    figure.savefig(path, dpi=150)
-    plt.close(figure)
-
-
-def dataset_description(
-    recording_count: int,
-    participant_count: int,
-    total_duration_s: float,
-) -> str:
-    """Compact grammatically correct description for generated figure titles."""
-    recording_label = "recording" if recording_count == 1 else "recordings"
-    participant_label = "participant" if participant_count == 1 else "participants"
-    return (
-        f"{recording_count} {recording_label} from {participant_count} "
-        f"{participant_label} ({total_duration_s / 3600.0:.1f} h EEG)"
-    )
+        finite = decibels[np.isfinite(decibels)]
+        if finite.size == 0:
+            raise ValueError("A spectrum held no finite power.")
+        lows.append(float(np.min(finite)))
+        highs.append(float(np.max(finite)))
+    low, high = min(lows), max(highs)
+    margin = 0.04 * (high - low) or 1.0
+    return low - margin, high + margin
 
 
 def run(args: argparse.Namespace) -> None:
-    """Compare the source against every derivative that exists."""
-    import time
-
+    """Draw one recording's spectrum before and after the correction."""
     from decomb.config import load_config
 
     config = load_config(getattr(args, "config", None))
     settings = PsdSettings.from_config(config)
     source_root = config.path("bids_root", override=getattr(args, "bids_root", None))
+    derivative_root = config.path(
+        "output_root", override=getattr(args, "output_root", None)
+    )
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
-
-    candidates = [
-        (
-            "line-notched",
-            config.path("output_root", override=getattr(args, "output_root", None)),
-        )
-    ]
-    available = [(label, root) for label, root in candidates if root.is_dir()]
-    if not available:
+    if not derivative_root.is_dir():
         raise FileNotFoundError(
-            "Nothing to compare against: no cleaned dataset exists yet. Run `decomb apply` first."
+            "Nothing to compare against: no cleaned dataset exists yet. "
+            "Run `decomb apply` first."
         )
 
-    subjects = getattr(args, "subjects", None)
-    runs = recordings.discover_runs(source_root, subjects=subjects, task="*")
-    print(f"Measuring {len(runs)} recordings from {source_root}")
-    for label, root in available:
-        print(f"  against {label}: {root}")
+    runs = recordings.discover_runs(
+        source_root,
+        subjects=getattr(args, "subjects", None),
+        task="*",
+    )
+    if not runs:
+        raise FileNotFoundError(f"No recordings were discovered under {source_root}.")
+    source_vhdr = runs[0]
+    derivative_vhdr = recordings.derivative_vhdr_path(
+        source_vhdr,
+        source_root,
+        derivative_root,
+    )
+    if not derivative_vhdr.is_file():
+        raise FileNotFoundError(f"{source_vhdr.stem}: derivative missing at {derivative_vhdr}")
+
+    # One recording, named rather than implied: the pair is a demonstration of the
+    # correction, and a figure that silently stood for a different recording each run
+    # would not be one.
+    if len(runs) > 1:
+        print(f"{len(runs)} recordings discovered; drawing the first. --subjects selects another.")
+    print(f"Drawing {source_vhdr.stem}")
     print(f"  Welch, {settings.window_s:g} s segments, {settings.overlap:.0%} overlap, EEG only")
 
-    per_recording: dict[str, dict[str, np.ndarray]] = {}
-    total_duration_s = 0.0
-    freqs = None
-    for index, vhdr in enumerate(runs, start=1):
-        started = time.time()
-        derivatives = [
-            (
-                label,
-                recordings.derivative_vhdr_path(vhdr, source_root, root),
-            )
-            for label, root in available
-        ]
-        missing = [str(path) for _, path in derivatives if not path.is_file()]
-        if missing:
-            raise FileNotFoundError(f"{vhdr.stem}: derivative missing at {missing[0]}")
-        run_freqs, spectra, duration_s = compare_recording(vhdr, derivatives, settings)
-        if freqs is None:
-            freqs = run_freqs
-        elif not np.array_equal(run_freqs, freqs):
-            raise ValueError(f"{vhdr.stem}: spectra landed on a different grid from the first.")
-        per_recording[vhdr.stem] = spectra
-        total_duration_s += duration_s
-        print(f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} ({time.time() - started:.0f}s)")
+    source = recordings.read_bids_raw(source_vhdr)
+    derivative = recordings.read_bids_raw(derivative_vhdr)
+    require_correspondence(source, derivative, derivative_vhdr.name)
+    bads = align_bad_channels(source, derivative)
+    if bads:
+        print(f"  bad channels drawn in grey on both: {', '.join(bads)}")
+    before = channel_spectrum(source, settings)
+    after = channel_spectrum(derivative, settings)
+    limits = shared_decibel_limits(before, after)
 
-    arms = {
-        label: np.stack([per_recording[name][label] for name in sorted(per_recording)])
-        for label in ("source", *(label for label, _ in available))
-    }
     report_dir.mkdir(parents=True, exist_ok=True)
-    participant_count = len({recordings.subject_of(vhdr) for vhdr in runs})
-    cohort_description = dataset_description(
-        len(runs),
-        participant_count,
-        total_duration_s,
+    figure_spectrum(
+        before,
+        report_dir / BEFORE_NAME,
+        title=f"Before correction — {source_vhdr.stem}",
+        ylim=limits,
     )
-    figure_cohort(
-        freqs,
-        arms,
-        report_dir / "psd_before_after.png",
-        cohort_description=cohort_description,
+    figure_spectrum(
+        after,
+        report_dir / AFTER_NAME,
+        title=f"After correction — {source_vhdr.stem}",
+        ylim=limits,
     )
-    figure_band_panels(
-        freqs,
-        arms,
-        report_dir / "psd_before_after_panels.png",
-        settings=settings,
-        cohort_description=cohort_description,
-        bands=analysis_bands_from_config(config),
-    )
-    figure_per_recording(
-        freqs,
-        per_recording,
-        report_dir / "psd_before_after_per_recording.png",
-        cohort_description=cohort_description,
-    )
-    np.savez_compressed(
-        report_dir / "psd_before_after.npz",
-        freqs=freqs,
-        recordings=np.array(sorted(per_recording)),
-        **arms,
-    )
-
-    source_db = to_db(np.median(arms["source"], axis=0))
-    print("\nmedian change over the cohort:")
-    for label, _ in available:
-        change = to_db(np.median(arms[label], axis=0)) - source_db
-        worst = int(np.argmin(change))
-        print(
-            f"  {label:14s} deepest {change[worst]:7.2f} dB at {freqs[worst]:7.3f} Hz; "
-            f"bins changed by more than 1 dB: {np.mean(np.abs(change) > 1.0):.1%}"
-        )
-    print(f"\n  wrote {report_dir / 'psd_before_after.png'}")
-    print(f"  wrote {report_dir / 'psd_before_after_panels.png'}")
-    print(f"  wrote {report_dir / 'psd_before_after_per_recording.png'}")
-    print(f"  wrote {report_dir / 'psd_before_after.npz'}")
+    print(f"  shared scale {limits[0]:.1f} to {limits[1]:.1f} dB/Hz re 1 µV²")
+    print(f"  wrote {report_dir / BEFORE_NAME}")
+    print(f"  wrote {report_dir / AFTER_NAME}")

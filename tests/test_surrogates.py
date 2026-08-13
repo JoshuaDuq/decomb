@@ -104,6 +104,20 @@ def test_surrogate_raw_preserves_length_channels_and_annotations():
     assert not np.allclose(surrogate.get_data(), raw.get_data())
 
 
+def test_surrogate_raw_excludes_bad_eeg_channels_and_preserves_channel_metadata():
+    raw = mne.io.RawArray(
+        np.random.default_rng(7).normal(size=(3, 1_000)),
+        mne.create_info(["C3", "C4", "EOG1"], 100.0, ["eeg", "eeg", "eog"]),
+        verbose="ERROR",
+    )
+    raw.info["bads"] = ["C4"]
+
+    surrogate = surrogates.surrogate_raw(raw, np.random.default_rng(8))
+
+    assert surrogate.ch_names == ["C3"]
+    assert surrogate.get_channel_types() == ["eeg"]
+
+
 def test_surrogate_raw_requires_an_eeg_channel():
     sampling_frequency_hz = 100.0
     data = np.random.default_rng(0).normal(size=(1, 1_000))

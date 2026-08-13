@@ -18,9 +18,10 @@ removal:
   # validated 54 s method default requires no per-dataset tuning.
   estimation_window_s: 54.0
 
-  # Per-EEG-channel probability of authorizing any false sinusoidal component. Holm
-  # correction covers every estimation window and eligible Fourier frequency in that
-  # channel. Channels are separate inferential and filtering units.
+  # Probability of any false authorization across one recording's complete adaptive
+  # removal sequence. Each round receives alpha / (round * (round + 1)); within that
+  # round, Holm covers every non-bad EEG channel, estimation window, and eligible Fourier
+  # frequency. Supported intervals are merged into one plan applied to every EEG channel.
   familywise_error_rate: 0.05
 
   # Study span eligible for detection and removal. Each recording clips the upper edge

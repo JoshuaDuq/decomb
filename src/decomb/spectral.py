@@ -18,7 +18,8 @@ def hann_periodogram(data: np.ndarray, sfreq: float) -> tuple[np.ndarray, np.nda
     sample_count = values.shape[-1]
     window = np.hanning(sample_count)
     normalisation = sfreq * float(np.sum(window**2))
-    spectrum = np.fft.rfft(values * window, axis=-1)
+    centred = values - values.mean(axis=-1, keepdims=True)
+    spectrum = np.fft.rfft(centred * window, axis=-1)
     power = np.abs(spectrum) ** 2 / normalisation
     if sample_count % 2 == 0:
         power[..., 1:-1] *= 2.0
@@ -34,10 +35,3 @@ def to_db(power: np.ndarray) -> np.ndarray:
     if np.any(values < 0.0):
         raise ValueError("power must be non-negative.")
     return 10.0 * np.log10(np.maximum(values, np.finfo(float).tiny))
-
-
-def hann_resolution_hz(segment_seconds: float) -> float:
-    """Return the Hann half-power width, the narrowest resolvable line."""
-    if not np.isfinite(segment_seconds) or segment_seconds <= 0.0:
-        raise ValueError("segment_seconds must be finite and positive.")
-    return 1.4382 / float(segment_seconds)

@@ -20,7 +20,7 @@ class LineDetection:
 
 @dataclass(frozen=True)
 class LineDetectionResult:
-    """All detections after Holm correction within each EEG channel."""
+    """All detections after recording-family multiplicity correction."""
 
     detections: tuple[LineDetection, ...]
     tested_frequencies_hz: tuple[float, ...]
@@ -54,12 +54,12 @@ class LineDetectionResult:
 
     @property
     def test_count_per_channel(self) -> int:
-        """Number of window-frequency hypotheses in each channel family."""
+        """Number of window-frequency hypotheses contributed by each channel."""
         return self.window_count * len(self.tested_frequencies_hz)
 
     @property
     def total_test_count(self) -> int:
-        """Total tests evaluated, without treating channels as one family."""
+        """Number of hypotheses in the recording-wide decision family."""
         return self.channel_count * self.test_count_per_channel
 
 
@@ -224,38 +224,54 @@ def thomson_f_p_values(
     return frequencies_hz, p_values
 
 
-CORRECTIONS = ("holm", "bonferroni", "none")
-
-
 def detect_lines_from_p_values(
     frequencies_hz: np.ndarray,
     p_values: np.ndarray,
     *,
     familywise_error_rate: float,
-    correction: str = "holm",
 ) -> LineDetectionResult:
-    """Threshold pre-computed Thomson F-test p-values with one correction procedure.
+    """Apply recording-family Holm correction to pre-computed Thomson p-values."""
+    return _detect_lines_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=familywise_error_rate,
+        adjust=_holm_adjusted_p_values,
+    )
 
-    Split out of :func:`detect_lines` so a caller comparing multiple corrections on the
-    same data -- as the detection-procedure ablation does -- pays for the expensive
-    Thomson F-test once rather than once per correction.
+
+def detect_lines_with_bonferroni_from_p_values(
+    frequencies_hz: np.ndarray,
+    p_values: np.ndarray,
+    *,
+    familywise_error_rate: float,
+) -> LineDetectionResult:
+    """Apply recording-family Bonferroni correction to Thomson p-values."""
+    return _detect_lines_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=familywise_error_rate,
+        adjust=_bonferroni_adjusted_p_values,
+    )
+
+
+def _detect_lines_from_p_values(
+    frequencies_hz: np.ndarray,
+    p_values: np.ndarray,
+    *,
+    familywise_error_rate: float,
+    adjust,
+) -> LineDetectionResult:
+    """Threshold one complete recording channel-window-frequency family.
+
+    The adjustment function is injected so the Holm method and its Bonferroni ablation
+    share every test, family boundary, and result-construction step.
     """
     error_rate = float(familywise_error_rate)
     if not np.isfinite(error_rate) or not 0.0 < error_rate < 1.0:
         raise ValueError("familywise_error_rate must lie strictly between zero and one.")
-    if correction not in CORRECTIONS:
-        raise ValueError(f"correction must be one of {CORRECTIONS}, got {correction!r}.")
 
     window_count, channel_count, _ = p_values.shape
-    adjust = {
-        "holm": _holm_adjusted_p_values,
-        "bonferroni": _bonferroni_adjusted_p_values,
-        "none": lambda values: values,
-    }[correction]
-    corrected = np.empty_like(p_values)
-    for channel_index in range(channel_count):
-        channel_p_values = p_values[:, channel_index, :]
-        corrected[:, channel_index, :] = adjust(channel_p_values)
+    corrected = adjust(p_values)
     significant = np.argwhere(corrected < error_rate)
     detections = tuple(
         LineDetection(
@@ -281,15 +297,8 @@ def detect_lines(
     *,
     frequency_range_hz: tuple[float, float],
     familywise_error_rate: float,
-    correction: str = "holm",
 ) -> LineDetectionResult:
-    """Detect lines within each EEG channel's window-frequency test family.
-
-    ``correction`` selects the per-channel multiplicity procedure: Holm step-down
-    (decomb's real pipeline), plain Bonferroni (an ablation isolating Holm's benefit
-    over the same family), or no correction at all (matching MNE's uncorrected
-    ``spectrum_fit`` threshold). All three compare the same Thomson F-test p-values.
-    """
+    """Detect lines with Holm control of the complete recording family."""
     frequencies_hz, p_values = thomson_f_p_values(
         data,
         sampling_frequency_hz,
@@ -299,7 +308,6 @@ def detect_lines(
         frequencies_hz,
         p_values,
         familywise_error_rate=familywise_error_rate,
-        correction=correction,
     )
 
 
@@ -604,8 +612,8 @@ def _validated_frequency_range(
     if values.shape != (2,) or not np.all(np.isfinite(values)):
         raise ValueError("frequency_range_hz must contain two finite values.")
     minimum_hz, maximum_hz = (float(value) for value in values)
-    if not 0.0 <= minimum_hz < maximum_hz < sampling_frequency_hz / 2.0:
-        raise ValueError("frequency_range_hz must lie inside [0, Nyquist).")
+    if not 0.0 <= minimum_hz < maximum_hz <= sampling_frequency_hz / 2.0:
+        raise ValueError("frequency_range_hz must lie inside [0, Nyquist].")
     return minimum_hz, maximum_hz
 
 

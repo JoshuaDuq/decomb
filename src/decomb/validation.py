@@ -1,9 +1,4 @@
-"""Cohort-scale trials backing the flagship false-detection and recovery figure.
-
-Pure per-recording and per-trial functions live here; the docs/ driver scripts loop over
-the real cohort, call these, and cache results to disk so the figure itself can be
-redrawn without recomputation.
-"""
+"""Scientifically matched surrogate calibration and paired injection trials."""
 
 from __future__ import annotations
 
@@ -11,24 +6,90 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from decomb import ablation, injection, notch, surrogates
+from decomb import ablation, injection, lines, notch, recordings, surrogates
 
+DECOMB_HOLM = "decomb_holm"
+COMPLETE_BONFERRONI = "complete_family_bonferroni"
+MNE_SPECTRUM_FIT_54S = "mne_spectrum_fit_54s"
+MNE_SPECTRUM_FIT_10S = "mne_spectrum_fit_10s"
+
+PRIMARY_METHODS = (
+    DECOMB_HOLM,
+    COMPLETE_BONFERRONI,
+    MNE_SPECTRUM_FIT_54S,
+)
+ALL_METHODS = (*PRIMARY_METHODS, MNE_SPECTRUM_FIT_10S)
 METHOD_LABELS = {
-    "holm": "decomb (Holm)",
-    "bonferroni": "complete-family Bonferroni",
-    "none": "MNE spectrum_fit",
+    DECOMB_HOLM: "Decomb Holm",
+    COMPLETE_BONFERRONI: "Complete-family Bonferroni",
+    MNE_SPECTRUM_FIT_54S: "MNE spectrum_fit (54 s)",
+    MNE_SPECTRUM_FIT_10S: "MNE spectrum_fit (10 s)",
 }
 
 
 @dataclass(frozen=True)
 class FalseDetectionTrial:
-    """One channel-recording's outcome under one detection procedure."""
+    """One channel-recording decision on a sinusoid-free surrogate."""
 
     recording: str
     participant: str
     channel_name: str
-    correction: str
+    method: str
     detected: bool
+
+
+@dataclass(frozen=True)
+class MneSpectrumFitResult:
+    """Native MNE output and the channels with an F-test-authorized subtraction."""
+
+    cleaned: object
+    detected_channels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PairedEnergyMetrics:
+    """Orthogonal decomposition of ``C(X + A) - C(X)``."""
+
+    injected_energy_v2: float
+    difference_energy_v2: float
+    artifact_to_background_db: float
+    remaining_fraction: float
+    collateral_fraction: float
+
+
+@dataclass(frozen=True)
+class RecoveryTrial:
+    """One paired injection result under one cleaning method."""
+
+    recording: str
+    participant: str
+    channel_name: str
+    method: str
+    kind: str
+    frequency_hz: float
+    amplitude_v: float
+    drift_hz: float
+    occupancy: float
+    injected_energy_v2: float
+    difference_energy_v2: float
+    artifact_to_background_db: float
+    remaining_fraction: float
+    collateral_fraction: float
+
+
+def average_reference(raw):
+    """Return data in the common-average subspace used by Decomb detection."""
+    import mne
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    if len(picks) < 2:
+        raise ValueError(
+            "Average referencing requires at least two non-bad EEG channels."
+        )
+    referenced = raw.copy().load_data()
+    data = referenced.get_data(picks=picks)
+    referenced._data[picks] = data - data.mean(axis=0, keepdims=True)
+    return referenced
 
 
 def false_detection_trials(
@@ -39,74 +100,132 @@ def false_detection_trials(
     recording_name: str,
     participant: str,
 ) -> tuple[FalseDetectionTrial, ...]:
-    """One sinusoid-free surrogate per real channel, tested under every correction.
-
-    Every EEG channel of ``raw`` contributes its own surrogate (matched to its own
-    empirical spectrum), and every correction procedure is evaluated on that same
-    surrogate from one shared Thomson F-test pass.
-    """
-    surrogate = surrogates.surrogate_raw(raw, rng)
+    """Test one spectrum-matched surrogate under every validation method."""
+    surrogate = average_reference(surrogates.surrogate_raw(raw, rng))
     channel_names = notch.eeg_channel_names(surrogate)
-    models = ablation.fit_models_every_correction(surrogate, settings)
-    trials = []
-    for correction, model in models.items():
-        detected_channels = {channel.channel_name for channel in model.channels}
-        trials.extend(
-            FalseDetectionTrial(
-                recording=recording_name,
-                participant=participant,
-                channel_name=channel_name,
-                correction=correction,
-                detected=channel_name in detected_channels,
+    models = ablation.fit_holm_and_bonferroni_models(surrogate, settings)
+    detected_by_method = {
+        DECOMB_HOLM: {channel.channel_name for channel in models["holm"].channels},
+        COMPLETE_BONFERRONI: {
+            channel.channel_name for channel in models["bonferroni"].channels
+        },
+        MNE_SPECTRUM_FIT_54S: set(
+            mne_spectrum_fit_detected_channels(
+                surrogate,
+                window_s=settings.estimation_window_s,
+                p_value=settings.familywise_error_rate,
             )
-            for channel_name in channel_names
+        ),
+        MNE_SPECTRUM_FIT_10S: set(
+            mne_spectrum_fit_detected_channels(
+                surrogate,
+                window_s=10.0,
+                p_value=settings.familywise_error_rate,
+            )
+        ),
+    }
+    return tuple(
+        FalseDetectionTrial(
+            recording=recording_name,
+            participant=participant,
+            channel_name=channel_name,
+            method=method,
+            detected=channel_name in detected_by_method[method],
         )
-    return tuple(trials)
+        for method in ALL_METHODS
+        for channel_name in channel_names
+    )
 
 
-@dataclass(frozen=True)
-class RecoveryTrial:
-    """One paired background/injection trial's outcome under one detection procedure.
+def mne_spectrum_fit(raw, *, window_s: float, p_value: float) -> MneSpectrumFitResult:
+    """Run MNE's public spectrum-fit subtraction with its native decision rule."""
+    detected_channels = mne_spectrum_fit_detected_channels(
+        raw,
+        window_s=window_s,
+        p_value=p_value,
+    )
+    cleaned = apply_mne_spectrum_fit(raw, window_s=window_s, p_value=p_value)
+    return MneSpectrumFitResult(cleaned, detected_channels)
 
-    ``remaining_fraction`` and ``collateral_energy_v2`` follow the paired-difference
-    construction: what a correction procedure changes between the injected and
-    background-only surrogate, never a single-arm measurement that an incidental
-    background feature could bias.
+
+def apply_mne_spectrum_fit(raw, *, window_s: float, p_value: float):
+    """Apply MNE's public spectrum-fit subtraction without duplicating its fit."""
+    channel_names = notch.eeg_channel_names(raw)
+    return raw.copy().notch_filter(
+        freqs=None,
+        picks=list(channel_names),
+        filter_length=f"{window_s:.17g}s",
+        method="spectrum_fit",
+        p_value=p_value,
+        skip_by_annotation=recordings.ACQUISITION_BOUNDARY_ANNOTATIONS,
+        n_jobs=1,
+        verbose="ERROR",
+    )
+
+
+def mne_spectrum_fit_detected_channels(
+    raw,
+    *,
+    window_s: float,
+    p_value: float,
+) -> tuple[str, ...]:
+    """Reproduce MNE's documented per-window Bonferroni F-test decisions.
+
+    MNE's public filter returns only the cleaned samples. This evaluates the same Thomson
+    statistic and ``p_value / n_times`` threshold used by MNE 1.12 so Panel A can report
+    exact channel decisions without classifying overlap-add rounding noise as detection.
     """
+    import mne
 
-    recording: str
-    channel_name: str
-    correction: str
-    kind: str
-    frequency_hz: float
-    amplitude_v: float
-    drift_hz: float
-    occupancy: float
-    injected_energy_v2: float
-    remaining_fraction: float
-    collateral_energy_v2: float
+    if not np.isfinite(p_value) or not 0.0 < p_value < 1.0:
+        raise ValueError("p_value must lie strictly between zero and one.")
+    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    if len(picks) == 0:
+        raise ValueError("MNE spectrum fitting requires a non-bad EEG channel.")
+    sampling_frequency_hz = float(raw.info["sfreq"])
+    requested_samples = int(np.ceil(window_s * sampling_frequency_hz))
+    if requested_samples < 2:
+        raise ValueError("MNE spectrum-fit windows require at least two samples.")
+
+    data = raw.get_data(picks=picks)
+    detected = np.zeros(len(picks), dtype=bool)
+    for segment_start, segment_stop in recordings.acquisition_segments(raw):
+        segment_samples = segment_stop - segment_start
+        window_samples = min(requested_samples, segment_samples)
+        for start, stop in _mne_spectrum_fit_window_bounds(
+            segment_samples,
+            window_samples,
+        ):
+            window = data[:, segment_start + start : segment_start + stop]
+            _, window_p_values = lines.thomson_f_p_values(
+                window[np.newaxis, :, :],
+                sampling_frequency_hz,
+                frequency_range_hz=(0.0, sampling_frequency_hz / 2.0),
+            )
+            detected |= np.any(
+                window_p_values[0] < p_value / window.shape[-1],
+                axis=1,
+            )
+    return tuple(
+        raw.ch_names[pick]
+        for pick, is_detected in zip(picks, detected, strict=True)
+        if is_detected
+    )
 
 
-@dataclass(frozen=True)
-class _ChannelSpectrum:
-    """One channel's PSD, computed once and reused for every band-power query."""
-
-    frequencies_hz: np.ndarray
-    psd: np.ndarray
-
-    def band_power(self, low_hz: float, high_hz: float) -> float:
-        return notch.band_power(self.frequencies_hz, self.psd, low_hz, high_hz)
-
-    def total_power(self) -> float:
-        return self.band_power(float(self.frequencies_hz[0]), float(self.frequencies_hz[-1]))
-
-
-def _channel_spectrum(raw, channel_name: str, settings) -> _ChannelSpectrum:
-    from decomb import recordings as recordings_module
-
-    picks = [raw.ch_names.index(channel_name)]
-    frequencies_hz, psd = recordings_module.psd(raw, picks, settings)
-    return _ChannelSpectrum(frequencies_hz, psd[0])
+def _mne_spectrum_fit_window_bounds(
+    sample_count: int,
+    window_samples: int,
+) -> tuple[tuple[int, int], ...]:
+    """Window bounds used by MNE's constant-overlap-add spectrum fitting."""
+    if sample_count < window_samples or window_samples < 2:
+        raise ValueError("MNE spectrum-fit window geometry is invalid.")
+    overlap_samples = (window_samples + 1) // 2
+    step_samples = window_samples - overlap_samples
+    starts = np.arange(0, sample_count - window_samples + 1, step_samples, dtype=int)
+    stops = starts + window_samples
+    stops[-1] = sample_count
+    return tuple(zip(starts.tolist(), stops.tolist(), strict=True))
 
 
 def recovery_trial(
@@ -116,74 +235,144 @@ def recovery_trial(
     rng: np.random.Generator,
     *,
     recording_name: str,
+    participant: str,
     channel_name: str,
 ) -> tuple[RecoveryTrial, ...]:
-    """Inject one artifact into a single-channel background and clean it three ways.
+    """Clean one paired average-referenced background/injection trial four ways."""
+    if channel_name not in background_raw.ch_names:
+        raise ValueError(f"Recording does not contain channel {channel_name!r}.")
+    background = average_reference(background_raw)
+    realization = injection.realize_injection(
+        spec,
+        background.n_times,
+        float(background.info["sfreq"]),
+        rng,
+    )
+    injected = injection.inject_into_average_reference(
+        background,
+        channel_name,
+        realization,
+    )
+    valid_samples = _valid_sample_mask(background)
+    temporal_basis = realization.temporal_basis * valid_samples
 
-    ``background_raw`` must already be a sinusoid-free surrogate, built once and reused
-    across every injection trial drawn against it so repeated calls do not resynthesize
-    an expensive full-length Gaussian process per trial.
-    """
-    injected_raw = injection.inject_into_raw(background_raw, channel_name, spec, rng)
-    half_width_hz = settings.spectral_resolution_hz / 2.0
-    low_hz, high_hz = injection.injected_frequency_band_hz(spec, half_width_hz=half_width_hz)
-
-    raw_background = _channel_spectrum(background_raw, channel_name, settings)
-    raw_injected = _channel_spectrum(injected_raw, channel_name, settings)
-    raw_background_power = raw_background.band_power(low_hz, high_hz)
-    raw_injected_power = raw_injected.band_power(low_hz, high_hz)
-    injected_energy_v2 = raw_injected_power - raw_background_power
-    background_outside_power = raw_background.total_power() - raw_background_power
-    injected_outside_power = raw_injected.total_power() - raw_injected_power
-
-    background_models = ablation.fit_models_every_correction(background_raw, settings)
-    injected_models = ablation.fit_models_every_correction(injected_raw, settings)
-
+    cleaned_backgrounds = _clean_every_method(background, settings)
+    cleaned_injections = _clean_every_method(injected, settings)
     trials = []
-    for correction in background_models:
-        cleaned_background = _cleaned_raw(background_raw, background_models[correction], settings)
-        cleaned_injected = _cleaned_raw(injected_raw, injected_models[correction], settings)
-
-        cleaned_background_spectrum = _channel_spectrum(cleaned_background, channel_name, settings)
-        cleaned_injected_spectrum = _channel_spectrum(cleaned_injected, channel_name, settings)
-        cleaned_background_power = cleaned_background_spectrum.band_power(low_hz, high_hz)
-        cleaned_injected_power = cleaned_injected_spectrum.band_power(low_hz, high_hz)
-        remaining_energy_v2 = cleaned_injected_power - cleaned_background_power
-        remaining_fraction = (
-            remaining_energy_v2 / injected_energy_v2
-            if injected_energy_v2 > 0.0
-            else float("nan")
+    for method in ALL_METHODS:
+        metrics = paired_energy_metrics(
+            background.get_data(),
+            injected.get_data(),
+            cleaned_backgrounds[method].get_data(),
+            cleaned_injections[method].get_data(),
+            temporal_basis,
+            valid_samples,
         )
-
-        cleaned_background_outside = (
-            cleaned_background_spectrum.total_power() - cleaned_background_power
-        )
-        cleaned_injected_outside = (
-            cleaned_injected_spectrum.total_power() - cleaned_injected_power
-        )
-        collateral_energy_v2 = (cleaned_injected_outside - cleaned_background_outside) - (
-            injected_outside_power - background_outside_power
-        )
-
         trials.append(
             RecoveryTrial(
                 recording=recording_name,
+                participant=participant,
                 channel_name=channel_name,
-                correction=correction,
+                method=method,
                 kind=spec.kind,
                 frequency_hz=spec.frequency_hz,
                 amplitude_v=spec.amplitude_v,
                 drift_hz=spec.drift_hz,
                 occupancy=spec.occupancy,
-                injected_energy_v2=injected_energy_v2,
-                remaining_fraction=remaining_fraction,
-                collateral_energy_v2=collateral_energy_v2,
+                injected_energy_v2=metrics.injected_energy_v2,
+                difference_energy_v2=metrics.difference_energy_v2,
+                artifact_to_background_db=metrics.artifact_to_background_db,
+                remaining_fraction=metrics.remaining_fraction,
+                collateral_fraction=metrics.collateral_fraction,
             )
         )
     return tuple(trials)
 
 
-def _cleaned_raw(raw, model, settings):
-    """Apply decomb's own stopband-width and merge rule to one ablation model's lines."""
-    plans = notch.plan_channel_notches(model, settings)
-    return notch.apply_channel_notches(raw, plans)
+def paired_energy_metrics(
+    background: np.ndarray,
+    injected: np.ndarray,
+    cleaned_background: np.ndarray,
+    cleaned_injected: np.ndarray,
+    temporal_basis: np.ndarray,
+    valid_samples: np.ndarray,
+) -> PairedEnergyMetrics:
+    """Decompose the paired cleaned difference into injected and orthogonal energy."""
+    arrays = tuple(
+        np.asarray(values, dtype=float)
+        for values in (background, injected, cleaned_background, cleaned_injected)
+    )
+    if any(values.ndim != 2 for values in arrays):
+        raise ValueError("Paired trial data must be channel-by-time arrays.")
+    if len({values.shape for values in arrays}) != 1:
+        raise ValueError("Every paired trial array must have the same shape.")
+    if not all(np.all(np.isfinite(values)) for values in arrays):
+        raise ValueError("Paired trial data must contain only finite values.")
+    mask = np.asarray(valid_samples, dtype=bool)
+    if mask.shape != (arrays[0].shape[1],) or not np.any(mask):
+        raise ValueError("valid_samples must select recording samples.")
+    basis = np.asarray(temporal_basis, dtype=float)
+    if basis.ndim != 2 or basis.shape[1] != mask.size:
+        raise ValueError("temporal_basis must have shape (components, n_samples).")
+
+    orthonormal_basis, triangular = np.linalg.qr(basis[:, mask].T, mode="reduced")
+    if np.linalg.matrix_rank(triangular) != basis.shape[0]:
+        raise ValueError("The injected temporal subspace must have full rank.")
+
+    background_valid, injected_valid, cleaned_background_valid, cleaned_injected_valid = (
+        values[:, mask] for values in arrays
+    )
+    artifact = injected_valid - background_valid
+    cleaned_difference = cleaned_injected_valid - cleaned_background_valid
+    projected_difference = (
+        cleaned_difference @ orthonormal_basis
+    ) @ orthonormal_basis.T
+    collateral_difference = cleaned_difference - projected_difference
+    projected_background = (
+        background_valid @ orthonormal_basis
+    ) @ orthonormal_basis.T
+
+    injected_energy_v2 = float(np.sum(artifact**2))
+    background_subspace_energy_v2 = float(np.sum(projected_background**2))
+    if injected_energy_v2 <= 0.0 or background_subspace_energy_v2 <= 0.0:
+        raise ValueError("Paired energy ratios require positive artifact and background energy.")
+    difference_energy_v2 = float(np.sum(cleaned_difference**2))
+    remaining_energy_v2 = float(np.sum(projected_difference**2))
+    collateral_energy_v2 = float(np.sum(collateral_difference**2))
+    return PairedEnergyMetrics(
+        injected_energy_v2=injected_energy_v2,
+        difference_energy_v2=difference_energy_v2,
+        artifact_to_background_db=(
+            10.0 * np.log10(injected_energy_v2 / background_subspace_energy_v2)
+        ),
+        remaining_fraction=remaining_energy_v2 / injected_energy_v2,
+        collateral_fraction=collateral_energy_v2 / injected_energy_v2,
+    )
+
+
+def _valid_sample_mask(raw) -> np.ndarray:
+    mask = np.zeros(raw.n_times, dtype=bool)
+    for start, stop in recordings.acquisition_segments(raw):
+        mask[start:stop] = True
+    if not np.any(mask):
+        raise ValueError("A validation recording requires valid acquisition samples.")
+    return mask
+
+
+def _clean_every_method(raw, settings) -> dict[str, object]:
+    mne_54 = apply_mne_spectrum_fit(
+        raw,
+        window_s=settings.estimation_window_s,
+        p_value=settings.familywise_error_rate,
+    )
+    mne_10 = apply_mne_spectrum_fit(
+        raw,
+        window_s=10.0,
+        p_value=settings.familywise_error_rate,
+    )
+    return {
+        DECOMB_HOLM: notch.clean_until_no_supported_lines(raw, settings).cleaned,
+        COMPLETE_BONFERRONI: ablation.clean_until_no_bonferroni_lines(raw, settings).cleaned,
+        MNE_SPECTRUM_FIT_54S: mne_54,
+        MNE_SPECTRUM_FIT_10S: mne_10,
+    }

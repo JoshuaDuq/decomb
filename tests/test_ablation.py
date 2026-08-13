@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import mne
 import numpy as np
 import pytest
@@ -86,35 +84,51 @@ def test_isolated_model_requires_channel_names_for_every_tested_channel():
         ablation.isolated_model(result, channel_names=("C0", "C1"))
 
 
-@pytest.mark.parametrize("correction", ["holm", "bonferroni", "none"])
-def test_fit_model_detects_a_strong_line_under_every_correction(correction):
+def test_fit_bonferroni_model_detects_a_strong_line():
     raw = _raw_with_line(line_hz=5.0)
 
-    model = ablation.fit_model(raw, _narrow_settings(), correction=correction)
+    model = ablation.fit_bonferroni_model(raw, _narrow_settings())
 
     c0 = next(channel for channel in model.channels if channel.channel_name == "C0")
     assert any(abs(line.position_hz - 5.0) < 0.02 for line in c0.lines)
 
 
-def test_bonferroni_and_none_arms_never_label_a_harmonic():
+def test_standalone_first_round_models_use_the_first_alpha_spend(monkeypatch):
+    raw = _raw_with_line(line_hz=5.0)
+    p_values = np.array([[[0.02], [0.9]]])
+    monkeypatch.setattr(
+        notch,
+        "_thomson_f_p_values",
+        lambda raw, settings: (np.array([5.0]), p_values),
+    )
+
+    bonferroni = ablation.fit_bonferroni_model(raw, _narrow_settings())
+    shared = ablation.fit_holm_and_bonferroni_models(raw, _narrow_settings())
+
+    assert not bonferroni.channels
+    assert not shared["holm"].channels
+    assert not shared["bonferroni"].channels
+
+
+def test_bonferroni_arm_never_labels_a_harmonic():
     raw = _raw_with_line(line_hz=5.0)
 
-    for correction in ("bonferroni", "none"):
-        model = ablation.fit_model(raw, _narrow_settings(), correction=correction)
-        assert all(channel.fundamental_hz is None for channel in model.channels)
+    model = ablation.fit_bonferroni_model(raw, _narrow_settings())
+
+    assert all(channel.fundamental_hz is None for channel in model.channels)
 
 
-def test_fit_models_every_correction_matches_calling_each_correction_separately():
+def test_shared_models_match_calling_each_procedure_separately():
     raw = _raw_with_line(line_hz=5.0)
     settings = _narrow_settings()
 
-    shared = ablation.fit_models_every_correction(raw, settings)
+    shared = ablation.fit_holm_and_bonferroni_models(raw, settings)
     separate = {
-        correction: ablation.fit_model(raw, settings, correction=correction)
-        for correction in ("holm", "bonferroni", "none")
+        "holm": notch.fit_harmonic_model(raw, settings),
+        "bonferroni": ablation.fit_bonferroni_model(raw, settings),
     }
 
-    for correction in ("holm", "bonferroni", "none"):
+    for correction in ("holm", "bonferroni"):
         shared_lines = {
             (channel.channel_name, line.position_hz, line.corrected_p_value)
             for channel in shared[correction].channels
@@ -128,28 +142,10 @@ def test_fit_models_every_correction_matches_calling_each_correction_separately(
         assert shared_lines == separate_lines
 
 
-def test_uncorrected_ablation_stays_fast_on_a_wide_default_band():
-    # This is the regression this module exists to avoid: uncorrected detection on the
-    # packaged 0-100 Hz default produces thousands of nominal false detections on pure
-    # noise, and routing those through harmonic classification (as decomb's real
-    # pipeline does for Holm) took minutes. The isolated-only model must stay fast.
-    settings = notch.HarmonicNotchSettings(
-        estimation_window_s=54.0,
-        familywise_error_rate=0.05,
-        frequency_range_hz=(0.0, 100.0),
-    )
-    sampling_frequency_hz = 250.0
-    times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
-    data = np.random.default_rng(2).normal(scale=1e-6, size=(1, times_s.size))
-    raw = mne.io.RawArray(
-        data,
-        mne.create_info(["C0"], sampling_frequency_hz, "eeg"),
-        verbose="ERROR",
-    )
+def test_bonferroni_cleaning_reaches_a_null_model():
+    raw = _raw_with_line(line_hz=5.0)
 
-    started = time.time()
-    model = ablation.fit_ablation_model(raw, settings, correction="none")
-    elapsed_s = time.time() - started
+    result = ablation.clean_until_no_bonferroni_lines(raw, _narrow_settings())
 
-    assert elapsed_s < 15.0
-    assert len(model.channels) <= 1
+    assert result.rounds
+    assert not result.residual_model.channels

@@ -143,6 +143,11 @@ def test_estimation_windows_do_not_cross_acquisition_boundaries():
     assert all(not (start < split < stop) for start, stop in bounds)
 
 
+def test_estimation_window_duration_must_map_to_whole_samples():
+    with pytest.raises(ValueError, match="whole number of samples"):
+        recordings.estimation_window_samples(100.0, 1.005)
+
+
 def test_boundary_prefixes_match_mne_case_insensitively():
     import mne
 

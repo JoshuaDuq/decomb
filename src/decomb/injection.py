@@ -46,6 +46,24 @@ class SinusoidInjection:
             raise ValueError("phase_rad must be finite.")
 
 
+@dataclass(frozen=True)
+class InjectionRealization:
+    """One waveform and the phase-independent temporal subspace that contains it."""
+
+    waveform_v: np.ndarray
+    temporal_basis: np.ndarray
+
+    def __post_init__(self) -> None:
+        waveform = np.asarray(self.waveform_v, dtype=float)
+        basis = np.asarray(self.temporal_basis, dtype=float)
+        if waveform.ndim != 1 or waveform.size < 2:
+            raise ValueError("An injection waveform requires at least two samples.")
+        if basis.shape != (2, waveform.size):
+            raise ValueError("temporal_basis must have shape (2, n_samples).")
+        if not np.all(np.isfinite(waveform)) or not np.all(np.isfinite(basis)):
+            raise ValueError("Injection realizations must contain only finite values.")
+
+
 def active_mask(
     occupancy: float,
     n_samples: int,
@@ -65,33 +83,49 @@ def active_mask(
     return mask
 
 
-def synthesize_injection(
+def realize_injection(
     spec: SinusoidInjection,
     n_samples: int,
     sampling_frequency_hz: float,
     rng: np.random.Generator,
-) -> np.ndarray:
-    """The injected waveform alone, in volts, ready to add to a background channel."""
+) -> InjectionRealization:
+    """Realize a waveform and its sine-cosine subspace with one shared active mask."""
     if n_samples < 2:
         raise ValueError("n_samples must be at least two.")
     sampling_frequency = _positive(sampling_frequency_hz, "sampling_frequency_hz")
+    trajectory_edges_hz = (
+        spec.frequency_hz,
+        spec.frequency_hz + spec.drift_hz,
+    )
+    if min(trajectory_edges_hz) <= 0.0 or max(trajectory_edges_hz) >= (
+        sampling_frequency / 2.0
+    ):
+        raise ValueError(
+            "The injection frequency trajectory must lie strictly inside (0, Nyquist)."
+        )
     times_s = np.arange(n_samples) / sampling_frequency
     duration_s = n_samples / sampling_frequency
 
     if spec.kind == "drifting":
         # Phase is the time integral of instantaneous frequency, which linearly ramps
         # from frequency_hz to frequency_hz + drift_hz across the recording.
-        phase = 2.0 * np.pi * (
+        carrier_phase = 2.0 * np.pi * (
             spec.frequency_hz * times_s
             + spec.drift_hz * times_s**2 / (2.0 * duration_s)
         )
     else:
-        phase = 2.0 * np.pi * spec.frequency_hz * times_s
-    waveform = spec.amplitude_v * np.sin(phase + spec.phase_rad)
+        carrier_phase = 2.0 * np.pi * spec.frequency_hz * times_s
+
+    temporal_basis = np.stack(
+        [np.sin(carrier_phase), np.cos(carrier_phase)],
+        axis=0,
+    )
 
     if spec.kind == "intermittent":
-        waveform = waveform * active_mask(spec.occupancy, n_samples, rng)
-    return waveform
+        temporal_basis *= active_mask(spec.occupancy, n_samples, rng)
+    phase_weights = np.array([np.cos(spec.phase_rad), np.sin(spec.phase_rad)])
+    waveform = spec.amplitude_v * phase_weights @ temporal_basis
+    return InjectionRealization(waveform, temporal_basis)
 
 
 def injected_frequency_band_hz(
@@ -111,18 +145,39 @@ def injected_frequency_band_hz(
     return (low_hz - half_width_hz, high_hz + half_width_hz)
 
 
-def inject_into_raw(raw, channel_name: str, spec: SinusoidInjection, rng: np.random.Generator):
+def inject_into_raw(raw, channel_name: str, realization: InjectionRealization):
     """Return a copy of ``raw`` with one injection added to a single EEG channel."""
-    import mne
-
     if channel_name not in raw.ch_names:
         raise ValueError(f"Recording does not contain channel {channel_name!r}.")
-    sampling_frequency_hz = float(raw.info["sfreq"])
-    waveform = synthesize_injection(spec, raw.n_times, sampling_frequency_hz, rng)
-    data = raw.get_data()
-    data[raw.ch_names.index(channel_name)] += waveform
-    injected = mne.io.RawArray(data, raw.info.copy(), verbose="ERROR")
-    injected.set_annotations(raw.annotations.copy())
+    if realization.waveform_v.size != raw.n_times:
+        raise ValueError("Injection and recording sample counts must match.")
+    injected = raw.copy().load_data()
+    injected._data[raw.ch_names.index(channel_name)] += realization.waveform_v
+    return injected
+
+
+def inject_into_average_reference(
+    raw,
+    channel_name: str,
+    realization: InjectionRealization,
+):
+    """Add the requested target-channel waveform without leaving the average subspace."""
+    import mne
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    pick_names = tuple(raw.ch_names[index] for index in picks)
+    if channel_name not in pick_names:
+        raise ValueError(f"Recording has no non-bad EEG channel {channel_name!r}.")
+    if len(picks) < 2:
+        raise ValueError("Average-reference injection requires at least two EEG channels.")
+    if realization.waveform_v.size != raw.n_times:
+        raise ValueError("Injection and recording sample counts must match.")
+
+    injected = raw.copy().load_data()
+    target = raw.ch_names.index(channel_name)
+    injected._data[target] += realization.waveform_v
+    other_picks = picks[picks != target]
+    injected._data[other_picks] -= realization.waveform_v / len(other_picks)
     return injected
 
 

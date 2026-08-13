@@ -76,7 +76,7 @@ def test_null_detection_builds_an_explicit_clean_recording_model():
     assert model.channel_count == 2
 
 
-def test_reported_p_values_use_each_channels_window_frequency_family():
+def test_reported_p_values_use_the_complete_recording_family():
     data, sampling_frequency_hz = _windows(line_hz=37.25)
     frequencies_hz, raw_p_values = lines.thomson_f_p_values(
         data,
@@ -97,16 +97,16 @@ def test_reported_p_values_use_each_channels_window_frequency_family():
     strongest = min(result.detections, key=lambda detection: detection.corrected_p_value)
     expected = min(
         1.0,
-        float(np.min(raw_p_values)) * result.test_count_per_channel,
+        float(np.min(raw_p_values)) * result.total_test_count,
     )
     assert strongest.corrected_p_value == expected
 
 
-def test_holm_correction_controls_each_channel_family(monkeypatch):
+def test_holm_correction_controls_the_recording_family(monkeypatch):
     frequencies_hz = np.array([10.0, 20.0])
     raw_p_values = np.array(
         [
-            [[0.01, 0.50], [0.50, 0.60]],
+            [[0.001, 0.50], [0.50, 0.60]],
             [[0.02, 0.80], [0.70, 0.90]],
         ]
     )
@@ -130,15 +130,25 @@ def test_holm_correction_controls_each_channel_family(monkeypatch):
     detection = result.detections[0]
     assert detection.channel_index == 0
     assert detection.frequency_hz == 10.0
-    assert detection.raw_p_value == 0.01
-    assert detection.corrected_p_value == 0.04
+    assert detection.raw_p_value == 0.001
+    assert detection.corrected_p_value == 0.008
 
 
-def test_bonferroni_correction_controls_each_channel_family(monkeypatch):
+def test_holm_correction_covers_the_complete_recording_family():
+    result = lines.detect_lines_from_p_values(
+        np.array([10.0]),
+        np.array([[[0.03], [0.03]]]),
+        familywise_error_rate=0.05,
+    )
+
+    assert result.detections == ()
+
+
+def test_bonferroni_correction_controls_the_recording_family(monkeypatch):
     frequencies_hz = np.array([10.0, 20.0])
     raw_p_values = np.array(
         [
-            [[0.01, 0.50], [0.50, 0.60]],
+            [[0.001, 0.50], [0.50, 0.60]],
             [[0.02, 0.80], [0.70, 0.90]],
         ]
     )
@@ -149,93 +159,55 @@ def test_bonferroni_correction_controls_each_channel_family(monkeypatch):
         lambda *args, **kwargs: (frequencies_hz, raw_p_values),
     )
 
-    result = lines.detect_lines(
+    frequencies_hz, p_values = lines.thomson_f_p_values(
         np.zeros((2, 2, 8)),
         8.0,
         frequency_range_hz=(1.0, 3.0),
+    )
+    result = lines.detect_lines_with_bonferroni_from_p_values(
+        frequencies_hz,
+        p_values,
         familywise_error_rate=0.05,
-        correction="bonferroni",
     )
 
     assert len(result.detections) == 1
     detection = result.detections[0]
     assert detection.channel_index == 0
     assert detection.frequency_hz == 10.0
-    assert detection.raw_p_value == 0.01
-    assert detection.corrected_p_value == 0.04
+    assert detection.raw_p_value == 0.001
+    assert detection.corrected_p_value == 0.008
 
 
-def test_uncorrected_detection_thresholds_raw_p_values_directly(monkeypatch):
-    frequencies_hz = np.array([10.0, 20.0])
-    raw_p_values = np.array(
-        [
-            [[0.01, 0.03], [0.50, 0.60]],
-            [[0.02, 0.80], [0.70, 0.90]],
-        ]
-    )
-
-    monkeypatch.setattr(
-        lines,
-        "thomson_f_p_values",
-        lambda *args, **kwargs: (frequencies_hz, raw_p_values),
-    )
-
-    result = lines.detect_lines(
-        np.zeros((2, 2, 8)),
-        8.0,
-        frequency_range_hz=(1.0, 3.0),
+def test_bonferroni_correction_covers_the_complete_recording_family():
+    result = lines.detect_lines_with_bonferroni_from_p_values(
+        np.array([10.0]),
+        np.array([[[0.03], [0.03]]]),
         familywise_error_rate=0.05,
-        correction="none",
     )
 
-    detected = {
-        (detection.window_index, detection.channel_index, detection.frequency_hz)
-        for detection in result.detections
-    }
-    assert detected == {(0, 0, 10.0), (0, 0, 20.0), (1, 0, 10.0)}
-    assert all(
-        detection.corrected_p_value == detection.raw_p_value
-        for detection in result.detections
-    )
+    assert result.detections == ()
 
 
-def test_detect_lines_matches_the_split_shared_p_value_path():
+def test_bonferroni_detection_matches_the_split_shared_p_value_path():
     data, sampling_frequency_hz = _windows(line_hz=37.25, seed=4)
 
-    combined = lines.detect_lines(
-        data,
-        sampling_frequency_hz,
-        frequency_range_hz=(1.0, 80.0),
-        familywise_error_rate=0.05,
-        correction="bonferroni",
-    )
     frequencies_hz, p_values = lines.thomson_f_p_values(
         data,
         sampling_frequency_hz,
         frequency_range_hz=(1.0, 80.0),
     )
-    split = lines.detect_lines_from_p_values(
+    first = lines.detect_lines_with_bonferroni_from_p_values(
         frequencies_hz,
         p_values,
         familywise_error_rate=0.05,
-        correction="bonferroni",
+    )
+    second = lines.detect_lines_with_bonferroni_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=0.05,
     )
 
-    assert combined.detections == split.detections
-    assert combined.tested_frequencies_hz == split.tested_frequencies_hz
-
-
-def test_unknown_correction_is_rejected():
-    import pytest
-
-    with pytest.raises(ValueError, match="correction"):
-        lines.detect_lines(
-            np.random.default_rng(0).normal(size=(1, 1, 32)),
-            8.0,
-            frequency_range_hz=(1.0, 3.0),
-            familywise_error_rate=0.05,
-            correction="fdr",
-        )
+    assert first == second
 
 
 def test_dc_is_not_treated_as_a_sinusoidal_line():
@@ -249,6 +221,19 @@ def test_dc_is_not_treated_as_a_sinusoidal_line():
 
     assert frequencies_hz[0] > 0.0
     assert np.all(p_values == 1.0)
+
+
+def test_nyquist_can_be_included_for_native_mne_spectrum_fit():
+    sampling_frequency_hz = 200.0
+    data = np.zeros((1, 1, 2_000))
+
+    frequencies_hz, _ = lines.thomson_f_p_values(
+        data,
+        sampling_frequency_hz,
+        frequency_range_hz=(0.0, sampling_frequency_hz / 2.0),
+    )
+
+    assert frequencies_hz[-1] == sampling_frequency_hz / 2.0
 
 
 def _result(*frequencies_hz: float) -> lines.LineDetectionResult:

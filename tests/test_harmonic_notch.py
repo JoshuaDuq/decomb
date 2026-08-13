@@ -70,7 +70,7 @@ def test_isolated_line_detection_does_not_require_a_comb():
     sampling_frequency_hz = 250.0
     times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
     data = np.random.default_rng(7).normal(scale=1e-6, size=(4, times_s.size))
-    data += 20e-6 * np.sin(2.0 * np.pi * 60.0 * times_s)
+    data[0] += 20e-6 * np.sin(2.0 * np.pi * 60.0 * times_s)
     raw = mne.io.RawArray(
         data,
         mne.create_info(["C3", "C4", "P3", "P4"], sampling_frequency_hz, "eeg"),
@@ -100,22 +100,113 @@ def test_fitted_model_and_plans_preserve_channel_specific_evidence():
     model = notch.fit_harmonic_model(raw, _settings())
     plans = notch.plan_channel_notches(model, _settings())
 
-    assert [channel.channel_name for channel in model.channels] == ["C3"]
+    assert [channel.channel_name for channel in model.channels] == ["C3", "C4"]
     assert model.channel_count == 2
     assert model.test_count_per_channel > 0
-    assert [plan.channel_name for plan in plans] == ["C3"]
-    assert any(
-        stopband.low_hz <= 60.0 <= stopband.high_hz
-        for stopband in plans[0].geometry.stopbands
+    assert [plan.channel_name for plan in plans] == ["C3", "C4"]
+    assert all(
+        any(
+            stopband.low_hz <= 60.0 <= stopband.high_hz
+            for stopband in plan.geometry.stopbands
+        )
+        for plan in plans
     )
 
 
-@pytest.mark.parametrize("correction", ["holm", "bonferroni", "none"])
-def test_fit_harmonic_model_accepts_every_correction_procedure(correction):
-    # A narrow tested band keeps uncorrected detection's nominal false-positive count
-    # (no family-wise control by design) small enough for classify_harmonics's
-    # candidate-fundamental search to stay fast; see the comment on the uncorrected
-    # permissiveness test below for why a wide band is not safe here.
+def test_detection_is_invariant_to_the_acquisition_reference():
+    sampling_frequency_hz = 250.0
+    times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
+    rng = np.random.default_rng(29)
+    data = rng.normal(scale=1e-6, size=(3, times_s.size))
+    data[0] += 20e-6 * np.sin(2.0 * np.pi * 60.0 * times_s)
+    common_reference = 100e-6 * np.sin(2.0 * np.pi * 37.0 * times_s)
+    info = mne.create_info(["C3", "C4", "Pz"], sampling_frequency_hz, "eeg")
+    raw = mne.io.RawArray(data, info, verbose="ERROR")
+    rereferenced = mne.io.RawArray(
+        data + common_reference,
+        info,
+        verbose="ERROR",
+    )
+
+    original_model = notch.fit_harmonic_model(raw, _settings())
+    rereferenced_model = notch.fit_harmonic_model(rereferenced, _settings())
+
+    def supported_lines(model):
+        return {
+            channel.channel_name: tuple(
+                (line.position_hz, line.harmonic) for line in channel.lines
+            )
+            for channel in model.channels
+        }
+
+    assert supported_lines(rereferenced_model) == supported_lines(original_model)
+
+
+def test_detection_requires_two_channels_for_a_common_average_reference():
+    raw = mne.io.RawArray(
+        np.zeros((1, 12_000)),
+        mne.create_info(["Cz"], 200.0, "eeg"),
+        verbose="ERROR",
+    )
+
+    with pytest.raises(ValueError, match="at least two non-bad EEG channels"):
+        notch.fit_harmonic_model(raw, _settings())
+
+
+def test_bad_eeg_channels_cannot_authorize_a_recording_notch():
+    sampling_frequency_hz = 250.0
+    times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
+    data = np.random.default_rng(31).normal(
+        scale=1e-6,
+        size=(3, times_s.size),
+    )
+    data[0] += 20e-6 * np.sin(2.0 * np.pi * 60.0 * times_s)
+    raw = mne.io.RawArray(
+        data,
+        mne.create_info(["C3", "C4", "Pz"], sampling_frequency_hz, "eeg"),
+        verbose="ERROR",
+    )
+    raw.info["bads"] = ["C3"]
+
+    model = notch.fit_harmonic_model(raw, _settings())
+
+    assert model.channel_count == 2
+    assert "C3" not in {channel.channel_name for channel in model.channels}
+
+
+def test_recording_plan_filters_every_eeg_channel():
+    sfreq = 200.0
+    times = np.arange(int(120.0 * sfreq)) / sfreq
+    data = np.vstack(
+        (
+            np.sin(2.0 * np.pi * 20.0 * times),
+            np.sin(2.0 * np.pi * 20.0 * times),
+        )
+    )
+    raw = mne.io.RawArray(
+        data,
+        mne.create_info(["C3", "C4"], sfreq, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    model = _supported_model((20.0, 2))
+
+    plan = notch.plan_recording_notches(model, _settings())
+    filtered = notch.apply_harmonic_notches(raw, plan)
+
+    interior = slice(int(30.0 * sfreq), int(90.0 * sfreq))
+    for channel_index in range(2):
+        assert _tone_amplitude(
+            filtered.get_data()[channel_index, interior],
+            20.0,
+            sfreq,
+        ) < _tone_amplitude(
+            raw.get_data()[channel_index, interior],
+            20.0,
+            sfreq,
+        ) / 50.0
+
+
+def test_fit_harmonic_model_detects_a_strong_line():
     narrow_settings = notch.HarmonicNotchSettings(
         estimation_window_s=54.0,
         familywise_error_rate=0.05,
@@ -131,41 +222,11 @@ def test_fit_harmonic_model_accepts_every_correction_procedure(correction):
         verbose="ERROR",
     )
 
-    model = notch.fit_harmonic_model(raw, narrow_settings, correction=correction)
+    model = notch.fit_harmonic_model(raw, narrow_settings)
 
     assert "C3" in [channel.channel_name for channel in model.channels]
     c3 = next(channel for channel in model.channels if channel.channel_name == "C3")
     assert any(abs(line.position_hz - 5.0) < 0.02 for line in c3.lines)
-
-
-def test_uncorrected_fit_is_at_least_as_permissive_as_holm():
-    # A narrow tested band, not the packaged 0-100 Hz default: uncorrected detection has
-    # no false-positive control, so a wide band with many tested bins gives it thousands
-    # of nominal detections and drives classify_harmonics's candidate-fundamental search
-    # (which scales with detection count) into minutes-long runtime for pure noise. That
-    # blowup is real and belongs to the ablation study, not to this plumbing test.
-    narrow_settings = notch.HarmonicNotchSettings(
-        estimation_window_s=54.0,
-        familywise_error_rate=0.05,
-        frequency_range_hz=(1.0, 10.0),
-    )
-    sampling_frequency_hz = 250.0
-    times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
-    data = np.random.default_rng(23).normal(scale=1e-6, size=(4, times_s.size))
-    raw = mne.io.RawArray(
-        data,
-        mne.create_info(["C3", "C4", "P3", "P4"], sampling_frequency_hz, "eeg"),
-        verbose="ERROR",
-    )
-
-    holm_model = notch.fit_harmonic_model(raw, narrow_settings, correction="holm")
-    uncorrected_model = notch.fit_harmonic_model(raw, narrow_settings, correction="none")
-
-    holm_lines = sum(len(channel.lines) for channel in holm_model.channels)
-    uncorrected_lines = sum(len(channel.lines) for channel in uncorrected_model.channels)
-    assert uncorrected_lines >= holm_lines
-
-
 def test_manifest_records_channel_local_holm_evidence():
     sampling_frequency_hz = 250.0
     times_s = np.arange(int(120.0 * sampling_frequency_hz)) / sampling_frequency_hz
@@ -187,8 +248,14 @@ def test_manifest_records_channel_local_holm_evidence():
         _settings(),
     )
 
-    assert {row["channel"] for row in rows} == {"C3"}
+    assert {row["channel"] for row in rows} == {"C3", "C4"}
     assert all(row["multiple_testing_method"] == "holm" for row in rows)
+    assert all(
+        row["multiple_testing_scope"]
+        == "average_referenced_eeg_recording_removal_sequence"
+        for row in rows
+    )
+    assert all(row["round_familywise_error_rate"] == 0.025 for row in rows)
     assert all(row["detection_test_count_per_channel"] > 0 for row in rows)
     assert all(row["detected_line_raw_p_values"] for row in rows)
 
@@ -250,12 +317,12 @@ def test_stopband_covers_every_observed_position_and_bin_uncertainty():
     assert second.high_hz > 20.03
 
 
-def test_stationary_interval_has_the_hann_half_power_width():
+def test_stationary_interval_covers_the_detected_fourier_bin():
     model = _supported_model((20.0, 2))
 
     plan = notch.plan_harmonic_stopbands(model.channels[0], _settings())
 
-    assert plan.stopbands[0].width_hz == pytest.approx(_settings().spectral_resolution_hz)
+    assert plan.stopbands[0].width_hz == pytest.approx(_settings().frequency_bin_width_hz)
 
 
 def test_intervals_without_enough_transition_passband_are_merged():
@@ -366,6 +433,183 @@ def test_no_supported_line_produces_an_unchanged_copy_and_null_manifest():
     notch._validate_manifest_evidence(rows, _settings())
 
 
+def test_cleaning_continues_until_a_fresh_holm_fit_is_null(monkeypatch):
+    raw = mne.io.RawArray(
+        np.ones((1, 1_000)),
+        mne.create_info(["Cz"], 200.0, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    frequencies_hz = np.array([20.0, 20.1])
+    p_value_rounds = iter(
+        (
+            np.array([[[0.001, 1.0]]]),
+            np.array([[[1.0, 0.001]]]),
+            np.array([[[1.0, 1.0]]]),
+        )
+    )
+    monkeypatch.setattr(
+        notch,
+        "_thomson_f_p_values",
+        lambda raw, settings: (frequencies_hz, next(p_value_rounds)),
+    )
+
+    def attenuate(raw, plan):
+        filtered = raw.copy()
+        filtered._data *= 0.5
+        return filtered
+
+    monkeypatch.setattr(notch, "apply_harmonic_notches", attenuate)
+    monkeypatch.setattr(
+        notch,
+        "_measure_channel_stopband_changes",
+        lambda before, after, plans, settings: tuple(0.0 for _ in plans),
+    )
+
+    result = notch.clean_until_no_supported_lines(raw, _settings())
+
+    assert len(result.rounds) == 2
+    assert [round_.model.line_count for round_ in result.rounds] == [1, 1]
+    assert result.residual_model.channels == ()
+    np.testing.assert_array_equal(result.cleaned.get_data(), raw.get_data() / 4.0)
+
+
+def test_cleaning_spends_the_recording_error_rate_across_rounds(monkeypatch):
+    raw = mne.io.RawArray(
+        np.ones((2, 1_000)),
+        mne.create_info(["C3", "C4"], 200.0, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    frequencies_hz = np.array([20.0])
+    p_value_rounds = iter(
+        (
+            np.array([[[0.001], [1.0]]]),
+            np.array([[[0.02], [1.0]]]),
+        )
+    )
+    monkeypatch.setattr(
+        notch,
+        "_thomson_f_p_values",
+        lambda raw, settings: (frequencies_hz, next(p_value_rounds)),
+    )
+
+    def attenuate(raw, plan):
+        filtered = raw.copy()
+        filtered._data *= 0.5
+        return filtered
+
+    monkeypatch.setattr(notch, "apply_harmonic_notches", attenuate)
+    monkeypatch.setattr(
+        notch,
+        "_measure_channel_stopband_changes",
+        lambda before, after, plans, settings: tuple(0.0 for _ in plans),
+    )
+
+    result = notch.clean_until_no_supported_lines(raw, _settings())
+
+    assert len(result.rounds) == 1
+
+
+def test_clean_recording_satisfies_the_residual_postcondition_without_filtering(
+    monkeypatch,
+):
+    raw = mne.io.RawArray(
+        np.ones((1, 1_000)),
+        mne.create_info(["Cz"], 200.0, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    monkeypatch.setattr(
+        notch,
+        "_thomson_f_p_values",
+        lambda raw, settings: (
+            np.array([20.0]),
+            np.array([[[1.0]]]),
+        ),
+    )
+
+    result = notch.clean_until_no_supported_lines(raw, _settings())
+
+    assert result.rounds == ()
+    assert result.residual_model.channels == ()
+    assert result.cleaned is not raw
+    np.testing.assert_array_equal(result.cleaned.get_data(), raw.get_data())
+
+
+def test_manifest_records_every_removal_round_and_the_terminal_null():
+    model = _supported_model((20.0, 2))
+    plans = notch.plan_channel_notches(model, _settings())
+    residual_model = lines.ArtifactModel(
+        channels=(),
+        window_count=model.window_count,
+        channel_count=model.channel_count,
+        test_count_per_channel=model.test_count_per_channel,
+    )
+    cleaned = mne.io.RawArray(
+        np.zeros((1, 1_000)),
+        mne.create_info(["Cz"], 500.0, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    result = notch.HarmonicCleaningResult(
+        cleaned,
+        (
+            notch.HarmonicRemovalRound(
+                model,
+                plans,
+                notch.plan_recording_notches(model, _settings()),
+                (-20.0,),
+            ),
+            notch.HarmonicRemovalRound(
+                model,
+                plans,
+                notch.plan_recording_notches(model, _settings()),
+                (-10.0,),
+            ),
+        ),
+        residual_model,
+    )
+
+    rows = notch.cleaning_manifest_rows(
+        "recording",
+        result,
+        (),
+        _settings(),
+    )
+
+    assert [row["removal_round"] for row in rows] == [1, 2, 3]
+    assert [row["outcome"] for row in rows] == [
+        "artifact_detected",
+        "artifact_detected",
+        "no_artifact_detected",
+    ]
+    assert len(notch.removal_rounds_from_rows(rows)) == 2
+    notch._validate_manifest_evidence(rows, _settings())
+
+    with pytest.raises(ValueError, match="terminal null"):
+        notch._validate_manifest_evidence(rows[:-1], _settings())
+
+    fractional_round = [dict(row) for row in rows]
+    fractional_round[0]["removal_round"] = 1.5
+    with pytest.raises(ValueError, match="integer removal_round"):
+        notch._validate_manifest_evidence(fractional_round, _settings())
+
+
+def test_residual_postcondition_rejects_a_statistically_dirty_derivative(
+    monkeypatch,
+):
+    raw = mne.io.RawArray(
+        np.zeros((1, 1_000)),
+        mne.create_info(["Cz"], 500.0, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    monkeypatch.setattr(
+        notch,
+        "fit_harmonic_model",
+        lambda raw, settings, **kwargs: _supported_model((20.0, 2)),
+    )
+
+    with pytest.raises(RuntimeError, match="Holm-significant residual"):
+        notch.validate_residual_postcondition(raw, _settings())
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -416,6 +660,22 @@ def test_apply_declares_the_same_acquisition_boundaries_used_for_estimation(
     notch.apply_harmonic_notches(raw, plan)
 
     assert captured["skip_by_annotation"] == recordings.ACQUISITION_BOUNDARY_ANNOTATIONS
+
+
+def test_apply_refuses_a_continuous_span_shorter_than_the_fir():
+    sfreq = 200.0
+    raw = mne.io.RawArray(
+        np.zeros((2, int(10.0 * sfreq))),
+        mne.create_info(["C3", "C4"], sfreq, "eeg"),
+        verbose="ERROR",
+    )
+    plan = notch.HarmonicNotchPlan(
+        (notch.HarmonicStopband((2,), 19.95, 20.05),),
+        transition_bandwidth_hz=0.2,
+    )
+
+    with pytest.raises(ValueError, match="shorter than the 6601-sample FIR"):
+        notch.apply_harmonic_notches(raw, plan)
 
 
 def test_exclusion_rows_report_kind_transitions_and_band_availability():
@@ -488,22 +748,19 @@ def test_verification_rejects_an_unfiltered_derivative(brainvision_run):
     vhdr, raw = brainvision_run
     geometry = notch.HarmonicNotchPlan(
         (notch.HarmonicStopband((2,), 19.95, 20.05),),
-        transition_bandwidth_hz=0.2,
+        transition_bandwidth_hz=2.0,
     )
-    plans = (notch.ChannelNotchPlan("Cz", geometry),)
-
     with pytest.raises(RuntimeError, match="does not equal the declared FIR derivative"):
-        notch._validate_exact_derivative(raw, raw.copy(), vhdr, plans)
+        notch._validate_exact_derivative(raw, raw.copy(), vhdr, (geometry,))
 
 
 def test_verification_accepts_the_exact_quantized_filter_result(brainvision_run):
     vhdr, raw = brainvision_run
     geometry = notch.HarmonicNotchPlan(
         (notch.HarmonicStopband((2,), 19.95, 20.05),),
-        transition_bandwidth_hz=0.2,
+        transition_bandwidth_hz=2.0,
     )
-    plans = (notch.ChannelNotchPlan("Cz", geometry),)
-    filtered = notch.apply_channel_notches(raw, plans)
+    filtered = notch.apply_harmonic_notches(raw, geometry)
     quantized = recordings.quantized_eeg_data(
         vhdr,
         filtered.get_data(),
@@ -512,7 +769,31 @@ def test_verification_accepts_the_exact_quantized_filter_result(brainvision_run)
     written = filtered.copy()
     written._data = quantized
 
-    assert notch._validate_exact_derivative(raw, written, vhdr, plans) == 0.0
+    assert notch._validate_exact_derivative(raw, written, vhdr, (geometry,)) == 0.0
+
+
+def test_verification_replays_every_removal_round(brainvision_run):
+    vhdr, raw = brainvision_run
+    geometry = notch.HarmonicNotchPlan(
+        (notch.HarmonicStopband((2,), 19.95, 20.05),),
+        transition_bandwidth_hz=2.0,
+    )
+    filtered_once = notch.apply_harmonic_notches(raw, geometry)
+    filtered_twice = notch.apply_harmonic_notches(filtered_once, geometry)
+    quantized = recordings.quantized_eeg_data(
+        vhdr,
+        filtered_twice.get_data(),
+        filtered_twice.ch_names,
+    )
+    written = filtered_twice.copy()
+    written._data = quantized
+
+    assert notch._validate_exact_derivative(
+        raw,
+        written,
+        vhdr,
+        (geometry, geometry),
+    ) == 0.0
 
 
 def test_verification_rejects_filter_provenance_that_cannot_be_reproduced():
@@ -560,8 +841,16 @@ def test_derivative_description_records_computed_source_and_derived_method(tmp_p
     assert written["SourceDatasets"] == [{"URL": "../source"}]
     parameters = written["GeneratedBy"][-1]["Parameters"]
     assert parameters["multiple_testing_method"] == "holm"
-    assert parameters["familywise_error_unit"] == "eeg_channel"
-    assert parameters["filter_scope"] == "statistically_supported_channels"
+    assert parameters["familywise_error_unit"] == (
+        "average_referenced_eeg_recording_removal_sequence"
+    )
+    assert parameters["detection_reference"] == (
+        "common_average_of_non_bad_eeg_channels"
+    )
+    assert parameters["filter_scope"] == "all_eeg_channels"
+    assert parameters["convergence_rule"] == "fresh_holm_null"
+    assert parameters["multiple_testing_scope"] == "recording_wide_alpha_spending_sequence"
+    assert parameters["alpha_spending_rule"] == "alpha / (round * (round + 1))"
     assert parameters["estimation_window_s"] == 54.0
     assert parameters["transition_bandwidth_hz"] == pytest.approx(3.3 / 54.0)
     assert parameters["per_edge_transition_bandwidth_hz"] == pytest.approx(3.3 / 108.0)
