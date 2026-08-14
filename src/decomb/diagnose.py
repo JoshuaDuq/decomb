@@ -28,11 +28,10 @@ def _diagnose_recording(
 ) -> RecordingDiagnosis:
     """Fit one recording without sharing data or statistical evidence."""
     raw = recordings.read_bids_raw(vhdr)
-    model = notch.fit_harmonic_model(raw, settings)
-    plans = notch.plan_channel_notches(model, settings)
-    filter_plan = (
-        notch.recording_plan_from_channel_plans(plans) if plans else None
-    )
+    evidence = notch.fit_harmonic_round(raw, settings)
+    model = evidence.model
+    plans = evidence.plans
+    filter_plan = evidence.filter_plan
     filtered_eeg_channel_count = len(
         mne.pick_types(raw.info, eeg=True, exclude=())
     )
@@ -41,21 +40,32 @@ def _diagnose_recording(
         if filter_plan is None
         else sum(high_hz - low_hz for low_hz, high_hz in filter_plan.unavailable_edges())
     )
-    harmonic_line_count = sum(
-        line.harmonic is not None
-        for channel in model.channels
-        for line in channel.lines
-    )
     model_row = {
         "recording": vhdr.stem,
         "n_tested_eeg_channels": model.channel_count,
         "n_affected_eeg_channels": len(model.channels),
-        "n_comb_channels": sum(
-            channel.fundamental_hz is not None for channel in model.channels
-        ),
         "n_detected_channel_lines": model.line_count,
-        "n_harmonic_lines": harmonic_line_count,
-        "n_isolated_lines": model.line_count - harmonic_line_count,
+        "scanner_harmonics_authorized": int(evidence.scanner_harmonics is not None),
+        "scanner_harmonics_corrected_p_value": (
+            ""
+            if evidence.scanner_harmonics is None
+            else evidence.scanner_harmonics.corrected_p_value
+        ),
+        "scanner_supporting_harmonics": (
+            ""
+            if evidence.scanner_harmonics is None
+            else ";".join(
+                str(value) for value in evidence.scanner_harmonics.supporting_harmonics
+            )
+        ),
+        "n_scanner_plan_harmonics": (
+            0
+            if evidence.scanner_plan is None
+            else sum(
+                len(stopband.harmonics)
+                for stopband in evidence.scanner_plan.stopbands
+            )
+        ),
         "n_recording_stopbands": (
             0 if filter_plan is None else len(filter_plan.stopbands)
         ),
@@ -79,28 +89,51 @@ def _diagnose_recording(
             "recording": vhdr.stem,
             "channel": channel.channel_name,
             "frequency_hz": line.position_hz,
-            "raw_p_value": line.raw_p_value,
+            "holm_input_p_value": line.raw_p_value,
             "corrected_p_value": line.corrected_p_value,
             "window_indices": ",".join(
                 str(value) for value in line.window_indices
             ),
-            "harmonic": "" if line.harmonic is None else line.harmonic,
         }
         for channel in model.channels
         for line in channel.lines
     )
-    return RecordingDiagnosis(
-        model_row,
-        detected_line_rows,
-        tuple(
-            notch.artifact_manifest_rows(
+    stopband_rows = []
+    if plans:
+        stopband_rows.extend(
+            notch.line_manifest_rows(
                 vhdr.stem,
                 model,
                 plans,
                 bands,
                 settings,
             )
-        ),
+        )
+    if evidence.scanner_harmonics is not None:
+        stopband_rows.extend(
+            notch.scanner_harmonic_manifest_rows(
+                vhdr.stem,
+                evidence.scanner_harmonics,
+                evidence.scanner_plan,
+                bands,
+                settings,
+                round_index=1,
+            )
+        )
+    if not stopband_rows:
+        stopband_rows.extend(
+            notch.line_manifest_rows(
+                vhdr.stem,
+                model,
+                (),
+                bands,
+                settings,
+            )
+        )
+    return RecordingDiagnosis(
+        model_row,
+        detected_line_rows,
+        tuple(stopband_rows),
     )
 
 

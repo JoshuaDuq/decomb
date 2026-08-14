@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "decomb"
-version = "0.1.0"
-description = "Audited removal of statistically supported sinusoidal artifacts from EEG"
+version = "0.2.0"
+description = "Audited removal of statistically supported sinusoidal components from EEG"
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Joshua Duquette" }]
-keywords = ["eeg", "bids", "mne", "line noise", "harmonics", "artifact removal"]
+keywords = ["eeg", "bids", "mne", "line noise", "harmonics", "sinusoid removal"]
 dependencies = [
     "matplotlib>=3.8",
     "mne>=1.6",

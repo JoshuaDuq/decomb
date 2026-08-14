@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import MISSING, fields, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from decomb import psd
@@ -38,7 +40,7 @@ def _raw(sfreq=250.0, seconds=120.0, line_hz=57.25, amplitude=5e-6, n_channels=4
 class TestSettings:
     def test_every_value_comes_from_yaml(self):
         assert all(entry.default is MISSING for entry in fields(psd.PsdSettings))
-        assert psd.PsdSettings.from_config(load_config()).window_s == 54.0
+        assert psd.PsdSettings.from_config(load_config()).window_s == 10.0
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -192,6 +194,133 @@ class TestSpectrum:
         spectrum = psd.channel_spectrum(raw, _settings(window_s=20.0))
 
         assert np.max(spectrum.get_data(exclude=())) < 1e-35
+
+
+class TestCohortSpectrum:
+    def test_recordings_contribute_equally_in_linear_power(self):
+        first, _ = _raw(amplitude=2e-6)
+        second, _ = _raw(amplitude=8e-6)
+        settings = _settings(window_s=20.0)
+        spectra = (
+            psd.channel_spectrum(first, settings),
+            psd.channel_spectrum(second, settings),
+        )
+
+        cohort = psd.average_channel_spectra(spectra)
+
+        expected = np.mean(
+            [spectrum.get_data(exclude=()) for spectrum in spectra],
+            axis=0,
+        )
+        np.testing.assert_allclose(cohort.get_data(exclude=()), expected)
+
+    def test_inconsistent_channel_sets_are_refused(self):
+        first, _ = _raw(n_channels=4)
+        second, _ = _raw(n_channels=3)
+        settings = _settings(window_s=20.0)
+        spectra = (
+            psd.channel_spectrum(first, settings),
+            psd.channel_spectrum(second, settings),
+        )
+
+        with pytest.raises(ValueError, match="same EEG channels"):
+            psd.average_channel_spectra(spectra)
+
+    def test_each_channel_mean_excludes_recordings_that_marked_it_bad(self):
+        first, _ = _raw(n_channels=4)
+        second, _ = _raw(n_channels=4)
+        first.info["bads"] = [first.ch_names[0]]
+        second.info["bads"] = [second.ch_names[1]]
+        settings = _settings(window_s=20.0)
+
+        first_spectrum = psd.channel_spectrum(first, settings)
+        second_spectrum = psd.channel_spectrum(second, settings)
+        cohort = psd.average_channel_spectra((first_spectrum, second_spectrum))
+
+        actual = cohort.get_data(exclude=())
+        first_power = first_spectrum.get_data(exclude=())
+        second_power = second_spectrum.get_data(exclude=())
+        np.testing.assert_allclose(actual[0], second_power[0])
+        np.testing.assert_allclose(actual[1], first_power[1])
+        np.testing.assert_allclose(
+            actual[2:],
+            np.mean([first_power[2:], second_power[2:]], axis=0),
+        )
+        assert cohort.info["bads"] == []
+
+    def test_a_cohort_pair_reports_recording_count_and_total_hours(self):
+        first_source, _ = _raw(seconds=120.0, amplitude=2e-6)
+        first_derivative, _ = _raw(seconds=120.0, amplitude=1e-6)
+        second_source, _ = _raw(seconds=180.0, amplitude=4e-6)
+        second_derivative, _ = _raw(seconds=180.0, amplitude=1e-6)
+
+        result = psd.cohort_spectrum_pair(
+            (
+                ("run-1", first_source, first_derivative),
+                ("run-2", second_source, second_derivative),
+            ),
+            _settings(window_s=20.0),
+        )
+
+        assert result.recording_count == 2
+        assert result.analysed_hours == pytest.approx(300.0 / 3_600.0)
+        assert result.before.ch_names == result.after.ch_names
+
+
+def test_analysed_duration_excludes_acquisition_skips():
+    import mne
+
+    raw, _ = _raw(seconds=120.0)
+    raw.set_annotations(mne.Annotations([40.0], [30.0], ["BAD_ACQ_SKIP"]))
+
+    assert psd.analysed_duration_hours(
+        (raw,),
+        _settings(window_s=20.0),
+    ) == pytest.approx(90.0 / 3_600.0)
+
+
+def test_analysed_duration_excludes_segments_shorter_than_one_welch_window():
+    import mne
+
+    raw, _ = _raw(seconds=120.0)
+    raw.set_annotations(mne.Annotations([10.0], [90.0], ["BAD_ACQ_SKIP"]))
+
+    assert psd.analysed_duration_hours(
+        (raw,),
+        _settings(window_s=20.0),
+    ) == pytest.approx(20.0 / 3_600.0)
+
+
+def test_band_availability_uses_one_terminal_plan_per_recording():
+    manifest = pd.DataFrame(
+        [
+            {
+                "recording": "run-1",
+                "removal_round": 1,
+                "delta_retained_share": 0.95,
+                "theta_retained_share": 0.90,
+            },
+            {
+                "recording": "run-1",
+                "removal_round": 2,
+                "delta_retained_share": 0.90,
+                "theta_retained_share": 0.80,
+            },
+            {
+                "recording": "run-2",
+                "removal_round": 1,
+                "delta_retained_share": 1.00,
+                "theta_retained_share": 0.90,
+            },
+        ]
+    )
+
+    availability = psd.mean_band_availability_percent(
+        manifest,
+        band_names=("delta", "theta"),
+    )
+
+    assert availability == pytest.approx({"delta": 95.0, "theta": 85.0})
 
 
 class TestCorrespondence:
@@ -358,3 +487,89 @@ def test_the_stage_uses_the_output_root_override(tmp_path, monkeypatch):
                 subjects=None,
             )
         )
+
+
+def test_the_stage_summarises_every_discovered_recording(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    source_root = tmp_path / "source"
+    derivative_root = tmp_path / "derivative"
+    report_dir = tmp_path / "reports"
+    source_root.mkdir()
+    derivative_root.mkdir()
+    runs = (source_root / "run-1.vhdr", source_root / "run-2.vhdr")
+    derivative_paths = tuple(derivative_root / run.name for run in runs)
+    for path in derivative_paths:
+        path.touch()
+    raw, _ = _raw(seconds=120.0)
+    titles = []
+
+    class Config:
+        def path(self, name, override=None):
+            paths = {
+                "bids_root": source_root,
+                "output_root": derivative_root,
+                "removal_dir": report_dir,
+            }
+            return Path(override) if override is not None else paths[name]
+
+        def get(self, key, default=None):
+            if key == "frequency_bands":
+                return {"delta": [1.0, 4.0]}
+            return default
+
+    monkeypatch.setattr("decomb.config.load_config", lambda *a, **k: Config())
+    monkeypatch.setattr(
+        psd.PsdSettings,
+        "from_config",
+        lambda config: psd.PsdSettings(20.0, (0.0, 100.0)),
+    )
+    monkeypatch.setattr(psd.recordings, "discover_runs", lambda *args, **kwargs: runs)
+    monkeypatch.setattr(
+        psd.recordings,
+        "derivative_vhdr_path",
+        lambda source, *args: derivative_root / source.name,
+    )
+    monkeypatch.setattr(psd.recordings, "read_bids_raw", lambda path: raw.copy())
+    monkeypatch.setattr(
+        psd,
+        "cohort_spectrum_pair",
+        lambda pairs, settings: SimpleNamespace(
+            before=SimpleNamespace(info={"bads": []}),
+            after=SimpleNamespace(info={"bads": []}),
+            recording_count=len(tuple(pairs)),
+            analysed_hours=2.0,
+        ),
+    )
+    monkeypatch.setattr(psd, "shared_decibel_limits", lambda *spectra: (-10.0, 10.0))
+    monkeypatch.setattr(
+        psd,
+        "figure_spectrum",
+        lambda spectrum, path, *, title, ylim: titles.append(title),
+    )
+    pd.DataFrame(
+        [
+            {
+                "recording": run.stem,
+                "removal_round": 1,
+                "delta_retained_share": 0.99,
+            }
+            for run in runs
+        ]
+    ).to_csv(derivative_root / "line_notch_manifest.tsv", sep="\t", index=False)
+
+    psd.run(
+        argparse.Namespace(
+            config=None,
+            bids_root=None,
+            output_root=None,
+            report_dir=None,
+            subjects=None,
+        )
+    )
+
+    assert titles == [
+        "Before correction — 2 recordings · 2.00 h",
+        "After correction — 2 recordings · 2.00 h",
+    ]
+    assert "delta availability 99.000%" in capsys.readouterr().out

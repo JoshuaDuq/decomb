@@ -4,7 +4,7 @@
   <img src="logo.png" alt="decomb logo" width="420">
 </p>
 
-`decomb` detects and suppresses statistically supported sinusoidal components in
+`decomb` detects and suppresses statistically supported narrow spectral lines in
 continuous EEG. Each recording is fitted independently. All non-bad EEG channels are
 tested as one multiplicity-controlled recording family; their supported intervals are
 merged and the same filter is applied to every EEG channel. The result is written as a
@@ -38,14 +38,21 @@ Input recordings must use BrainVision format in an EEG-BIDS dataset
 [[12](#user-content-ref-12), [14](#user-content-ref-14)]. Recording directories may contain
 optional session and run entities. Channel metadata mismatches raise an error.
 
-At least two non-bad channels typed as EEG are required for common-average detection.
-Those channels must contain finite values and at least one complete estimation window
-inside a continuous
-acquisition span. Windows never cross annotations whose descriptions begin with
-`edge` or `bad_acq_skip`. Scanner triggers and scanner clock annotations are otherwise
-not used. When filtering is authorized, every continuous acquisition span must be at
+At least two non-bad channels typed as EEG are required for detection.
+Those channels must contain finite values and at least three complete estimation windows
+inside continuous acquisition spans. Windows never cross annotations whose descriptions
+begin with
+`edge` or `bad_acq_skip`. Every recording must also contain at least two annotations
+whose description exactly matches `removal.scanner_trigger_event_name`; every interval
+between those annotations must equal `removal.scanner_repetition_time_s` within half a
+sample. When filtering is authorized, every continuous acquisition span must be at
 least as long as the designed FIR; shorter spans fail because MNE warns that such a
 filter is likely to distort the signal.
+
+Detection tests the as-recorded non-bad EEG channels. This deliberately includes
+common/reference-borne lines that remain visible in channel spectra. Changing the
+acquisition reference can therefore change the evidence, and the derivative records the
+tested reference rather than claiming reference invariance.
 
 The method identifies narrow spectral structure. Broad rhythms and transient artifacts
 require temporal or spatial methods [[7](#user-content-ref-7)]. A detected comb does not
@@ -72,10 +79,10 @@ decomb psd --config decomb.yaml
 
 | Command | Operation |
 | --- | --- |
-| `diagnose` | Tests sinusoidal components and writes the proposed filter plan |
+| `diagnose` | Tests narrow spectral lines and writes the proposed filter plan |
 | `apply` | Fits each recording, filters EEG channels, and writes the complete derivative |
 | `verify` | Refits and replays every FIR round, then requires exact samples and a residual null |
-| `psd` | Writes one recording's per-channel spectrum before and after correction |
+| `psd` | Writes equal-recording cohort spectra before and after correction |
 
 `apply` and `verify` require the complete discovered dataset. `diagnose` and `psd`
 accept recording subsets. An existing output directory causes `apply` to stop.
@@ -84,16 +91,23 @@ accept recording subsets. An existing output directory causes `apply` to stop.
 
 The packaged configuration is
 [`src/decomb/defaults.yaml`](src/decomb/defaults.yaml). Three settings define the
-scientific correction.
+ordinary line test, and two recording-specific inputs pre-specify the scanner comb.
 
 | Setting | Default | Function |
 | --- | --- | --- |
-| `removal.estimation_window_s` | 54.0 s | Stationarity interval and spectral resolution |
-| `removal.familywise_error_rate` | 0.05 | Maximum probability of any false authorization across one recording's adaptive removal sequence |
+| `removal.scanner_repetition_time_s` | 0.9 s | Scanner TR; fixes the comb fundamental at `1 / TR` |
+| `removal.scanner_trigger_event_name` | `Volume/V  1` | Exact annotation name used to validate that TR |
+| `removal.estimation_window_s` | 10.0 s | Ordinary-line stationarity interval and spectral resolution |
+| `removal.familywise_error_rate` | 0.05 | Target error budget allocated across one recording's adaptive removal sequence |
 | `removal.frequency_range_hz` | 0.0 to 100.0 Hz | Frequencies eligible for detection and filtering |
 
-The default window gives Fourier bins separated by 0.018519 Hz. Changing the duration
-changes the frequency spacing, stopband width, transition width, and FIR duration.
+The default ordinary-line window gives Fourier bins separated by 0.1 Hz. Changing that
+duration changes its frequency spacing; ordinary-line stopbands remain at least 0.25 Hz
+wide. Scanner-comb localization remains fixed at 4 seconds. A supported scanner tooth
+covers its fixed 1 Hz local-background neighborhood on each side, while prespecified
+weak teeth retain the 0.25 Hz localization width. FIR selectivity remains fixed at the
+54-second reference geometry. Thus scanner users need to provide only the TR and exact
+trigger name; no harmonic count, fundamental, search radius, or filter width is tuned.
 
 `paths.bids_root` identifies the input dataset. Output and report locations have
 packaged defaults. Optional `frequency_bands` entries report unavailable and retained
@@ -112,58 +126,77 @@ acquisition span is
 aligned with that span's end. No estimation window crosses or includes samples marked
 by MNE's `edge` or `bad_acq_skip` annotation prefixes.
 
-Each non-bad EEG channel and window is evaluated with Thomson's multitaper sinusoid F
-test, following MNE's `spectrum_fit` implementation. It uses eight DPSS tapers, a
-time-bandwidth product of four, alternating tapers for the sinusoidal estimate and
-residual, and an F distribution with 2 and 14 degrees of freedom
-[[9](#user-content-ref-9)]. DC is excluded.
+The source recording is evaluated with two complementary line-shape tests. Thomson's
+multitaper sinusoid F test follows MNE's `spectrum_fit` implementation: eight DPSS
+tapers, a time-bandwidth product of four, alternating tapers for the sinusoidal estimate
+and residual, and an F distribution with 2 and 14 degrees of freedom
+[[9](#user-content-ref-9)]. It detects a phase-coherent sinusoid.
 
-### Line detection and harmonic classification
+The persistent-peak test detects narrowband power whose phase or frequency modulation
+prevents a sinusoid fit. From the 50-percent-overlapping 10-second windows, every fourth
+window estimates a channel-specific, median-smoothed spectral background and the
+intervening non-overlapping windows form a disjoint test sample. At each Fourier bin, a
+three-bin target band is compared with equal-width symmetric flanking bands. Under the
+local smooth-spectrum null, the target is uniquely largest with probability one third;
+an exact one-sided binomial test measures its persistence. The two shape-test p-values
+are Bonferroni-combined at each window, channel, and frequency. DC is excluded.
 
-One Holm correction covers every non-bad EEG channel, continuous estimation window, and
-tested Fourier frequency in the recording. Removal round `r` receives error rate
-`alpha / (r * (r + 1))`; this summable allocation controls the configured family-wise
-error rate across the complete adaptive sequence. A frequency is eligible only when its
-recording-family adjusted Thomson p-value is below that round's allocated rate.
+### Joint line and scanner-comb detection
+
+Removal round `r` receives error rate `alpha / (r * (r + 1))`; each round splits that
+rate equally between the ordinary-line and scanner-comb families. The ordinary family
+uses one Holm correction across every as-recorded non-bad EEG channel, continuous
+10-second
+estimation window, and tested Fourier frequency in the recording. A frequency is
+eligible only when its recording-family Holm-adjusted, shape-test-union p-value is below
+the ordinary family's allocated rate. After the source round, refits use the Thomson
+test alone because an earlier notch has deliberately changed the local peak geometry.
+
+The scanner family is fixed before the spectrum is inspected. Its fundamental is exactly
+`1 / TR`, after the configured event sequence passes the timing check above. A separate
+4-second Thomson fit evaluates the nearest Fourier bin to each in-range integer harmonic.
+Each harmonic is Bonferroni-corrected across its windows, channels, and the prespecified
+harmonic grid. One supported harmonic authorizes only its 2.25 Hz local-background
+envelope: the 0.25 Hz localization width plus the fixed 1 Hz neighborhood on each side.
+At least two supported harmonics authorize that wider envelope at supported teeth and a
+0.25 Hz notch at every other trigger-anchored harmonic in the recording's study range.
+No unconfigured or data-inferred fundamental can authorize either plan.
+
+The summable allocation bounds the nominal error budgets made available to the rounds.
+It does not by itself prove exact post-selection null behavior after earlier
+data-dependent filters. Complete-sequence calibration is therefore measured empirically
+with mixed true/null simulations.
 Supported intervals from all channels are merged into one recording plan and the
 identical FIR is applied to every EEG channel, including channels marked bad, so a later
 spatial transform cannot restore a component from an unfiltered channel. Recordings are
 independent inferential families and channels are never pooled across the cohort.
 
-If no test survives Holm correction, that null result is recorded explicitly and the
+If neither family is significant, that joint null result is recorded explicitly and the
 recording is copied without filtering. A clean statistical outcome is valid and does not
 abort diagnosis, application, or verification.
 
-Harmonic structure is descriptive and cannot create a target. A partial-conjunction test
-requires evidence for at least two distinct harmonic components and remains valid under
-arbitrary dependence. A second Bonferroni correction covers every candidate fundamental
-implied by the complete tested frequency grid [[23](#user-content-ref-23)]. If this test
-does not pass, every detected component remains an isolated line. The same significant
-frequencies are filtered in either case.
-
-### Isolated-line selection
-
-Every significant frequency not assigned a supported harmonic label remains an isolated
-line. Isolated-line detection does not depend on a comb being present.
-
 ### Stopbands and FIR filtering
 
-Each stopband covers its statistically supported Fourier-bin positions, expanded by half
-a Fourier bin. Its minimum width is one Fourier bin, matching the grid on which the
-Thomson test localized the component. Stopbands are merged only when their FIR
-transitions would overlap. Missing harmonics and all other unsupported frequencies stay
-in the passband.
+Each ordinary-line stopband covers its statistically supported Fourier-bin positions,
+expanded by 0.125 Hz on each side. Its minimum 0.25 Hz width removes the visible local
+structure represented by an authorized line; a coarser configured Fourier bin makes the
+minimum correspondingly wider. A statistically supported scanner harmonic uses the
+2.25 Hz envelope above so its visible skirts are not left beside a deep central notch.
+When replicated support authorizes the complete comb, all other prespecified teeth use
+the 0.25 Hz localization width. Stopbands are merged only when their FIR transitions
+would overlap. Other unsupported frequencies stay in the passband.
 
-The total transition bandwidth is 3.3 divided by the estimation-window duration in
-seconds. MNE assigns half of this width to each stopband edge. Merged stopbands are
-passed to MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel
+The total transition bandwidth is fixed at `3.3 / 54 = 0.061111` Hz. MNE assigns half
+of this width to each stopband edge, producing the selective 108-second Hamming FIR while
+leaving the statistical estimation horizons independent. Merged stopbands are passed to
+MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel
 [[10](#user-content-ref-10), [11](#user-content-ref-11)].
 
 | Parameter | Value |
 | --- | --- |
 | `freqs` | Measured stopband centres |
 | `notch_widths` | Measured stopband widths |
-| `trans_bandwidth` | Total width of 3.3 divided by the estimation-window duration |
+| `trans_bandwidth` | 0.061111 Hz total (0.030556 Hz per edge) |
 | `method` | `fir` |
 | `filter_length` | `auto` |
 | `phase` | `zero` |
@@ -175,24 +208,26 @@ passed to MNE `Raw.notch_filter` as one recording-wide plan for every EEG channe
 
 Each removal round is a zero-phase, noncausal FIR design with delay compensation. The
 manifest records every round's exact sample count and measured response. Filtering stops
-only when a fresh full-family Holm fit finds no residual line. A supported line whose
-filter changes no samples raises an error instead of being hidden by an iteration limit.
+only when fresh ordinary-line and trigger-anchored scanner-harmonic fits are both null. A
+supported plan whose filter changes no samples raises an error instead of being hidden by
+an iteration limit.
 A transition reaching zero frequency or Nyquist, or a continuous span shorter than the
 FIR, raises an error
 [[6](#user-content-ref-6)].
 
 ### Attenuation and verification
 
-Stopband power is summed across frequency bins on the channel carrying its statistical
-evidence. Source and derivative spectra use the same complete Hann windows used by
+Stopband power is summed across frequency bins on the channel carrying ordinary-line
+evidence, or across the equal-channel mean for recording-level scanner evidence. Source
+and derivative spectra use the same complete Hamming windows used by
 the boundary policy. The reported change is descriptive and no attenuation threshold
 decides whether verification passes.
 
 Verification confirms that scientific settings, library versions, and recording geometry
 match the apply stage. Starting from the source recording, it refits and replays every
-declared round and requires each Holm authorization, supporting window, channel count,
-harmonic label, recording-wide stopband geometry, and terminal null to reproduce the
-manifest. It then
+declared round and requires each Holm or scanner-comb authorization, supporting window,
+channel count, trigger-anchored harmonic set, recording-wide stopband geometry, and joint
+terminal null to reproduce the manifest. It then
 applies the destination BrainVision calibration and float32 quantization. Every sample
 must equal the written derivative exactly, and an independent fit of the written data must
 also be null. A recording that starts null is reproduced unchanged.
@@ -201,10 +236,31 @@ Quality-control spectra use MNE `psd_array_welch` with detrended Hamming windows
 wrapped as MNE `SpectrumArray` objects for plotting [[18](#user-content-ref-18)]. Source
 and derivative files use identical EEG channels, complete continuous-acquisition
 windows, segment duration, 50 percent overlap, frequency range, and frequency grid. No
-Welch window crosses an `edge` or includes a `bad_acq_skip` interval. Every channel is
-retained rather than summarised, both figures share
-one decibel scale, and channels marked bad on either side are marked bad on both, so the
-pair differs only by the correction.
+Welch window crosses an `edge` or includes a `bad_acq_skip` interval. Each recording
+contributes one per-channel spectrum. For each same-named sensor, recordings in which
+that sensor is marked bad are excluded before the remaining spectra are averaged in
+linear power with equal recording weight. Every sensor with at least one good recording
+remains visible, and both figures share one decibel scale.
+
+### Validation scope
+
+Null calibration uses stationary Gaussian surrogates whose channel spectra match
+median-smoothed real-recording periodograms. This deliberately line-free null tests the
+implementation under a known stochastic model; it does not establish calibration for
+arbitrary nonstationary, non-Gaussian EEG. The primary null result is the proportion of
+recordings with at least one authorization. Channel-recording detection proportion is
+reported only as a secondary descriptive metric.
+
+Recovery uses a fixed 90-point factorial design independent of Decomb settings: three
+frequencies across the analysis range, three component-to-background energy ratios, two
+phases, and two
+fixed physical drift magnitudes (0.05 and 0.2 Hz) or occupancies where applicable. The
+complete target set must lie below the lowest Nyquist frequency in the cohort; an
+incompatible cohort fails validation before calibration begins. Component amplitudes
+are scaled from the surrogate background alone. Decomb settings and detections from the
+real cohort do not define the benchmark. Persistent stationary and drifting injections
+also record whether the full adaptive sequence authorizes any frequency outside the
+known injected support.
 
 ## Outputs and provenance
 
@@ -213,8 +269,8 @@ The output follows EEG-BIDS and BIDS derivative conventions
 [19](#user-content-ref-19)]. Corrected BrainVision triplets receive a `_desc-decomb`
 entity. The derivative includes a stopband manifest, `dataset_description.json`, apply
 and verification configurations, an independent verification table, and matched PSD
-products. The manifest records the affected channel, every detected frequency, raw and
-Holm-adjusted p-values, supporting windows, harmonic labels where supported, per-channel
+products. The manifest records the affected channel, every detected frequency,
+Holm-input and Holm-adjusted p-values, supporting windows, per-channel
 and total test counts, removal round, the recording-wide FIR response, attenuation,
 the configured sequence-wide error rate, the allocated round error rate, terminal null,
 and cumulative unavailable bandwidth. Floating-point geometry is written with 17
@@ -225,23 +281,45 @@ significant digits.
 
 ## Before and after
 
-One recording's EEG channels, `sub-0000_task-thermalactive_run-1`, measured with the
-Welch settings above. Both figures are drawn by MNE from the same channels over the same
-samples on one shared decibel scale, so the only difference between them is the
-correction. Grey dashes are the channels marked bad in the recording.
+All 90 recordings, representing 12.09 hours of continuous acquisition after excluding
+`bad_acq_skip` spans, measured with the Welch settings above. Each coloured trace is one
+sensor's linear-power spectrum averaged equally across recordings in which that sensor
+is not marked bad. Both MNE figures use the same recordings, channels, samples, and
+decibel scale, so the only difference is the correction.
 
-![Power spectra of every EEG channel before correction](docs/psd_before.png)
+![Cohort-average power spectra of every EEG sensor before correction](docs/psd_before.png)
 
-![Power spectra of every EEG channel after correction](docs/psd_after.png)
+![Cohort-average power spectra of every EEG sensor after correction](docs/psd_after.png)
+
+The terminal cumulative geometry in the 90-recording audit changes mean band availability
+as follows. These percentages describe retained frequency bandwidth, not retained signal
+power; each recording has equal weight.
+
+| Band | Before availability | After availability | Made unavailable |
+| --- | ---: | ---: | ---: |
+| Delta | 100.000% | 80.234% | 19.766 percentage points |
+| Theta | 100.000% | 81.247% | 18.753 percentage points |
+| Alpha | 100.000% | 85.044% | 14.956 percentage points |
+| Beta | 100.000% | 77.227% | 22.773 percentage points |
+| Gamma | 100.000% | 59.210% | 40.790 percentage points |
+
+The availability cost is substantial because removal was allowed to follow all
+statistically authorized geometry without a minimum retained-band constraint. Replicated
+scanner evidence authorized the complete comb in 53 of 90 recordings; supported teeth
+also use the wider local-background envelope needed to remove their visible skirts.
 
 ## Software and testing
 
-Version `0.1.0` requires Python 3.11, NumPy 1.24
-[[15](#user-content-ref-15)], SciPy 1.11 [[16](#user-content-ref-16)], MNE-Python 1.6
-[[10](#user-content-ref-10), [11](#user-content-ref-11)], MNE-BIDS 0.14
-[[14](#user-content-ref-14)], pandas 2.0, PyYAML 6.0, Matplotlib 3.8
-[[17](#user-content-ref-17)] and pybv 0.7.5. Package roles and constraints are
-declared in [`pyproject.toml`](pyproject.toml).
+Version `0.2.0` is installable with Python 3.11 or newer and the lower dependency bounds
+declared in [`pyproject.toml`](pyproject.toml). The exact environment used for the current
+90-recording validation is published in
+[`requirements/validated.txt`](requirements/validated.txt): Python 3.12.13, NumPy 2.5.2,
+SciPy 1.18.0, MNE-Python 1.12.1, MNE-BIDS 0.19.0, pandas 3.0.5, PyYAML 6.0.3,
+Matplotlib 3.11.1, and pybv 0.8.1. The validated file freezes every installed dependency
+and verification tool on macOS arm64 without widening the general install metadata
+[[10](#user-content-ref-10),
+[11](#user-content-ref-11), [14](#user-content-ref-14), [15](#user-content-ref-15),
+[16](#user-content-ref-16), [17](#user-content-ref-17)].
 
 ```bash
 .venv/bin/pytest -q
@@ -317,10 +395,6 @@ declared in [`pyproject.toml`](pyproject.toml).
 22. <a name="ref-22"></a>Leske S, Dalal SS. Reducing power line noise in EEG and MEG data via spectrum
     interpolation. *NeuroImage*. 2019, 189, 763 to 776.
     [DOI](https://doi.org/10.1016/j.neuroimage.2019.01.026)
-23. <a name="ref-23"></a>Benjamini Y, Heller R. Screening for partial conjunction hypotheses.
-    *Biometrics*. 2008, 64, 1215 to 1222.
-    [DOI](https://doi.org/10.1111/j.1541-0420.2007.00984.x)
-
 MNE implementation details are documented in the
 [notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html), the
 [filtering methods tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html),

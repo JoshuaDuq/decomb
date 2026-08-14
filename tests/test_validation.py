@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import mne
 import numpy as np
 import pytest
 
-from decomb import injection, notch, validation
+from decomb import injection, lines, notch, validation
 
 
 def _narrow_settings(frequency_range_hz=(1.0, 20.0)) -> notch.HarmonicNotchSettings:
@@ -22,63 +24,22 @@ def _noise_raw(*, n_channels: int = 2, seed: int = 0, duration_s: float = 120.0)
     n_samples = int(duration_s * sampling_frequency_hz)
     data = np.random.default_rng(seed).normal(scale=1e-6, size=(n_channels, n_samples))
     names = [f"C{index}" for index in range(n_channels)]
-    return mne.io.RawArray(
+    raw = mne.io.RawArray(
         data,
         mne.create_info(names, sampling_frequency_hz, "eeg"),
         verbose="ERROR",
     )
-
-
-def test_average_reference_has_zero_instantaneous_channel_mean():
-    raw = _noise_raw(n_channels=3, seed=1)
-
-    referenced = validation.average_reference(raw)
-
-    np.testing.assert_allclose(referenced.get_data().mean(axis=0), 0.0, atol=1e-21)
-
-
-def test_average_reference_requires_two_non_bad_eeg_channels():
-    raw = _noise_raw(n_channels=1, seed=2)
-
-    with pytest.raises(ValueError, match="at least two non-bad EEG channels"):
-        validation.average_reference(raw)
-
-
-def test_mne_spectrum_fit_reports_native_channel_decisions():
-    raw = _noise_raw(n_channels=2, seed=0)
-    times_s = raw.times
-    raw._data[0] += 50e-6 * np.sin(2.0 * np.pi * 10.0 * times_s)
-
-    result = validation.mne_spectrum_fit(raw, window_s=54.0, p_value=0.05)
-
-    assert result.detected_channels == ("C0",)
-    assert not np.array_equal(result.cleaned.get_data(picks=["C0"]), raw.get_data(picks=["C0"]))
-
-
-def test_mne_spectrum_fit_detection_includes_the_nyquist_bin():
-    sampling_frequency_hz = 100.0
-    sample_count = 1_000
-    raw = mne.io.RawArray(
-        np.vstack(
-            (
-                50e-6 * (-1.0) ** np.arange(sample_count),
-                np.zeros(sample_count),
-            )
-        ),
-        mne.create_info(["C0", "C1"], sampling_frequency_hz, "eeg"),
-        verbose="ERROR",
+    raw.set_annotations(
+        mne.Annotations(
+            onset=np.arange(0.0, raw.times[-1], 0.9),
+            duration=0.0,
+            description="Volume/V  1",
+        )
     )
-
-    detected = validation.mne_spectrum_fit_detected_channels(
-        raw,
-        window_s=10.0,
-        p_value=0.05,
-    )
-
-    assert detected == ("C0",)
+    return raw
 
 
-def test_false_detection_trials_cover_every_channel_and_method():
+def test_false_detection_trials_cover_every_channel():
     raw = _noise_raw(n_channels=3, seed=3)
 
     trials = validation.false_detection_trials(
@@ -89,14 +50,34 @@ def test_false_detection_trials_cover_every_channel_and_method():
         participant="sub-test",
     )
 
-    keys = {(trial.channel_name, trial.method) for trial in trials}
-    assert keys == {
-        (channel, method)
-        for channel in ("C0", "C1", "C2")
-        for method in validation.ALL_METHODS
-    }
+    assert {trial.channel_name for trial in trials} == {"C0", "C1", "C2"}
     assert all(trial.recording == "sub-test_run-1" for trial in trials)
     assert all(trial.participant == "sub-test" for trial in trials)
+
+
+def test_false_detection_trials_count_scanner_authorization_for_every_channel(
+    monkeypatch,
+):
+    raw = _noise_raw(n_channels=3, seed=18)
+    null_model = lines.LineModel((), 1, 3, 10)
+    monkeypatch.setattr(validation.surrogates, "surrogate_raw", lambda raw, rng: raw)
+    monkeypatch.setattr(
+        notch,
+        "fit_harmonic_round",
+        lambda raw, settings: SimpleNamespace(
+            model=null_model,
+            scanner_harmonics=object(),
+        ),
+    )
+    trials = validation.false_detection_trials(
+        raw,
+        _narrow_settings(),
+        np.random.default_rng(19),
+        recording_name="sub-test_run-1",
+        participant="sub-test",
+    )
+
+    assert all(trial.line_detected for trial in trials)
 
 
 def test_paired_energy_decomposition_is_exact_for_identity_cleaning():
@@ -105,8 +86,8 @@ def test_paired_energy_decomposition_is_exact_for_identity_cleaning():
     basis = np.stack(
         [np.sin(2.0 * np.pi * 10.0 * times), np.cos(2.0 * np.pi * 10.0 * times)]
     )
-    artifact = np.stack([2.0 * basis[0], -2.0 * basis[0]])
-    injected = background + artifact
+    component = np.stack([2.0 * basis[0], -2.0 * basis[0]])
+    injected = background + component
     valid = np.ones(1_000, dtype=bool)
 
     metrics = validation.paired_energy_metrics(
@@ -130,8 +111,8 @@ def test_paired_energy_components_sum_to_the_cleaned_difference_energy():
     basis = np.stack(
         [np.sin(2.0 * np.pi * 7.0 * times), np.cos(2.0 * np.pi * 7.0 * times)]
     )
-    artifact = np.stack([basis[0], -0.5 * basis[0], -0.5 * basis[0]])
-    injected = background + artifact
+    component = np.stack([basis[0], -0.5 * basis[0], -0.5 * basis[0]])
+    injected = background + component
     cleaned_background = background + rng.normal(scale=0.01, size=background.shape)
     cleaned_injected = injected + rng.normal(scale=0.01, size=injected.shape)
     valid = np.ones(600, dtype=bool)
@@ -153,46 +134,121 @@ def test_paired_energy_components_sum_to_the_cleaned_difference_energy():
 
 def test_recovery_trial_uses_paired_time_domain_energy():
     background = _noise_raw(n_channels=2, seed=7)
-    spec = injection.SinusoidInjection(
+    target = injection.FactorialInjectionTarget(
         kind="stationary",
         frequency_hz=10.0,
-        amplitude_v=50e-6,
+        component_to_background_db=-10.0,
+        phase_rad=0.0,
     )
 
-    trials = validation.recovery_trial(
+    result = validation.recovery_trial(
         background,
         _narrow_settings(),
-        spec,
+        target,
         np.random.default_rng(8),
         recording_name="sub-test_run-1",
         participant="sub-test",
         channel_name="C0",
     )
 
-    assert {trial.method for trial in trials} == set(validation.ALL_METHODS)
-    for trial in trials:
-        assert trial.injected_energy_v2 > 0.0
-        assert trial.difference_energy_v2 >= 0.0
-        assert trial.remaining_fraction >= 0.0
-        assert trial.collateral_fraction >= 0.0
-        assert np.isfinite(trial.artifact_to_background_db)
+    assert result.trial.recording == "sub-test_run-1"
+    assert result.sequential_authorization is not None
+    assert result.sequential_authorization.recording == "sub-test_run-1"
+    assert result.sequential_authorization.phase_rad == 0.0
+    trial = result.trial
+    assert trial.injected_energy_v2 > 0.0
+    assert trial.difference_energy_v2 >= 0.0
+    assert trial.remaining_fraction >= 0.0
+    assert trial.collateral_fraction >= 0.0
+    assert trial.component_to_background_db == pytest.approx(-10.0)
+    assert trial.phase_rad == 0.0
 
 
 def test_recovery_trial_rejects_a_background_missing_the_channel():
     background = _noise_raw(n_channels=2, seed=9)
-    spec = injection.SinusoidInjection(
+    target = injection.FactorialInjectionTarget(
         kind="stationary",
         frequency_hz=10.0,
-        amplitude_v=50e-6,
+        component_to_background_db=-10.0,
+        phase_rad=0.0,
     )
 
     with pytest.raises(ValueError, match="C9"):
         validation.recovery_trial(
             background,
             _narrow_settings(),
-            spec,
+            target,
             np.random.default_rng(10),
             recording_name="sub-test_run-1",
             participant="sub-test",
             channel_name="C9",
         )
+
+
+def test_sequential_authorization_distinguishes_injected_and_unsupported_lines():
+    model = lines.LineModel(
+        channels=(
+            lines.ChannelLineModel(
+                channel_index=0,
+                channel_name="C0",
+                lines=(
+                    lines.SupportedLine(10.0, 1e-9, 1e-6, (0,), None),
+                    lines.SupportedLine(14.0, 1e-9, 1e-6, (1,), None),
+                ),
+                fundamental_hz=None,
+                comb_corrected_p_value=None,
+            ),
+        ),
+        window_count=2,
+        channel_count=2,
+        test_count_per_channel=100,
+    )
+    cleaning = SimpleNamespace(
+        rounds=(SimpleNamespace(model=model, scanner_plan=None),)
+    )
+    spec = injection.SinusoidInjection("stationary", 10.0, 1e-6)
+
+    supported, unsupported = validation.sequential_authorization_outcomes(
+        cleaning,
+        spec,
+        frequency_bin_width_hz=1.0 / 54.0,
+    )
+
+    assert supported
+    assert unsupported
+
+
+def test_sequential_authorization_includes_trigger_anchored_comb_targets():
+    settings = notch.HarmonicNotchSettings(
+        estimation_window_s=10.0,
+        familywise_error_rate=0.05,
+        frequency_range_hz=(1.0, 5.0),
+        scanner_repetition_time_s=1.0,
+        scanner_trigger_event_name="Scanner/Volume",
+    )
+    evidence = notch.ScannerHarmonicEvidence(1.0, 1e-10, (2, 4))
+    scanner_plan = notch.plan_scanner_harmonic_notches(
+        evidence,
+        settings,
+        maximum_hz=5.0,
+    )
+    model = lines.LineModel((), 1, 2, 5)
+    cleaning = SimpleNamespace(
+        rounds=(
+            SimpleNamespace(
+                model=model,
+                scanner_harmonics=evidence,
+                scanner_plan=scanner_plan,
+            ),
+        )
+    )
+    spec = injection.SinusoidInjection("stationary", 3.0, 1e-6)
+
+    supported, unsupported = validation.sequential_authorization_outcomes(
+        cleaning,
+        spec,
+        frequency_bin_width_hz=0.1,
+    )
+
+    assert supported
+    assert unsupported

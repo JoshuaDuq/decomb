@@ -12,10 +12,11 @@ import pandas as pd
 from decomb import notch, recordings, surrogates, validation, validation_cohort
 
 FALSE_DETECTION_NAME = "false_detection_trials.tsv"
+FALSE_AUTHORIZATION_ESTIMATE_NAME = "false_authorization_estimate.tsv"
 RECOVERY_NAME = "recovery_trials.tsv"
-OBSERVATION_NAME = "artifact_observations.tsv"
+SEQUENTIAL_NAME = "sequential_authorization_trials.tsv"
+OBSERVATION_NAME = "line_observations.tsv"
 LOCALITY_NAME = "locality_bandwidth.tsv"
-SENSITIVITY_NAME = "mne_window_sensitivity.tsv"
 
 
 @dataclass(frozen=True)
@@ -23,8 +24,13 @@ class CohortValidationResults:
     """All measurements needed to redraw the flagship figure."""
 
     false_detection_trials: tuple[validation.FalseDetectionTrial, ...]
+    false_authorization_estimate: validation_cohort.DetectionEstimate
     recovery_trials: tuple[validation.RecoveryTrial, ...]
-    artifact_observations: tuple[validation_cohort.ArtifactObservation, ...]
+    sequential_authorization_trials: tuple[
+        validation.SequentialAuthorizationTrial,
+        ...,
+    ]
+    line_observations: tuple[validation_cohort.LineObservation, ...]
     locality_bandwidth: tuple[validation_cohort.LocalityBandwidth, ...]
 
 
@@ -44,10 +50,27 @@ def run_cohort_validation(
     *,
     random_seed: int,
 ) -> CohortValidationResults:
-    """Run one null surrogate and one empirical injection per real recording."""
+    """Run one null surrogate and one factorial injection per real recording."""
     if not runs:
         raise ValueError("Cohort validation requires recordings.")
-    seed_sequences = np.random.SeedSequence(random_seed).spawn(2 * len(runs) + 1)
+    targets = validation_cohort.factorial_injection_targets(
+        frequency_range_hz=settings.frequency_range_hz,
+    )
+    if len(runs) != len(targets):
+        raise ValueError(
+            f"The complete factorial design requires {len(targets)} recordings; "
+            f"received {len(runs)}."
+        )
+    sampling_frequencies_hz = tuple(
+        float(recordings.read_bids_raw(vhdr).info["sfreq"])
+        for vhdr in runs
+    )
+    validation_cohort.validate_factorial_targets_for_cohort(
+        targets,
+        sampling_frequencies_hz=sampling_frequencies_hz,
+    )
+
+    seed_sequences = np.random.SeedSequence(random_seed).spawn(2 * len(runs) + 2)
     false_trials = []
     observations = []
     recording_plans = []
@@ -64,7 +87,7 @@ def run_cohort_validation(
         )
         participant = recordings.subject_of(vhdr)
         observations.extend(
-            validation_cohort.observed_artifacts(
+            validation_cohort.observed_lines(
                 raw,
                 settings,
                 initial_model,
@@ -100,13 +123,10 @@ def run_cohort_validation(
             f"({time.time() - started:.1f} s)"
         )
 
-    targets = validation_cohort.sample_injection_targets(
-        tuple(observations),
-        count=len(runs),
-        frequency_range_hz=settings.frequency_range_hz,
-        rng=np.random.default_rng(seed_sequences[-1]),
-    )
+    design_rng = np.random.default_rng(seed_sequences[-2])
+    targets = tuple(targets[index] for index in design_rng.permutation(len(targets)))
     recovery_trials = []
+    sequential_trials = []
     recovery_seeds = seed_sequences[len(runs) : 2 * len(runs)]
     for index, (vhdr, target, seed_sequence) in enumerate(
         zip(runs, targets, recovery_seeds, strict=True),
@@ -118,17 +138,18 @@ def run_cohort_validation(
         background = surrogates.surrogate_raw(raw, rng)
         channel_names = notch.eeg_channel_names(background)
         channel_name = channel_names[int(rng.integers(0, len(channel_names)))]
-        recovery_trials.extend(
-            validation.recovery_trial(
-                background,
-                settings,
-                target.as_specification(),
-                rng,
-                recording_name=vhdr.stem,
-                participant=recordings.subject_of(vhdr),
-                channel_name=channel_name,
-            )
+        recovery = validation.recovery_trial(
+            background,
+            settings,
+            target,
+            rng,
+            recording_name=vhdr.stem,
+            participant=recordings.subject_of(vhdr),
+            channel_name=channel_name,
         )
+        recovery_trials.append(recovery.trial)
+        if recovery.sequential_authorization is not None:
+            sequential_trials.append(recovery.sequential_authorization)
         print(
             f"[{index}/{len(runs)}] paired {target.kind} injection {vhdr.stem} "
             f"({time.time() - started:.1f} s)"
@@ -136,8 +157,14 @@ def run_cohort_validation(
 
     return CohortValidationResults(
         false_detection_trials=tuple(false_trials),
+        false_authorization_estimate=validation_cohort.detection_estimate(
+            tuple(false_trials),
+            bootstrap_resamples=10_000,
+            rng=np.random.default_rng(seed_sequences[-1]),
+        ),
         recovery_trials=tuple(recovery_trials),
-        artifact_observations=tuple(observations),
+        sequential_authorization_trials=tuple(sequential_trials),
+        line_observations=tuple(observations),
         locality_bandwidth=validation_cohort.locality_bandwidth(tuple(recording_plans)),
     )
 
@@ -148,10 +175,13 @@ def write_results(results: CohortValidationResults, output_dir: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     tables = {
         FALSE_DETECTION_NAME: _dataclass_frame(results.false_detection_trials),
+        FALSE_AUTHORIZATION_ESTIMATE_NAME: _dataclass_frame(
+            (results.false_authorization_estimate,)
+        ),
         RECOVERY_NAME: _dataclass_frame(results.recovery_trials),
-        OBSERVATION_NAME: _dataclass_frame(results.artifact_observations),
+        SEQUENTIAL_NAME: _dataclass_frame(results.sequential_authorization_trials),
+        OBSERVATION_NAME: _dataclass_frame(results.line_observations),
         LOCALITY_NAME: _dataclass_frame(results.locality_bandwidth),
-        SENSITIVITY_NAME: mne_window_sensitivity(results),
     }
     for name, table in tables.items():
         recordings.write_tsv_atomic(table, output / name)
@@ -165,52 +195,27 @@ def read_results(output_dir: Path) -> CohortValidationResults:
             output / FALSE_DETECTION_NAME,
             validation.FalseDetectionTrial,
         ),
+        false_authorization_estimate=_read_single_dataclass(
+            output / FALSE_AUTHORIZATION_ESTIMATE_NAME,
+            validation_cohort.DetectionEstimate,
+        ),
         recovery_trials=_read_dataclasses(
             output / RECOVERY_NAME,
             validation.RecoveryTrial,
         ),
-        artifact_observations=_read_dataclasses(
+        sequential_authorization_trials=_read_dataclasses(
+            output / SEQUENTIAL_NAME,
+            validation.SequentialAuthorizationTrial,
+        ),
+        line_observations=_read_dataclasses(
             output / OBSERVATION_NAME,
-            validation_cohort.ArtifactObservation,
+            validation_cohort.LineObservation,
         ),
         locality_bandwidth=_read_dataclasses(
             output / LOCALITY_NAME,
             validation_cohort.LocalityBandwidth,
         ),
     )
-
-
-def mne_window_sensitivity(results: CohortValidationResults) -> pd.DataFrame:
-    """Report native MNE results at matched 54 s and default 10 s windows."""
-    rows = []
-    for window_s, method in (
-        (54.0, validation.MNE_SPECTRUM_FIT_54S),
-        (10.0, validation.MNE_SPECTRUM_FIT_10S),
-    ):
-        false_trials = tuple(
-            trial for trial in results.false_detection_trials if trial.method == method
-        )
-        recovery_trials = tuple(
-            trial for trial in results.recovery_trials if trial.method == method
-        )
-        if not false_trials or not recovery_trials:
-            raise ValueError(f"Sensitivity results are incomplete for {method!r}.")
-        metrics = {
-            "false_detection_proportion": np.mean(
-                [trial.detected for trial in false_trials]
-            ),
-            "median_remaining_fraction": np.median(
-                [trial.remaining_fraction for trial in recovery_trials]
-            ),
-            "median_collateral_fraction": np.median(
-                [trial.collateral_fraction for trial in recovery_trials]
-            ),
-        }
-        rows.extend(
-            {"window_s": window_s, "metric": metric, "value": float(value)}
-            for metric, value in metrics.items()
-        )
-    return pd.DataFrame(rows, columns=("window_s", "metric", "value"))
 
 
 def audit_derivatives(
@@ -285,7 +290,7 @@ def verification_summary(
     null_recordings = {
         recording
         for recording, block in manifest.groupby("recording", sort=False)
-        if not np.any(block["outcome"].astype(str) == "artifact_detected")
+        if not np.any(block["outcome"].astype(str) == "line_detected")
     }
     copied_nulls = {
         recording
@@ -315,3 +320,10 @@ def _read_dataclasses(path: Path, data_class) -> tuple[object, ...]:
             f"{expected_columns!r}."
         )
     return tuple(data_class(**row) for row in table.to_dict(orient="records"))
+
+
+def _read_single_dataclass(path: Path, data_class):
+    values = _read_dataclasses(path, data_class)
+    if len(values) != 1:
+        raise ValueError(f"{path.name} must contain exactly one validation estimate.")
+    return values[0]

@@ -39,6 +39,8 @@ ALLOWED_REMOVAL = {
     "estimation_window_s",
     "familywise_error_rate",
     "frequency_range_hz",
+    "scanner_repetition_time_s",
+    "scanner_trigger_event_name",
 }
 
 

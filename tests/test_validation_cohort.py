@@ -9,24 +9,7 @@ import pytest
 from decomb import lines, notch, validation, validation_cohort
 
 
-def _observation(
-    index: int,
-    *,
-    drift_hz: float,
-    occupancy: float,
-) -> validation_cohort.ArtifactObservation:
-    return validation_cohort.ArtifactObservation(
-        recording=f"run-{index}",
-        participant=f"sub-{index}",
-        channel_name="C0",
-        frequency_hz=10.0 + index,
-        drift_hz=drift_hz,
-        occupancy=occupancy,
-        amplitude_v=(index + 1) * 1e-6,
-    )
-
-
-def test_observed_artifacts_measure_frequency_drift_occupancy_and_amplitude():
+def test_observed_lines_measure_frequency_drift_occupancy_and_amplitude():
     sampling_frequency_hz = 100.0
     times_s = np.arange(12_000) / sampling_frequency_hz
     data = np.stack(
@@ -40,14 +23,14 @@ def test_observed_artifacts_measure_frequency_drift_occupancy_and_amplitude():
         mne.create_info(["C0", "C1"], sampling_frequency_hz, "eeg"),
         verbose="ERROR",
     )
-    model = lines.ArtifactModel(
+    model = lines.LineModel(
         channels=(
-            lines.ChannelArtifactModel(
+            lines.ChannelLineModel(
                 channel_index=0,
                 channel_name="C0",
                 lines=(
-                    lines.ArtifactLine(10.0, 1e-9, 1e-6, (0, 1), None),
-                    lines.ArtifactLine(10.05, 1e-9, 1e-6, (2,), None),
+                    lines.SupportedLine(10.0, 1e-9, 1e-6, (0, 1), None),
+                    lines.SupportedLine(10.05, 1e-9, 1e-6, (2,), None),
                 ),
                 fundamental_hz=None,
                 comb_corrected_p_value=None,
@@ -59,7 +42,7 @@ def test_observed_artifacts_measure_frequency_drift_occupancy_and_amplitude():
     )
     settings = notch.HarmonicNotchSettings(54.0, 0.05, (1.0, 20.0))
 
-    observations = validation_cohort.observed_artifacts(
+    observations = validation_cohort.observed_lines(
         raw,
         settings,
         model,
@@ -75,56 +58,77 @@ def test_observed_artifacts_measure_frequency_drift_occupancy_and_amplitude():
     assert observation.amplitude_v > 0.0
 
 
-def test_injection_targets_are_balanced_and_span_empirical_parameters():
-    observations = tuple(
-        _observation(index, drift_hz=0.1 + index / 10.0, occupancy=0.2 + index / 20.0)
-        for index in range(6)
-    )
-
-    targets = validation_cohort.sample_injection_targets(
-        observations,
-        count=6,
+def test_factorial_injection_targets_cover_fixed_physical_design():
+    targets = validation_cohort.factorial_injection_targets(
         frequency_range_hz=(1.0, 30.0),
-        rng=np.random.default_rng(0),
     )
 
-    assert [target.kind for target in targets].count("stationary") == 2
-    assert [target.kind for target in targets].count("drifting") == 2
-    assert [target.kind for target in targets].count("intermittent") == 2
-    assert all(target.amplitude_v > 0.0 for target in targets)
-    assert all(target.drift_hz != 0.0 for target in targets if target.kind == "drifting")
-    assert all(
-        0.0 < target.occupancy < 1.0
+    assert len(targets) == 90
+    assert {target.frequency_hz for target in targets} == {8.25, 15.5, 22.75}
+    assert {target.component_to_background_db for target in targets} == {-20.0, -10.0, 0.0}
+    assert {target.phase_rad for target in targets} == {0.0, np.pi / 2.0}
+    assert sorted(
+        {
+            abs(target.drift_hz)
+            for target in targets
+            if target.kind == "drifting"
+        }
+    ) == pytest.approx([0.05, 0.2])
+    assert {
+        target.occupancy
         for target in targets
         if target.kind == "intermittent"
+    } == {0.25, 0.75}
+
+
+def test_factorial_targets_must_fit_every_cohort_nyquist_limit():
+    targets = validation_cohort.factorial_injection_targets(
+        frequency_range_hz=(1.0, 100.0),
+    )
+
+    with pytest.raises(ValueError, match="lowest cohort Nyquist frequency"):
+        validation_cohort.validate_factorial_targets_for_cohort(
+            targets,
+            sampling_frequencies_hz=(250.0, 128.0),
+        )
+
+
+def test_factorial_targets_accept_a_cohort_with_sufficient_sampling_rates():
+    targets = validation_cohort.factorial_injection_targets(
+        frequency_range_hz=(1.0, 100.0),
+    )
+
+    validation_cohort.validate_factorial_targets_for_cohort(
+        targets,
+        sampling_frequencies_hz=(250.0, 200.0),
     )
 
 
-def test_detection_estimates_resample_participants_as_clusters():
+def test_detection_estimate_resamples_participants_as_clusters():
     trials = tuple(
         validation.FalseDetectionTrial(
-            recording=f"{participant}-run-{run}",
+            recording=f"{participant}-run-1",
             participant=participant,
-            channel_name="C0",
-            method=validation.DECOMB_HOLM,
-            detected=participant == "sub-2",
+            channel_name=channel,
+            line_detected=participant == "sub-2" and channel == "C0",
         )
         for participant in ("sub-1", "sub-2")
-        for run in range(3)
+        for channel in ("C0", "C1")
     )
 
-    estimates = validation_cohort.detection_estimates(
+    estimate = validation_cohort.detection_estimate(
         trials,
-        methods=(validation.DECOMB_HOLM,),
         bootstrap_resamples=1_000,
         rng=np.random.default_rng(1),
     )
 
-    assert len(estimates) == 1
-    estimate = estimates[0]
-    assert estimate.proportion == pytest.approx(0.5)
-    assert estimate.lower <= estimate.proportion <= estimate.upper
+    assert not hasattr(estimate, "method")
+    assert estimate.recording_false_authorization_proportion == pytest.approx(0.5)
+    assert estimate.lower <= estimate.recording_false_authorization_proportion <= estimate.upper
+    assert estimate.channel_false_detection_proportion == pytest.approx(0.25)
     assert estimate.participant_count == 2
+    assert estimate.recording_count == 2
+    assert estimate.channel_recording_count == 4
 
 
 def test_locality_bandwidth_compares_recording_and_cohort_frequency_unions():

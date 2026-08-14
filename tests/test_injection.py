@@ -114,6 +114,19 @@ def test_kind_and_parameter_combinations_are_validated():
             drift_hz=1.0,
             occupancy=0.5,
         )
+    with pytest.raises(ValueError, match="drift_hz"):
+        injection.SinusoidInjection(
+            kind="drifting",
+            frequency_hz=10.0,
+            amplitude_v=1.0,
+            drift_hz=np.nan,
+        )
+    with pytest.raises(ValueError, match="component_to_background_db"):
+        injection.FactorialInjectionTarget(
+            kind="stationary",
+            frequency_hz=10.0,
+            component_to_background_db=np.nan,
+        )
 
 
 @pytest.mark.parametrize(
@@ -187,7 +200,7 @@ def test_inject_into_raw_rejects_an_unknown_channel():
         injection.inject_into_raw(raw, "C4", realization)
 
 
-def test_average_reference_injection_preserves_the_requested_target_amplitude():
+def test_spatially_balanced_injection_preserves_the_requested_target_amplitude():
     raw = mne.io.RawArray(
         np.zeros((3, 1_000)),
         mne.create_info(["C3", "C4", "Pz"], 100.0, "eeg"),
@@ -200,7 +213,7 @@ def test_average_reference_injection_preserves_the_requested_target_amplitude():
         np.random.default_rng(0),
     )
 
-    injected = injection.inject_into_average_reference(raw, "C3", realization)
+    injected = injection.inject_spatially_balanced(raw, "C3", realization)
     difference = injected.get_data() - raw.get_data()
 
     np.testing.assert_allclose(difference.mean(axis=0), 0.0, atol=1e-21)

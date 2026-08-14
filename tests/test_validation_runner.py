@@ -9,37 +9,34 @@ from decomb import validation, validation_cohort, validation_runner
 
 
 def _results() -> validation_runner.CohortValidationResults:
-    false_trials = tuple(
+    false_trials = (
         validation.FalseDetectionTrial(
             "run-1",
             "sub-1",
             "C0",
-            method,
-            detected=method == validation.MNE_SPECTRUM_FIT_10S,
-        )
-        for method in validation.ALL_METHODS
+            line_detected=False,
+        ),
     )
-    recovery_trials = tuple(
+    recovery_trials = (
         validation.RecoveryTrial(
             recording="run-1",
             participant="sub-1",
             channel_name="C0",
-            method=method,
             kind="stationary",
             frequency_hz=10.0,
             amplitude_v=1e-6,
             drift_hz=0.0,
             occupancy=1.0,
+            phase_rad=0.0,
             injected_energy_v2=1.0,
             difference_energy_v2=0.5,
-            artifact_to_background_db=2.0,
+            component_to_background_db=2.0,
             remaining_fraction=0.2,
             collateral_fraction=0.01,
-        )
-        for method in validation.ALL_METHODS
+        ),
     )
     observations = (
-        validation_cohort.ArtifactObservation(
+        validation_cohort.LineObservation(
             "run-1",
             "sub-1",
             "C0",
@@ -50,9 +47,35 @@ def _results() -> validation_runner.CohortValidationResults:
         ),
     )
     locality = (validation_cohort.LocalityBandwidth("run-1", 1.0, 2.0),)
+    sequential = (
+        validation.SequentialAuthorizationTrial(
+            recording="run-1",
+            participant="sub-1",
+            kind="stationary",
+            frequency_hz=10.0,
+            component_to_background_db=-10.0,
+            drift_hz=0.0,
+            occupancy=1.0,
+            phase_rad=0.0,
+            injected_line_authorized=True,
+            unsupported_line_authorized=False,
+            removal_round_count=1,
+        ),
+    )
+    detection_estimate = validation_cohort.DetectionEstimate(
+        recording_false_authorization_proportion=0.0,
+        lower=0.0,
+        upper=0.0,
+        participant_count=1,
+        recording_count=1,
+        channel_false_detection_proportion=0.0,
+        channel_recording_count=1,
+    )
     return validation_runner.CohortValidationResults(
         false_trials,
+        detection_estimate,
         recovery_trials,
+        sequential,
         observations,
         locality,
     )
@@ -67,31 +90,20 @@ def test_validation_results_round_trip_without_schema_loss(tmp_path):
     assert actual == expected
     assert {path.name for path in tmp_path.iterdir()} == {
         "false_detection_trials.tsv",
+        "false_authorization_estimate.tsv",
         "recovery_trials.tsv",
-        "artifact_observations.tsv",
+        "sequential_authorization_trials.tsv",
+        "line_observations.tsv",
         "locality_bandwidth.tsv",
-        "mne_window_sensitivity.tsv",
-    }
-
-
-def test_sensitivity_table_reports_both_mne_windows():
-    table = validation_runner.mne_window_sensitivity(_results())
-
-    assert isinstance(table, pd.DataFrame)
-    assert set(table["window_s"]) == {10.0, 54.0}
-    assert set(table["metric"]) == {
-        "false_detection_proportion",
-        "median_remaining_fraction",
-        "median_collateral_fraction",
     }
 
 
 def test_verification_summary_requires_and_counts_exact_recordings():
     manifest = pd.DataFrame(
         [
-            {"recording": "line", "outcome": "artifact_detected"},
-            {"recording": "line", "outcome": "no_artifact_detected"},
-            {"recording": "null", "outcome": "no_artifact_detected"},
+            {"recording": "line", "outcome": "line_detected"},
+            {"recording": "line", "outcome": "no_line_detected"},
+            {"recording": "null", "outcome": "no_line_detected"},
         ]
     )
     verification = pd.DataFrame(
@@ -116,7 +128,7 @@ def test_verification_summary_requires_and_counts_exact_recordings():
 
 def test_verification_summary_rejects_incomplete_recording_coverage():
     manifest = pd.DataFrame(
-        [{"recording": "run-1", "outcome": "no_artifact_detected"}]
+        [{"recording": "run-1", "outcome": "no_line_detected"}]
     )
     verification = pd.DataFrame(
         [{"recording": "run-2", "maximum_sample_deviation_v": 0.0}]

@@ -24,8 +24,49 @@ def test_correction_config_contains_only_irreducible_user_choices():
         "estimation_window_s",
         "familywise_error_rate",
         "frequency_range_hz",
+        "scanner_repetition_time_s",
+        "scanner_trigger_event_name",
     }
     assert settings.familywise_error_rate == 0.05
+    assert settings.estimation_window_s == 10.0
+
+
+def test_scanner_harmonics_requires_only_the_tr_and_exact_trigger_name(tmp_path):
+    settings = notch.HarmonicNotchSettings.from_config(
+        _config(
+            tmp_path,
+            {
+                "removal": {
+                    "scanner_repetition_time_s": 0.9,
+                    "scanner_trigger_event_name": "Volume/V  1",
+                }
+            },
+        )
+    )
+
+    assert settings.scanner_repetition_time_s == 0.9
+    assert settings.scanner_trigger_event_name == "Volume/V  1"
+
+
+@pytest.mark.parametrize("value", [0.0, -0.9, float("inf"), float("nan")])
+def test_scanner_repetition_time_must_be_finite_and_positive(tmp_path, value):
+    with pytest.raises(ValueError, match="scanner_repetition_time_s"):
+        notch.HarmonicNotchSettings.from_config(
+            _config(
+                tmp_path,
+                {"removal": {"scanner_repetition_time_s": value}},
+            )
+        )
+
+
+def test_scanner_trigger_event_name_cannot_be_empty(tmp_path):
+    with pytest.raises(ValueError, match="scanner_trigger_event_name"):
+        notch.HarmonicNotchSettings.from_config(
+            _config(
+                tmp_path,
+                {"removal": {"scanner_trigger_event_name": "  "}},
+            )
+        )
 
 
 @pytest.mark.parametrize(

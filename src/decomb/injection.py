@@ -1,6 +1,6 @@
 """Stationary, drifting, and intermittent sinusoid injections for recovery trials.
 
-Used to measure what a detection-and-notch procedure does to a known artifact of known
+Used to measure what a detection-and-notch procedure does to a known component of known
 strength, added to a sinusoid-free surrogate background so no pre-existing line can bias
 the comparison.
 """
@@ -16,10 +16,9 @@ KINDS = ("stationary", "drifting", "intermittent")
 
 @dataclass(frozen=True)
 class SinusoidInjection:
-    """One synthetic artifact: kind, frequency trajectory, and strength.
+    """One synthetic sinusoidal component: trajectory, occupancy, and strength.
 
-    Amplitudes are in the same volts MNE stores EEG data in, so they compare directly
-    against the real cohort's own line strengths.
+    Amplitudes are in the same volts MNE stores EEG data in.
     """
 
     kind: str
@@ -36,6 +35,8 @@ class SinusoidInjection:
             raise ValueError("frequency_hz must be finite and positive.")
         if not np.isfinite(self.amplitude_v) or self.amplitude_v <= 0.0:
             raise ValueError("amplitude_v must be finite and positive.")
+        if not np.isfinite(self.drift_hz):
+            raise ValueError("drift_hz must be finite.")
         if self.kind != "drifting" and self.drift_hz != 0.0:
             raise ValueError("drift_hz must be zero outside a drifting injection.")
         if self.kind != "intermittent" and self.occupancy != 1.0:
@@ -44,6 +45,47 @@ class SinusoidInjection:
             raise ValueError("occupancy must lie in (0, 1].")
         if not np.isfinite(self.phase_rad):
             raise ValueError("phase_rad must be finite.")
+
+
+@dataclass(frozen=True)
+class FactorialInjectionTarget:
+    """Method-independent sinusoid defined by design factors and relative strength."""
+
+    kind: str
+    frequency_hz: float
+    component_to_background_db: float
+    drift_hz: float = 0.0
+    occupancy: float = 1.0
+    phase_rad: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError(f"kind must be one of {KINDS}, got {self.kind!r}.")
+        if not np.isfinite(self.frequency_hz) or self.frequency_hz <= 0.0:
+            raise ValueError("frequency_hz must be finite and positive.")
+        if not np.isfinite(self.component_to_background_db):
+            raise ValueError("component_to_background_db must be finite.")
+        if not np.isfinite(self.drift_hz):
+            raise ValueError("drift_hz must be finite.")
+        if self.kind != "drifting" and self.drift_hz != 0.0:
+            raise ValueError("drift_hz must be zero outside a drifting target.")
+        if self.kind != "intermittent" and self.occupancy != 1.0:
+            raise ValueError("occupancy must be one outside an intermittent target.")
+        if not 0.0 < self.occupancy <= 1.0:
+            raise ValueError("occupancy must lie in (0, 1].")
+        if not np.isfinite(self.phase_rad):
+            raise ValueError("phase_rad must be finite.")
+
+    def as_specification(self, amplitude_v: float) -> SinusoidInjection:
+        """Attach a background-scaled voltage amplitude to this fixed design point."""
+        return SinusoidInjection(
+            kind=self.kind,
+            frequency_hz=self.frequency_hz,
+            amplitude_v=amplitude_v,
+            drift_hz=self.drift_hz,
+            occupancy=self.occupancy,
+            phase_rad=self.phase_rad,
+        )
 
 
 @dataclass(frozen=True)
@@ -156,12 +198,12 @@ def inject_into_raw(raw, channel_name: str, realization: InjectionRealization):
     return injected
 
 
-def inject_into_average_reference(
+def inject_spatially_balanced(
     raw,
     channel_name: str,
     realization: InjectionRealization,
 ):
-    """Add the requested target-channel waveform without leaving the average subspace."""
+    """Add a target waveform with an equal and opposite sum on other EEG channels."""
     import mne
 
     picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
@@ -169,7 +211,7 @@ def inject_into_average_reference(
     if channel_name not in pick_names:
         raise ValueError(f"Recording has no non-bad EEG channel {channel_name!r}.")
     if len(picks) < 2:
-        raise ValueError("Average-reference injection requires at least two EEG channels.")
+        raise ValueError("Spatially balanced injection requires at least two EEG channels.")
     if realization.waveform_v.size != raw.n_times:
         raise ValueError("Injection and recording sample counts must match.")
 

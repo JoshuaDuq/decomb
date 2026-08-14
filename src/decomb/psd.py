@@ -1,10 +1,10 @@
-"""Before-and-after power spectra of the removal, drawn by MNE.
+"""Cohort-averaged before-and-after power spectra, drawn by MNE.
 
     decomb psd
 
-Two figures from one recording: the source spectrum and the line-notch derivative's,
-each an MNE per-channel Welch spectrum with sensor-position colours and the sensor
-inset. Nothing else is drawn, so what a reader compares is the same plot twice.
+Two figures summarize the selected recordings: source and line-notch derivative spectra,
+each averaged equally by recording in linear power before MNE draws the per-channel
+spectrum with sensor-position colours and the sensor inset.
 
 The pair is only worth reading if both sides were measured identically, so the spectra
 are computed with one set of parameters, on the same channels, over the same samples,
@@ -12,7 +12,7 @@ and on one shared decibel scale. The stage refuses when the recordings do not
 correspond, and it runs after ``apply``.
 
 Unlike the stages that transform or certify, this one accepts ``--subjects``: a figure of
-part of a cohort is a smaller figure, not a false claim about the whole one.
+part of a cohort reports its own recording count and analysed duration.
 """
 
 from __future__ import annotations
@@ -69,6 +69,16 @@ class PsdSettings:
             window_s=correction.estimation_window_s,
             band_hz=correction.frequency_range_hz,
         )
+
+
+@dataclass(frozen=True)
+class CohortSpectrumPair:
+    """Equal-recording source and derivative spectra with cohort extent."""
+
+    before: object
+    after: object
+    recording_count: int
+    analysed_hours: float
 
 
 def channel_spectrum(raw, settings: PsdSettings):
@@ -128,6 +138,158 @@ def channel_spectrum(raw, settings: PsdSettings):
     )
 
 
+def average_channel_spectra(spectra):
+    """Average recording-level power after excluding each run's bad channels."""
+    import mne
+
+    items = tuple(spectra)
+    if not items:
+        raise ValueError("A cohort spectrum requires recordings.")
+    reference = items[0]
+    for spectrum in items[1:]:
+        if spectrum.ch_names != reference.ch_names:
+            raise ValueError("Cohort spectra require the same EEG channels in one order.")
+        if not np.array_equal(spectrum.freqs, reference.freqs):
+            raise ValueError("Cohort spectra require one shared frequency grid.")
+
+    powers = np.stack(
+        [spectrum.get_data(exclude=()) for spectrum in items],
+        axis=0,
+    )
+    included = np.array(
+        [
+            [name not in spectrum.info["bads"] for name in reference.ch_names]
+            for spectrum in items
+        ],
+        dtype=bool,
+    )
+    recording_counts = included.sum(axis=0)
+    if np.any(recording_counts == 0):
+        missing = [
+            name
+            for name, count in zip(
+                reference.ch_names,
+                recording_counts,
+                strict=True,
+            )
+            if count == 0
+        ]
+        raise ValueError(
+            f"Every cohort channel must be good in at least one recording: {missing}"
+        )
+    mean_power = np.sum(
+        powers * included[:, :, np.newaxis],
+        axis=0,
+    ) / recording_counts[:, np.newaxis]
+    channel_info = reference.info.copy()
+    channel_info["bads"] = []
+    return mne.time_frequency.SpectrumArray(
+        mean_power,
+        channel_info,
+        reference.freqs,
+        verbose="ERROR",
+    )
+
+
+def analysed_duration_hours(raws, settings: PsdSettings) -> float:
+    """Total acquisition time eligible for complete Welch windows, in hours."""
+    total_seconds = 0.0
+    for raw in raws:
+        sampling_frequency_hz = float(raw.info["sfreq"])
+        window_samples = recordings.estimation_window_samples(
+            sampling_frequency_hz,
+            settings.window_s,
+        )
+        total_seconds += sum(
+            stop - start
+            for start, stop in recordings.acquisition_segments(raw)
+            if stop - start >= window_samples
+        ) / sampling_frequency_hz
+    if not np.isfinite(total_seconds) or total_seconds <= 0.0:
+        raise ValueError("Analysed duration must be finite and positive.")
+    return float(total_seconds / 3_600.0)
+
+
+def cohort_spectrum_pair(recording_pairs, settings: PsdSettings) -> CohortSpectrumPair:
+    """Compute equally weighted channel spectra for corresponding recordings."""
+    before_spectra = []
+    after_spectra = []
+    total_hours = 0.0
+    recording_count = 0
+    for label, source, derivative in recording_pairs:
+        require_correspondence(source, derivative, label)
+        align_bad_channels(source, derivative)
+        before_spectra.append(channel_spectrum(source, settings))
+        after_spectra.append(channel_spectrum(derivative, settings))
+        total_hours += analysed_duration_hours((source,), settings)
+        recording_count += 1
+    if recording_count == 0:
+        raise ValueError("A cohort spectrum requires recording pairs.")
+    return CohortSpectrumPair(
+        before=average_channel_spectra(before_spectra),
+        after=average_channel_spectra(after_spectra),
+        recording_count=recording_count,
+        analysed_hours=total_hours,
+    )
+
+
+def mean_band_availability_percent(
+    manifest,
+    *,
+    band_names: tuple[str, ...],
+) -> dict[str, float]:
+    """Mean retained share from each recording's terminal cumulative plan."""
+    if manifest.empty:
+        raise ValueError("Band availability requires manifest rows.")
+    required = {
+        "recording",
+        "removal_round",
+        *(f"{band_name}_retained_share" for band_name in band_names),
+    }
+    missing = required - set(manifest.columns)
+    if missing:
+        raise ValueError(f"Band availability columns are missing: {sorted(missing)}")
+
+    terminal_rows = []
+    for recording, rows in manifest.groupby("recording", sort=False):
+        terminal = rows.loc[rows["removal_round"] == rows["removal_round"].max()]
+        if len(terminal) != 1:
+            raise ValueError(f"{recording}: expected one terminal manifest row.")
+        terminal_rows.append(terminal.iloc[0])
+
+    availability = {}
+    for band_name in band_names:
+        values = np.array(
+            [row[f"{band_name}_retained_share"] for row in terminal_rows],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(values)) or np.any((values < 0.0) | (values > 1.0)):
+            raise ValueError(f"{band_name}: retained shares must lie in [0, 1].")
+        availability[band_name] = float(100.0 * values.mean())
+    return availability
+
+
+def _cohort_band_availability_percent(
+    manifest_path: Path,
+    *,
+    recording_names: tuple[str, ...],
+    band_names: tuple[str, ...],
+) -> dict[str, float]:
+    """Read exactly the selected recordings before summarizing terminal plans."""
+    import pandas as pd
+
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Line-notch manifest missing at {manifest_path}")
+    manifest = pd.read_csv(manifest_path, sep="\t", float_precision="round_trip")
+    selected = manifest.loc[manifest["recording"].isin(recording_names)]
+    actual_recordings = set(selected["recording"].astype(str))
+    expected_recordings = set(recording_names)
+    if actual_recordings != expected_recordings:
+        missing = sorted(expected_recordings - actual_recordings)
+        raise ValueError(f"Band availability is missing recordings: {missing}")
+    return mean_band_availability_percent(selected, band_names=band_names)
+
+
 def require_correspondence(source, derivative, label: str) -> None:
     """Refuse a pair that is two different recordings rather than one comparison."""
     if derivative.ch_names != source.ch_names:
@@ -139,12 +301,10 @@ def require_correspondence(source, derivative, label: str) -> None:
 
 
 def align_bad_channels(source, derivative) -> tuple[str, ...]:
-    """Give both sides one set of bad channels, so the pair draws them the same way.
+    """Give both sides one bad-channel set before cohort exclusion.
 
-    MNE draws bad channels in grey dashes and open sensors in the inset. A derivative that
-    lost the source's marking would render those channels as ordinary coloured traces, and
-    the pair would then differ by which channels are bad as well as by the correction. The
-    union is used so a channel either side distrusts is never quietly drawn as good.
+    The union ensures that a channel distrusted on either side contributes to neither
+    source nor derivative cohort means for that recording.
     """
     union = tuple(
         sorted(set(source.info["bads"]) | set(derivative.info["bads"]))
@@ -159,7 +319,7 @@ def figure_spectrum(spectrum, path: Path, *, title: str, ylim=None, dpi: int = 2
 
     ``spatial_colors`` is what makes a channel identifiable: its line takes the colour of
     its position in the inset, so a channel that moved can be found on the head rather
-    than merely counted. Bad channels stay in MNE's grey dashes.
+    than merely counted.
     """
     figure = spectrum.plot(
         spatial_colors=True,
@@ -187,9 +347,7 @@ def shared_decibel_limits(*spectra) -> tuple[float, float]:
     lows, highs = [], []
     for spectrum in spectra:
         # MNE plots decibels relative to 1 µV²/Hz, so the same scaling is applied here
-        # rather than reading limits back off a drawn axis. Bad channels are included
-        # because the figure draws them: get_data drops them by default, which would set
-        # a scale that clips the very traces sitting furthest from the rest.
+        # rather than reading limits back off a drawn axis.
         decibels = 10.0 * np.log10(
             np.maximum(spectrum.get_data(exclude=()) * 1e12, 1e-30)
         )
@@ -203,8 +361,29 @@ def shared_decibel_limits(*spectra) -> tuple[float, float]:
     return low - margin, high + margin
 
 
+def _read_recording_pairs(runs, source_root: Path, derivative_root: Path):
+    """Yield source/derivative pairs after requiring every derivative file."""
+    for index, source_vhdr in enumerate(runs, start=1):
+        derivative_vhdr = recordings.derivative_vhdr_path(
+            source_vhdr,
+            source_root,
+            derivative_root,
+        )
+        if not derivative_vhdr.is_file():
+            raise FileNotFoundError(
+                f"{source_vhdr.stem}: derivative missing at {derivative_vhdr}"
+            )
+        print(f"[{index}/{len(runs)}] measuring {source_vhdr.stem}")
+        yield (
+            source_vhdr.stem,
+            recordings.read_bids_raw(source_vhdr),
+            recordings.read_bids_raw(derivative_vhdr),
+        )
+
+
 def run(args: argparse.Namespace) -> None:
-    """Draw one recording's spectrum before and after the correction."""
+    """Draw equal-recording cohort spectra before and after the correction."""
+    from decomb import notch
     from decomb.config import load_config
 
     config = load_config(getattr(args, "config", None))
@@ -227,46 +406,40 @@ def run(args: argparse.Namespace) -> None:
     )
     if not runs:
         raise FileNotFoundError(f"No recordings were discovered under {source_root}.")
-    source_vhdr = runs[0]
-    derivative_vhdr = recordings.derivative_vhdr_path(
-        source_vhdr,
-        source_root,
-        derivative_root,
+    print(
+        f"Measuring {len(runs)} recordings with {settings.window_s:g} s Welch "
+        f"segments, {settings.overlap:.0%} overlap, EEG only"
     )
-    if not derivative_vhdr.is_file():
-        raise FileNotFoundError(f"{source_vhdr.stem}: derivative missing at {derivative_vhdr}")
-
-    # One recording, named rather than implied: the pair is a demonstration of the
-    # correction, and a figure that silently stood for a different recording each run
-    # would not be one.
-    if len(runs) > 1:
-        print(f"{len(runs)} recordings discovered; drawing the first. --subjects selects another.")
-    print(f"Drawing {source_vhdr.stem}")
-    print(f"  Welch, {settings.window_s:g} s segments, {settings.overlap:.0%} overlap, EEG only")
-
-    source = recordings.read_bids_raw(source_vhdr)
-    derivative = recordings.read_bids_raw(derivative_vhdr)
-    require_correspondence(source, derivative, derivative_vhdr.name)
-    bads = align_bad_channels(source, derivative)
-    if bads:
-        print(f"  bad channels drawn in grey on both: {', '.join(bads)}")
-    before = channel_spectrum(source, settings)
-    after = channel_spectrum(derivative, settings)
-    limits = shared_decibel_limits(before, after)
+    cohort = cohort_spectrum_pair(
+        _read_recording_pairs(runs, source_root, derivative_root),
+        settings,
+    )
+    limits = shared_decibel_limits(cohort.before, cohort.after)
+    extent = f"{cohort.recording_count} recordings · {cohort.analysed_hours:.2f} h"
 
     report_dir.mkdir(parents=True, exist_ok=True)
     figure_spectrum(
-        before,
+        cohort.before,
         report_dir / BEFORE_NAME,
-        title=f"Before correction — {source_vhdr.stem}",
+        title=f"Before correction — {extent}",
         ylim=limits,
     )
     figure_spectrum(
-        after,
+        cohort.after,
         report_dir / AFTER_NAME,
-        title=f"After correction — {source_vhdr.stem}",
+        title=f"After correction — {extent}",
         ylim=limits,
     )
+    print("  BIDS-bad channels excluded within each recording before averaging")
+    band_names = tuple(name for name, _, _ in notch.analysed_bands_from_config(config))
+    availability = _cohort_band_availability_percent(
+        derivative_root / notch.MANIFEST_NAME,
+        recording_names=tuple(run.stem for run in runs),
+        band_names=band_names,
+    )
+    for band_name, retained_percent in availability.items():
+        print(f"  {band_name} availability {retained_percent:.3f}%")
+    print(f"  analysed duration {cohort.analysed_hours:.4f} h")
     print(f"  shared scale {limits[0]:.1f} to {limits[1]:.1f} dB/Hz re 1 µV²")
     print(f"  wrote {report_dir / BEFORE_NAME}")
     print(f"  wrote {report_dir / AFTER_NAME}")

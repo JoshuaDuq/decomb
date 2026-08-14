@@ -10,6 +10,6 @@ line structure, ``apply`` writes an evidence-bounded FIR-notched BIDS derivative
 Every parameter comes from one configuration file; see :mod:`decomb.config`.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

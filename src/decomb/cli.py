@@ -15,7 +15,7 @@ from decomb import __version__
 STAGES = ("diagnose", "apply", "verify", "psd")
 
 STAGE_HELP = {
-    "diagnose": "test which sinusoidal lines exist and write the proposed filter plan",
+    "diagnose": "test which narrow spectral lines exist and write the proposed filter plan",
     "apply": "detect supported lines, then write the FIR-notched BIDS derivative",
     "verify": "reproduce every derivative sample from its declared FIR provenance",
     "psd": "before-and-after spectra of whatever exists",
@@ -29,7 +29,7 @@ stages, in order:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="decomb",
-        description="Audited removal of supported sinusoidal artifacts from continuous EEG.",
+        description="Audited removal of supported narrow spectral lines from continuous EEG.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", type=Path, default=None, help="diagnose: where the catalogue goes"
     )
     parser.add_argument(
-        "--report-dir", type=Path, default=None, help="apply/verify: where tables go"
+        "--report-dir", type=Path, default=None, help="apply/verify/psd: where reports go"
     )
     return parser
 

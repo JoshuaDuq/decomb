@@ -13,15 +13,25 @@ paths:
   removal_dir: "<bids_root>_decomb_reports/removal"
 
 removal:
-  # The only non-derivable correction choice: the stationarity horizon. It defines the
-  # tradeoff between tracking a moving line and resolving nearby frequencies. The
-  # validated 54 s method default requires no per-dataset tuning.
-  estimation_window_s: 54.0
+  # Scanner timing is supplied rather than inferred from the EEG. The exact annotation
+  # name and TR pre-specify the MRI-volume comb before any spectrum is inspected.
+  scanner_repetition_time_s: 0.9
+  scanner_trigger_event_name: "Volume/V  1"
 
-  # Probability of any false authorization across one recording's complete adaptive
-  # removal sequence. Each round receives alpha / (round * (round + 1)); within that
-  # round, Holm covers every non-bad EEG channel, estimation window, and eligible Fourier
-  # frequency. Supported intervals are merged into one plan applied to every EEG channel.
+  # Ordinary line fits use MNE's documented 10 s stationarity horizon. Scanner-comb
+  # localization uses a fixed 4 s horizon while its frequency is fixed by the TR above.
+  # Ordinary lines and weak scanner teeth use a derived minimum 0.25 Hz stopband. A
+  # supported scanner tooth also covers the fixed 1 Hz local background on each side.
+  # The selective FIR transition remains derived from a fixed 54 s reference and is not
+  # a user control.
+  estimation_window_s: 10.0
+
+  # Target sequence-wide error budget. Each round receives alpha / (round * (round + 1));
+  # that round is split equally between the recording-wide Holm line family and the
+  # trigger-anchored scanner-harmonic family. Because later rounds operate
+  # on adaptively filtered data, complete-sequence calibration is an empirical validation
+  # result, not a consequence of alpha spending alone. Supported intervals form one plan
+  # applied to every EEG channel.
   familywise_error_rate: 0.05
 
   # Study span eligible for detection and removal. Each recording clips the upper edge

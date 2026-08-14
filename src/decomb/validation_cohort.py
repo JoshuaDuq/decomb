@@ -1,8 +1,9 @@
-"""Cohort-derived injection parameters and participant-level summaries."""
+"""Fixed factorial targets and participant-level validation summaries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 
 import numpy as np
 
@@ -10,7 +11,7 @@ from decomb import injection, lines, notch, recordings, validation
 
 
 @dataclass(frozen=True)
-class ArtifactObservation:
+class LineObservation:
     """Measured properties of one supported real-data stopband."""
 
     recording: str
@@ -23,36 +24,15 @@ class ArtifactObservation:
 
 
 @dataclass(frozen=True)
-class InjectionTarget:
-    """One empirical injection specification before waveform realization."""
-
-    kind: str
-    frequency_hz: float
-    amplitude_v: float
-    drift_hz: float
-    occupancy: float
-    phase_rad: float
-
-    def as_specification(self) -> injection.SinusoidInjection:
-        return injection.SinusoidInjection(
-            kind=self.kind,
-            frequency_hz=self.frequency_hz,
-            amplitude_v=self.amplitude_v,
-            drift_hz=self.drift_hz,
-            occupancy=self.occupancy,
-            phase_rad=self.phase_rad,
-        )
-
-
-@dataclass(frozen=True)
 class DetectionEstimate:
-    """Detection proportion with a participant-cluster bootstrap interval."""
+    """Recording FWER estimate and secondary channel-level detection proportion."""
 
-    method: str
-    proportion: float
+    recording_false_authorization_proportion: float
     lower: float
     upper: float
     participant_count: int
+    recording_count: int
+    channel_false_detection_proportion: float
     channel_recording_count: int
 
 
@@ -78,23 +58,22 @@ class LocalityBandwidth:
     cohort_global_channel_hz: float
 
 
-def observed_artifacts(
+def observed_lines(
     raw,
     settings,
-    model: lines.ArtifactModel,
+    model: lines.LineModel,
     *,
     recording_name: str,
     participant: str,
-) -> tuple[ArtifactObservation, ...]:
-    """Measure injection parameters directly from supported real-data intervals."""
-    referenced = validation.average_reference(raw)
+) -> tuple[LineObservation, ...]:
+    """Describe supported real-data intervals without defining benchmark targets."""
     bounds = recordings.valid_window_bounds(
-        referenced,
+        raw,
         window_s=settings.estimation_window_s,
         overlap=settings.estimation_overlap,
     )
     if len(bounds) != model.window_count:
-        raise ValueError("The artifact model and recording use different windows.")
+        raise ValueError("The line model and recording use different windows.")
 
     observations = []
     for channel_plan in notch.plan_channel_notches(model, settings):
@@ -103,7 +82,7 @@ def observed_artifacts(
             for channel in model.channels
             if channel.channel_name == channel_plan.channel_name
         )
-        channel_data = referenced.get_data(picks=[channel.channel_name])[0]
+        channel_data = raw.get_data(picks=[channel.channel_name])[0]
         for stopband in channel_plan.geometry.stopbands:
             supported_lines = tuple(
                 line
@@ -128,7 +107,7 @@ def observed_artifacts(
             amplitudes_v = [
                 _sinusoid_amplitude(
                     channel_data[start:stop],
-                    float(referenced.info["sfreq"]),
+                    float(raw.info["sfreq"]),
                     line.position_hz,
                 )
                 for line in supported_lines
@@ -136,7 +115,7 @@ def observed_artifacts(
                 for start, stop in (bounds[window_index],)
             ]
             observations.append(
-                ArtifactObservation(
+                LineObservation(
                     recording=recording_name,
                     participant=participant,
                     channel_name=channel.channel_name,
@@ -170,127 +149,158 @@ def _sinusoid_amplitude(
     return amplitude_v
 
 
-def sample_injection_targets(
-    observations: tuple[ArtifactObservation, ...],
+def factorial_injection_targets(
     *,
-    count: int,
     frequency_range_hz: tuple[float, float],
-    rng: np.random.Generator,
-) -> tuple[InjectionTarget, ...]:
-    """Stratify injections over empirical frequency, drift, occupancy, and amplitude."""
-    if count < 3:
-        raise ValueError("At least three targets are required to represent every kind.")
-    if not observations:
-        raise ValueError("Injection targets require real artifact observations.")
+) -> tuple[injection.FactorialInjectionTarget, ...]:
+    """Return the fixed 90-point recovery design independent of Decomb settings."""
     low_hz, high_hz = (float(value) for value in frequency_range_hz)
     if not 0.0 <= low_hz < high_hz:
         raise ValueError("frequency_range_hz must have increasing non-negative edges.")
 
-    kinds = tuple(injection.KINDS[index % len(injection.KINDS)] for index in range(count))
-    kind_counts = {kind: kinds.count(kind) for kind in injection.KINDS}
-    frequencies = np.array([item.frequency_hz for item in observations])
-    amplitudes = np.array([item.amplitude_v for item in observations])
-    positive_drifts = np.array([item.drift_hz for item in observations if item.drift_hz > 0.0])
-    partial_occupancies = np.array(
-        [item.occupancy for item in observations if item.occupancy < 1.0]
+    frequencies_hz = tuple(
+        low_hz + fraction * (high_hz - low_hz)
+        for fraction in (0.25, 0.5, 0.75)
     )
-    if positive_drifts.size == 0:
-        raise ValueError("Drifting injections require positive observed drift.")
-    if partial_occupancies.size == 0:
-        raise ValueError("Intermittent injections require observed partial occupancy.")
+    strengths_db = (-20.0, -10.0, 0.0)
+    phases_rad = (0.0, np.pi / 2.0)
+    drift_values_hz = (0.05, 0.2)
+    occupancies = (0.25, 0.75)
+    if frequencies_hz[-1] + max(drift_values_hz) >= high_hz:
+        raise ValueError("The analysis range is too narrow for the factorial drift levels.")
 
-    values_by_kind = {}
-    for kind, kind_count in kind_counts.items():
-        quantiles = (np.arange(kind_count, dtype=float) + 0.5) / kind_count
-        values_by_kind[kind] = {
-            "frequency": rng.permutation(np.quantile(frequencies, quantiles)),
-            "amplitude": rng.permutation(np.quantile(amplitudes, quantiles)),
-            "drift": rng.permutation(np.quantile(positive_drifts, quantiles)),
-            "occupancy": rng.permutation(np.quantile(partial_occupancies, quantiles)),
-        }
-
-    indices = {kind: 0 for kind in injection.KINDS}
-    targets = []
-    for kind in rng.permutation(kinds):
-        index = indices[kind]
-        indices[kind] += 1
-        values = values_by_kind[kind]
-        centre_hz = float(values["frequency"][index])
-        amplitude_v = float(values["amplitude"][index])
-        drift_hz = 0.0
-        occupancy = 1.0
-        frequency_hz = centre_hz
-        if kind == "drifting":
-            drift_magnitude_hz = float(values["drift"][index])
-            drift_hz = drift_magnitude_hz * float(rng.choice((-1.0, 1.0)))
-            frequency_hz = centre_hz - drift_hz / 2.0
-        elif kind == "intermittent":
-            occupancy = float(values["occupancy"][index])
-        end_frequency_hz = frequency_hz + drift_hz
-        if min(frequency_hz, end_frequency_hz) < low_hz or max(
-            frequency_hz,
-            end_frequency_hz,
-        ) > high_hz:
-            raise ValueError("An empirical injection trajectory leaves the analysis range.")
-        targets.append(
-            InjectionTarget(
-                kind=kind,
-                frequency_hz=frequency_hz,
-                amplitude_v=amplitude_v,
-                drift_hz=drift_hz,
-                occupancy=occupancy,
-                phase_rad=float(rng.uniform(0.0, 2.0 * np.pi)),
-            )
+    targets = [
+        injection.FactorialInjectionTarget("stationary", frequency, strength, phase_rad=phase)
+        for frequency, strength, phase in product(
+            frequencies_hz,
+            strengths_db,
+            phases_rad,
         )
+    ]
+    targets.extend(
+        injection.FactorialInjectionTarget(
+            "drifting",
+            frequency,
+            strength,
+            drift_hz=drift,
+            phase_rad=phase,
+        )
+        for frequency, strength, drift, phase in product(
+            frequencies_hz,
+            strengths_db,
+            drift_values_hz,
+            phases_rad,
+        )
+    )
+    targets.extend(
+        injection.FactorialInjectionTarget(
+            "intermittent",
+            frequency,
+            strength,
+            occupancy=occupancy,
+            phase_rad=phase,
+        )
+        for frequency, strength, occupancy, phase in product(
+            frequencies_hz,
+            strengths_db,
+            occupancies,
+            phases_rad,
+        )
+    )
     return tuple(targets)
 
 
-def detection_estimates(
+def validate_factorial_targets_for_cohort(
+    targets: tuple[injection.FactorialInjectionTarget, ...],
+    *,
+    sampling_frequencies_hz: tuple[float, ...],
+) -> None:
+    """Require every target trajectory to fit every recording in the cohort."""
+    if not targets:
+        raise ValueError("Factorial validation requires targets.")
+    sampling_frequencies = np.asarray(sampling_frequencies_hz, dtype=float)
+    if (
+        sampling_frequencies.ndim != 1
+        or sampling_frequencies.size == 0
+        or not np.all(np.isfinite(sampling_frequencies))
+        or np.any(sampling_frequencies <= 0.0)
+    ):
+        raise ValueError("Sampling frequencies must be finite and positive.")
+
+    lowest_nyquist_hz = float(sampling_frequencies.min() / 2.0)
+    highest_target_hz = max(
+        target.frequency_hz + max(0.0, target.drift_hz)
+        for target in targets
+    )
+    lowest_target_hz = min(
+        target.frequency_hz + min(0.0, target.drift_hz)
+        for target in targets
+    )
+    if lowest_target_hz <= 0.0 or highest_target_hz >= lowest_nyquist_hz:
+        raise ValueError(
+            "Every injection trajectory must lie strictly inside the lowest cohort "
+            f"Nyquist frequency ({lowest_nyquist_hz:g} Hz); target range is "
+            f"[{lowest_target_hz:g}, {highest_target_hz:g}] Hz."
+        )
+
+
+def detection_estimate(
     trials: tuple[validation.FalseDetectionTrial, ...],
     *,
-    methods: tuple[str, ...] = validation.PRIMARY_METHODS,
     bootstrap_resamples: int,
     rng: np.random.Generator,
-) -> tuple[DetectionEstimate, ...]:
+) -> DetectionEstimate:
     """Estimate detection rates with participant-cluster bootstrap intervals."""
     if bootstrap_resamples < 1:
         raise ValueError("bootstrap_resamples must be positive.")
-    estimates = []
-    for method in methods:
-        method_trials = tuple(trial for trial in trials if trial.method == method)
-        participants = tuple(sorted({trial.participant for trial in method_trials}))
-        if not participants:
-            raise ValueError(f"No false-detection trials exist for {method!r}.")
-        clusters = {
-            participant: np.array(
-                [
-                    trial.detected
-                    for trial in method_trials
-                    if trial.participant == participant
-                ],
-                dtype=float,
-            )
-            for participant in participants
-        }
-        outcomes = np.concatenate(tuple(clusters.values()))
-        bootstrap = np.empty(bootstrap_resamples, dtype=float)
-        for index in range(bootstrap_resamples):
-            selected = rng.choice(participants, size=len(participants), replace=True)
-            bootstrap[index] = np.concatenate(
-                [clusters[participant] for participant in selected]
-            ).mean()
-        lower, upper = np.quantile(bootstrap, (0.025, 0.975))
-        estimates.append(
-            DetectionEstimate(
-                method=method,
-                proportion=float(outcomes.mean()),
-                lower=float(lower),
-                upper=float(upper),
-                participant_count=len(participants),
-                channel_recording_count=outcomes.size,
-            )
+    participants = tuple(sorted({trial.participant for trial in trials}))
+    if not participants:
+        raise ValueError("False-detection trials are required.")
+    recording_participants: dict[str, str] = {}
+    recording_channels: dict[tuple[str, str], list[bool]] = {}
+    for trial in trials:
+        previous = recording_participants.setdefault(
+            trial.recording,
+            trial.participant,
         )
-    return tuple(estimates)
+        if previous != trial.participant:
+            raise ValueError("Each recording must belong to exactly one participant.")
+        recording_channels.setdefault(
+            (trial.participant, trial.recording),
+            [],
+        ).append(trial.line_detected)
+    clusters = {
+        participant: np.array(
+            [
+                any(outcomes)
+                for (owner, _), outcomes in recording_channels.items()
+                if owner == participant
+            ],
+            dtype=float,
+        )
+        for participant in participants
+    }
+    recording_outcomes = np.concatenate(tuple(clusters.values()))
+    channel_outcomes = np.array(
+        [trial.line_detected for trial in trials],
+        dtype=float,
+    )
+    bootstrap = np.empty(bootstrap_resamples, dtype=float)
+    for index in range(bootstrap_resamples):
+        selected = rng.choice(participants, size=len(participants), replace=True)
+        bootstrap[index] = np.concatenate(
+            [clusters[participant] for participant in selected]
+        ).mean()
+    lower, upper = np.quantile(bootstrap, (0.025, 0.975))
+    return DetectionEstimate(
+        recording_false_authorization_proportion=float(recording_outcomes.mean()),
+        lower=float(lower),
+        upper=float(upper),
+        participant_count=len(participants),
+        recording_count=recording_outcomes.size,
+        channel_false_detection_proportion=float(channel_outcomes.mean()),
+        channel_recording_count=channel_outcomes.size,
+    )
 
 
 def locality_bandwidth(

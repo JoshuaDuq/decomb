@@ -1,4 +1,4 @@
-"""Automatic recording-specific FIR notches for supported sinusoidal lines.
+"""Automatic recording-specific FIR notches for supported lines and scanner combs.
 
 The transform makes no claim to recover neural activity at a removed frequency. Its
 manifest therefore records every stopband and transition as unavailable for inference.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -18,20 +18,28 @@ import pandas as pd
 from decomb import __version__, lines, recordings
 
 FIR_DESIGN = "firwin"
+FIR_TRANSITION_REFERENCE_WINDOW_S = 54.0
 FIR_PAD = "reflect_limited"
 FIR_PHASE = "zero"
 FIR_WINDOW = "hamming"
 MANIFEST_NAME = "line_notch_manifest.tsv"
+MULTIPLE_TESTING_METHOD = (
+    "source_bonferroni_two_shape_union_then_holm_"
+    "residual_holm_and_scanner_bonferroni"
+)
+SCANNER_HARMONIC_ESTIMATION_WINDOW_S = 4.0
 VERIFICATION_NAME = "line_notch_verification.tsv"
 
 
 @dataclass(frozen=True)
 class HarmonicNotchSettings:
-    """The stationarity horizon and study frequency range supplied by the user."""
+    """Statistical settings and the scanner timing supplied by the user."""
 
     estimation_window_s: float
     familywise_error_rate: float
     frequency_range_hz: tuple[float, float]
+    scanner_repetition_time_s: float = 0.9
+    scanner_trigger_event_name: str = "Volume/V  1"
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.estimation_window_s) or self.estimation_window_s <= 0.0:
@@ -52,6 +60,19 @@ class HarmonicNotchSettings:
             raise ValueError(
                 "removal.frequency_range_hz must contain increasing non-negative values."
             )
+        if (
+            not np.isfinite(self.scanner_repetition_time_s)
+            or self.scanner_repetition_time_s <= 0.0
+        ):
+            raise ValueError(
+                "removal.scanner_repetition_time_s must be finite and positive."
+            )
+        if not isinstance(self.scanner_trigger_event_name, str) or not (
+            self.scanner_trigger_event_name.strip()
+        ):
+            raise ValueError(
+                "removal.scanner_trigger_event_name must be a non-empty string."
+            )
 
     @property
     def estimation_overlap(self) -> float:
@@ -61,7 +82,12 @@ class HarmonicNotchSettings:
     @property
     def transition_bandwidth_hz(self) -> float:
         """Total notch transition width across both edges."""
-        return 3.3 / self.estimation_window_s
+        return 3.3 / self.filter_resolution_window_s
+
+    @property
+    def filter_resolution_window_s(self) -> float:
+        """Fixed selectivity reference for the MNE Hamming FIR geometry."""
+        return FIR_TRANSITION_REFERENCE_WINDOW_S
 
     @property
     def per_edge_transition_bandwidth_hz(self) -> float:
@@ -71,6 +97,27 @@ class HarmonicNotchSettings:
     @property
     def frequency_bin_width_hz(self) -> float:
         return 1.0 / self.estimation_window_s
+
+    @property
+    def scanner_harmonics_stopband_width_hz(self) -> float:
+        """Width fixed by the 4 s scanner-comb localization horizon."""
+        return 1.0 / SCANNER_HARMONIC_ESTIMATION_WINDOW_S
+
+    @property
+    def supported_scanner_harmonic_stopband_width_hz(self) -> float:
+        """Width covering the local background used to establish a visible tooth."""
+        return (
+            self.scanner_harmonics_stopband_width_hz
+            + 2.0 * lines.PERSISTENT_PEAK_SMOOTHING_HZ
+        )
+
+    @property
+    def ordinary_line_stopband_width_hz(self) -> float:
+        """Minimum width that removes visible structure around an authorized line."""
+        return max(
+            self.frequency_bin_width_hz,
+            self.scanner_harmonics_stopband_width_hz,
+        )
 
     @property
     def alpha_spending_rule(self) -> str:
@@ -88,6 +135,8 @@ class HarmonicNotchSettings:
             estimation_window_s=self.estimation_window_s,
             familywise_error_rate=self.error_rate_for_round(round_index),
             frequency_range_hz=self.frequency_range_hz,
+            scanner_repetition_time_s=self.scanner_repetition_time_s,
+            scanner_trigger_event_name=self.scanner_trigger_event_name,
         )
 
     @classmethod
@@ -113,6 +162,10 @@ class HarmonicNotchSettings:
             estimation_window_s=float(block["estimation_window_s"]),
             familywise_error_rate=float(block["familywise_error_rate"]),
             frequency_range_hz=frequency_range,
+            scanner_repetition_time_s=float(
+                block["scanner_repetition_time_s"]
+            ),
+            scanner_trigger_event_name=block["scanner_trigger_event_name"],
         )
 
 
@@ -148,6 +201,40 @@ class HarmonicStopband:
     @property
     def width_hz(self) -> float:
         return self.high_hz - self.low_hz
+
+
+@dataclass(frozen=True)
+class ScannerHarmonicEvidence:
+    """Recording-level evidence for trigger-prespecified scanner harmonics."""
+
+    fundamental_hz: float
+    corrected_p_value: float
+    supporting_harmonics: tuple[int, ...]
+    window_count: int = 1
+    channel_count: int = 1
+    frequency_count: int = 1
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.fundamental_hz) or self.fundamental_hz <= 0.0:
+            raise ValueError("A scanner comb requires a positive finite fundamental.")
+        if not 0.0 <= self.corrected_p_value < 1.0:
+            raise ValueError("A scanner-comb p-value must lie in [0, 1).")
+        if (
+            self.supporting_harmonics
+            != tuple(sorted(set(self.supporting_harmonics)))
+            or not self.supporting_harmonics
+            or self.supporting_harmonics[0] < 1
+        ):
+            raise ValueError(
+                "Scanner-harmonic evidence requires sorted unique positive harmonics."
+            )
+        if min(self.window_count, self.channel_count, self.frequency_count) < 1:
+            raise ValueError("Scanner-harmonic test dimensions must be positive.")
+
+    @property
+    def authorizes_complete_comb(self) -> bool:
+        """Whether distinct supported harmonics justify the full expected comb."""
+        return len(self.supporting_harmonics) >= 2
 
 
 @dataclass(frozen=True)
@@ -221,23 +308,36 @@ class HarmonicFilterDesign:
 class HarmonicRemovalRound:
     """One Holm-supported residual model and its recording-wide FIR geometry."""
 
-    model: lines.ArtifactModel
+    model: lines.LineModel
     plans: tuple[ChannelNotchPlan, ...]
     filter_plan: HarmonicNotchPlan
     in_stopband_changes_db: tuple[float, ...]
+    scanner_harmonics: ScannerHarmonicEvidence | None = None
+    scanner_plan: HarmonicNotchPlan | None = None
 
     def __post_init__(self) -> None:
         affected_channels = {channel.channel_name for channel in self.model.channels}
         planned_channels = {plan.channel_name for plan in self.plans}
-        if not affected_channels or planned_channels != affected_channels:
+        if planned_channels != affected_channels:
             raise ValueError(
                 "A removal round must plan every affected channel exactly once."
             )
-        if self.filter_plan != recording_plan_from_channel_plans(self.plans):
+        if not affected_channels and self.scanner_harmonics is None:
+            raise ValueError("A removal round requires line or scanner-comb evidence.")
+        if (self.scanner_harmonics is None) != (self.scanner_plan is None):
+            raise ValueError(
+                "Scanner-comb evidence and its complete notch plan must occur together."
+            )
+        geometries = tuple(plan.geometry for plan in self.plans)
+        if self.scanner_plan is not None:
+            geometries = (*geometries, self.scanner_plan)
+        if self.filter_plan != merge_recording_plans(geometries):
             raise ValueError(
                 "A removal round's recording plan must equal the union of its evidence."
             )
         stopband_count = sum(len(plan.geometry.stopbands) for plan in self.plans)
+        if self.scanner_plan is not None:
+            stopband_count += len(self.scanner_plan.stopbands)
         if len(self.in_stopband_changes_db) != stopband_count:
             raise ValueError("A removal round requires one change per stopband.")
         if not np.all(np.isfinite(self.in_stopband_changes_db)):
@@ -250,11 +350,39 @@ class HarmonicCleaningResult:
 
     cleaned: object
     rounds: tuple[HarmonicRemovalRound, ...]
-    residual_model: lines.ArtifactModel
+    residual_model: lines.LineModel
+    residual_scanner_harmonics: ScannerHarmonicEvidence | None = None
 
     def __post_init__(self) -> None:
-        if self.residual_model.channels:
+        if self.residual_model.channels or self.residual_scanner_harmonics is not None:
             raise ValueError("A converged cleaning result requires a null residual model.")
+
+
+@dataclass(frozen=True)
+class HarmonicRoundEvidence:
+    """Joint line and trigger-anchored evidence fitted before one removal round."""
+
+    model: lines.LineModel
+    plans: tuple[ChannelNotchPlan, ...]
+    scanner_harmonics: ScannerHarmonicEvidence | None
+    scanner_plan: HarmonicNotchPlan | None
+
+    def __post_init__(self) -> None:
+        affected_channels = {channel.channel_name for channel in self.model.channels}
+        if {plan.channel_name for plan in self.plans} != affected_channels:
+            raise ValueError("Round evidence must plan every affected channel exactly once.")
+        if (self.scanner_harmonics is None) != (self.scanner_plan is None):
+            raise ValueError(
+                "Scanner-comb evidence and its complete notch plan must occur together."
+            )
+
+    @property
+    def filter_plan(self) -> HarmonicNotchPlan | None:
+        """Union of every statistically authorized geometry, or none for a joint null."""
+        geometries = tuple(plan.geometry for plan in self.plans)
+        if self.scanner_plan is not None:
+            geometries = (*geometries, self.scanner_plan)
+        return None if not geometries else merge_recording_plans(geometries)
 
 
 def _mne_passband_edges(
@@ -354,7 +482,8 @@ def characterize_harmonic_filter(
 
 def observed_line_intervals(model, settings) -> list[HarmonicStopband]:
     """Resolution-limited intervals around statistically supported frequencies."""
-    location_uncertainty_hz = settings.frequency_bin_width_hz / 2.0
+    minimum_width_hz = settings.ordinary_line_stopband_width_hz
+    location_uncertainty_hz = minimum_width_hz / 2.0
     grouped: dict[int | None, list[float]] = {}
     isolated_index = -1
     for line in model.lines:
@@ -369,8 +498,8 @@ def observed_line_intervals(model, settings) -> list[HarmonicStopband]:
         low_hz = min(positions_hz) - location_uncertainty_hz
         high_hz = max(positions_hz) + location_uncertainty_hz
         centre_hz = (low_hz + high_hz) / 2.0
-        if high_hz - low_hz < settings.frequency_bin_width_hz:
-            half_width_hz = settings.frequency_bin_width_hz / 2.0
+        if high_hz - low_hz < minimum_width_hz:
+            half_width_hz = minimum_width_hz / 2.0
             low_hz = centre_hz - half_width_hz
             high_hz = centre_hz + half_width_hz
         harmonic = label if label >= 1 else None
@@ -418,8 +547,85 @@ def plan_harmonic_stopbands(model, settings) -> HarmonicNotchPlan:
     return HarmonicNotchPlan(stopbands, transition_bandwidth_hz)
 
 
+def plan_scanner_harmonic_notches(
+    evidence: ScannerHarmonicEvidence,
+    settings: HarmonicNotchSettings,
+    *,
+    maximum_hz: float,
+) -> HarmonicNotchPlan:
+    """Plan supported scanner lines, or the full comb when support is replicated."""
+    upper_hz = min(float(maximum_hz), settings.frequency_range_hz[1])
+    if not np.isfinite(upper_hz) or upper_hz <= settings.frequency_range_hz[0]:
+        raise ValueError("The scanner-comb upper frequency must exceed the study minimum.")
+    first_harmonic = max(
+        1,
+        int(np.ceil(settings.frequency_range_hz[0] / evidence.fundamental_hz)),
+    )
+    last_harmonic = int(np.floor(upper_hz / evidence.fundamental_hz))
+    if last_harmonic < first_harmonic:
+        raise ValueError("No scanner harmonic lies inside the recording's study range.")
+
+    planned_harmonics = (
+        range(first_harmonic, last_harmonic + 1)
+        if evidence.authorizes_complete_comb
+        else evidence.supporting_harmonics
+    )
+    if any(
+        harmonic < first_harmonic or harmonic > last_harmonic
+        for harmonic in planned_harmonics
+    ):
+        raise ValueError("A supported scanner harmonic lies outside the study range.")
+
+    stopbands = []
+    for harmonic in planned_harmonics:
+        width_hz = (
+            settings.supported_scanner_harmonic_stopband_width_hz
+            if harmonic in evidence.supporting_harmonics
+            else settings.scanner_harmonics_stopband_width_hz
+        )
+        centre_hz = harmonic * evidence.fundamental_hz
+        stopbands.append(
+            HarmonicStopband(
+                (harmonic,),
+                centre_hz - width_hz / 2.0,
+                centre_hz + width_hz / 2.0,
+            )
+        )
+    return HarmonicNotchPlan(
+        _merge_stopbands(
+            stopbands,
+            minimum_gap_hz=settings.transition_bandwidth_hz,
+        ),
+        settings.transition_bandwidth_hz,
+    )
+
+
+def _plan_scanner_harmonics_for_recording(
+    raw,
+    evidence: ScannerHarmonicEvidence,
+    settings: HarmonicNotchSettings,
+) -> HarmonicNotchPlan:
+    """Keep the complete comb and its transitions strictly below Nyquist."""
+    half_unavailable_width_hz = (
+        settings.scanner_harmonics_stopband_width_hz
+        + settings.transition_bandwidth_hz
+    ) / 2.0
+    maximum_hz = min(
+        settings.frequency_range_hz[1],
+        np.nextafter(
+            float(raw.info["sfreq"]) / 2.0 - half_unavailable_width_hz,
+            0.0,
+        ),
+    )
+    return plan_scanner_harmonic_notches(
+        evidence,
+        settings,
+        maximum_hz=maximum_hz,
+    )
+
+
 def plan_channel_notches(
-    model: lines.ArtifactModel,
+    model: lines.LineModel,
     settings: HarmonicNotchSettings,
 ) -> tuple[ChannelNotchPlan, ...]:
     """Build the independently supported FIR geometry for each affected channel."""
@@ -433,7 +639,7 @@ def plan_channel_notches(
 
 
 def plan_recording_notches(
-    model: lines.ArtifactModel,
+    model: lines.LineModel,
     settings: HarmonicNotchSettings,
 ) -> HarmonicNotchPlan:
     """Union all supported channel intervals into one spatially invariant plan."""
@@ -492,19 +698,128 @@ def eeg_channel_names(raw) -> tuple[str, ...]:
     return tuple(raw.ch_names[index] for index in picks)
 
 
-def _thomson_f_p_values(raw, settings) -> tuple[np.ndarray, np.ndarray]:
-    """Raw Thomson F-test p-values for every EEG channel, correction-independent."""
+def scanner_fundamental_hz(raw, settings: HarmonicNotchSettings) -> float:
+    """Return the configured scanner frequency after validating its exact markers."""
+    descriptions = np.asarray(raw.annotations.description, dtype=str)
+    trigger_times_s = np.asarray(raw.annotations.onset, dtype=float)[
+        descriptions == settings.scanner_trigger_event_name
+    ]
+    if trigger_times_s.size < 2:
+        raise ValueError(
+            f"Configured scanner trigger event {settings.scanner_trigger_event_name!r} "
+            "is not present at least twice in the recording annotations."
+        )
+
+    sampling_frequency_hz = float(raw.info["sfreq"])
+    tolerance_s = 0.5 / sampling_frequency_hz
+    trigger_intervals_s = np.diff(trigger_times_s)
+    if not np.allclose(
+        trigger_intervals_s,
+        settings.scanner_repetition_time_s,
+        rtol=0.0,
+        atol=tolerance_s,
+    ):
+        raise ValueError(
+            f"Scanner trigger intervals do not equal the configured "
+            f"{settings.scanner_repetition_time_s:g} s TR within half a sample."
+        )
+    return 1.0 / settings.scanner_repetition_time_s
+
+
+def detect_scanner_harmonics(
+    frequencies_hz: np.ndarray,
+    p_values: np.ndarray,
+    *,
+    fundamental_hz: float,
+    familywise_error_rate: float,
+) -> ScannerHarmonicEvidence | None:
+    """Bonferroni-test every harmonic fixed in advance by scanner timing."""
+    frequencies = np.asarray(frequencies_hz, dtype=float)
+    probabilities = np.asarray(p_values, dtype=float)
+    if (
+        frequencies.ndim != 1
+        or frequencies.size < 2
+        or not np.all(np.isfinite(frequencies))
+        or not np.all(np.diff(frequencies) > 0.0)
+    ):
+        raise ValueError(
+            "Scanner-harmonic frequencies require at least two finite increasing bins."
+        )
+    if probabilities.ndim != 3 or probabilities.shape[-1] != frequencies.size:
+        raise ValueError(
+            "Scanner-comb p-values must have window, channel, and frequency axes."
+        )
+    if not np.all(np.isfinite(probabilities)) or np.any(
+        (probabilities < 0.0) | (probabilities > 1.0)
+    ):
+        raise ValueError("Scanner-comb p-values must be finite probabilities.")
+    if not np.isfinite(fundamental_hz) or fundamental_hz <= 0.0:
+        raise ValueError("The scanner fundamental must be finite and positive.")
+    if not np.isfinite(familywise_error_rate) or not (
+        0.0 < familywise_error_rate < 1.0
+    ):
+        raise ValueError("familywise_error_rate must lie strictly between zero and one.")
+
+    first_harmonic = max(1, int(np.ceil(frequencies[0] / fundamental_hz)))
+    last_harmonic = int(np.floor(frequencies[-1] / fundamental_hz))
+    harmonics = np.arange(first_harmonic, last_harmonic + 1)
+    if harmonics.size < 1:
+        return None
+
+    bin_width_hz = float(np.median(np.diff(frequencies)))
+    harmonic_p_values = []
+    for harmonic in harmonics:
+        target_hz = harmonic * fundamental_hz
+        distances_hz = np.abs(frequencies - target_hz)
+        nearest = distances_hz <= np.min(distances_hz) + np.finfo(float).eps
+        group = probabilities[..., nearest]
+        harmonic_p_values.append(
+            min(1.0, float(np.min(group)) * group.size)
+            if np.min(distances_hz) <= bin_width_hz / 2.0 + np.finfo(float).eps
+            else 1.0
+        )
+
+    harmonic_probabilities = np.asarray(harmonic_p_values)
+    corrected_harmonic_probabilities = np.minimum(
+        1.0,
+        harmonics.size * harmonic_probabilities,
+    )
+    supporting = tuple(
+        int(harmonic)
+        for harmonic, probability in zip(
+            harmonics,
+            corrected_harmonic_probabilities,
+            strict=True,
+        )
+        if probability < familywise_error_rate
+    )
+    if not supporting:
+        return None
+    ordered_probabilities = np.sort(corrected_harmonic_probabilities)
+    authorization_index = 1 if len(supporting) >= 2 else 0
+    corrected_p_value = float(ordered_probabilities[authorization_index])
+    return ScannerHarmonicEvidence(
+        fundamental_hz=float(fundamental_hz),
+        corrected_p_value=corrected_p_value,
+        supporting_harmonics=supporting,
+        window_count=probabilities.shape[0],
+        channel_count=probabilities.shape[1],
+        frequency_count=harmonics.size,
+    )
+
+
+def _eeg_estimation_windows(raw, settings) -> tuple[np.ndarray, float, float]:
+    """Return validated as-recorded EEG windows and their spectral limits."""
     import mne
 
     picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
     if len(picks) < 2:
         raise ValueError(
-            "Common-average line detection requires at least two non-bad EEG channels."
+            "Line detection requires at least two non-bad EEG channels."
         )
     data = raw.get_data(picks=picks)
     if not np.all(np.isfinite(data)):
         raise ValueError("EEG data must contain only finite values.")
-    data = data - data.mean(axis=0, keepdims=True)
     bounds = recordings.valid_window_bounds(
         raw,
         window_s=settings.estimation_window_s,
@@ -519,7 +834,29 @@ def _thomson_f_p_values(raw, settings) -> tuple[np.ndarray, np.ndarray]:
         settings.frequency_range_hz[1],
         float(np.nextafter(sampling_frequency_hz / 2.0, 0.0)),
     )
+    return windows, sampling_frequency_hz, maximum_hz
+
+
+def _thomson_f_p_values(raw, settings) -> tuple[np.ndarray, np.ndarray]:
+    """Raw Thomson F-test p-values for every as-recorded non-bad EEG channel."""
+    windows, sampling_frequency_hz, maximum_hz = _eeg_estimation_windows(
+        raw,
+        settings,
+    )
     return lines.thomson_f_p_values(
+        windows,
+        sampling_frequency_hz,
+        frequency_range_hz=(settings.frequency_range_hz[0], maximum_hz),
+    )
+
+
+def _line_test_p_values(raw, settings) -> tuple[np.ndarray, np.ndarray]:
+    """Combined coherent-sinusoid and persistent narrowband p-values."""
+    windows, sampling_frequency_hz, maximum_hz = _eeg_estimation_windows(
+        raw,
+        settings,
+    )
+    return lines.line_test_p_values(
         windows,
         sampling_frequency_hz,
         frequency_range_hz=(settings.frequency_range_hz[0], maximum_hz),
@@ -530,7 +867,17 @@ def detect_channel_lines(
     raw,
     settings,
 ) -> lines.LineDetectionResult:
-    """Thomson F-test detections with recording-family Holm correction."""
+    """Complementary line-shape tests with recording-family Holm correction."""
+    frequencies_hz, p_values = _line_test_p_values(raw, settings)
+    return lines.detect_lines_from_p_values(
+        frequencies_hz,
+        p_values,
+        familywise_error_rate=settings.familywise_error_rate,
+    )
+
+
+def detect_residual_channel_lines(raw, settings) -> lines.LineDetectionResult:
+    """Thomson-only refit after filtering has shaped the local power spectrum."""
     frequencies_hz, p_values = _thomson_f_p_values(raw, settings)
     return lines.detect_lines_from_p_values(
         frequencies_hz,
@@ -539,41 +886,72 @@ def detect_channel_lines(
     )
 
 
-def detect_channel_lines_holm_and_bonferroni(
+def _detect_lines_for_round(
     raw,
     settings,
-) -> dict[str, lines.LineDetectionResult]:
-    """Holm and Bonferroni detections from one shared Thomson F-test pass."""
-    frequencies_hz, p_values = _thomson_f_p_values(raw, settings)
-    return {
-        "holm": lines.detect_lines_from_p_values(
-            frequencies_hz,
-            p_values,
-            familywise_error_rate=settings.familywise_error_rate,
-        ),
-        "bonferroni": lines.detect_lines_with_bonferroni_from_p_values(
-            frequencies_hz,
-            p_values,
-            familywise_error_rate=settings.familywise_error_rate,
-        ),
-    }
+    round_index: int,
+) -> lines.LineDetectionResult:
+    """Use the source-only peak family once, then coherent residual refits."""
+    if round_index == 1:
+        return detect_channel_lines(raw, settings)
+    return detect_residual_channel_lines(raw, settings)
 
 
 def fit_harmonic_model(raw, settings, *, round_index: int = 1):
-    """Fit recording-family Holm-corrected lines and descriptive harmonics."""
+    """Fit recording-family Holm-corrected spectral lines."""
     round_settings = settings.for_round(round_index)
-    result = detect_channel_lines(raw, round_settings)
-    return _artifact_model_from_detection(raw, result, round_settings)
+    result = _detect_lines_for_round(raw, round_settings, round_index)
+    return _line_model_from_detection(raw, result)
 
 
-def _artifact_model_from_detection(raw, result, settings) -> lines.ArtifactModel:
-    """Attach recording channel identities and descriptive harmonics to detections."""
-    return lines.build_artifact_model(
+def fit_harmonic_round(
+    raw,
+    settings: HarmonicNotchSettings,
+    *,
+    round_index: int = 1,
+) -> HarmonicRoundEvidence:
+    """Fit the exact joint evidence used by one production removal round."""
+    round_settings = settings.for_round(round_index)
+    line_settings = replace(
+        round_settings,
+        familywise_error_rate=round_settings.familywise_error_rate / 2.0,
+    )
+    line_detection = _detect_lines_for_round(
+        raw,
+        line_settings,
+        round_index,
+    )
+    model = _line_model_from_detection(raw, line_detection)
+    plans = plan_channel_notches(model, round_settings)
+
+    scanner_settings = replace(
+        round_settings,
+        estimation_window_s=SCANNER_HARMONIC_ESTIMATION_WINDOW_S,
+        familywise_error_rate=round_settings.familywise_error_rate / 2.0,
+    )
+    scanner_frequencies_hz, scanner_p_values = _thomson_f_p_values(
+        raw,
+        scanner_settings,
+    )
+    scanner_harmonics = detect_scanner_harmonics(
+        scanner_frequencies_hz,
+        scanner_p_values,
+        fundamental_hz=scanner_fundamental_hz(raw, settings),
+        familywise_error_rate=scanner_settings.familywise_error_rate,
+    )
+    scanner_plan = (
+        None
+        if scanner_harmonics is None
+        else _plan_scanner_harmonics_for_recording(raw, scanner_harmonics, round_settings)
+    )
+    return HarmonicRoundEvidence(model, plans, scanner_harmonics, scanner_plan)
+
+
+def _line_model_from_detection(raw, result) -> lines.LineModel:
+    """Attach recording channel identities to line detections."""
+    return lines.build_line_model(
         result,
         channel_names=eeg_channel_names(raw),
-        frequency_bin_width_hz=settings.frequency_bin_width_hz,
-        spectral_resolution_hz=settings.frequency_bin_width_hz,
-        familywise_error_rate=settings.familywise_error_rate,
     )
 
 
@@ -581,41 +959,32 @@ def clean_until_no_supported_lines(
     raw,
     settings: HarmonicNotchSettings,
 ) -> HarmonicCleaningResult:
-    """Apply recording-wide FIR rounds until a fresh channel Holm fit is null."""
-    return _clean_until_model_null(
-        raw,
-        settings,
-        lines.detect_lines_from_p_values,
-        _artifact_model_from_detection,
-    )
+    """Apply FIR rounds until line and trigger-anchored comb tests are null."""
+    return _clean_until_model_null(raw, settings)
 
 
-def _clean_until_model_null(raw, settings, detect, build_model) -> HarmonicCleaningResult:
-    """Iterate one injected detection/model strategy to its terminal null."""
+def _clean_until_model_null(raw, settings) -> HarmonicCleaningResult:
+    """Iterate line and scanner-comb evidence to their joint terminal null."""
     cleaned = raw.copy()
     rounds = []
-    tested_frequencies_hz = None
 
     while True:
         round_index = len(rounds) + 1
         round_settings = settings.for_round(round_index)
-        frequencies_hz, p_values = _thomson_f_p_values(cleaned, round_settings)
-        if tested_frequencies_hz is None:
-            tested_frequencies_hz = frequencies_hz
-        elif not np.array_equal(frequencies_hz, tested_frequencies_hz):
-            raise RuntimeError("The residual line-test frequency grid changed during cleaning.")
-
-        detection = detect(
-            frequencies_hz,
-            p_values,
-            familywise_error_rate=round_settings.familywise_error_rate,
+        evidence = fit_harmonic_round(
+            cleaned,
+            settings,
+            round_index=round_index,
         )
-        model = build_model(cleaned, detection, round_settings)
-        if not model.channels:
-            return HarmonicCleaningResult(cleaned, tuple(rounds), model)
+        if evidence.filter_plan is None:
+            return HarmonicCleaningResult(
+                cleaned,
+                tuple(rounds),
+                evidence.model,
+                evidence.scanner_harmonics,
+            )
 
-        plans = plan_channel_notches(model, round_settings)
-        filter_plan = recording_plan_from_channel_plans(plans)
+        filter_plan = evidence.filter_plan
         filtered = apply_harmonic_notches(cleaned, filter_plan)
         if np.array_equal(filtered.get_data(), cleaned.get_data()):
             raise RuntimeError(
@@ -624,11 +993,25 @@ def _clean_until_model_null(raw, settings, detect, build_model) -> HarmonicClean
         changes_db = _measure_channel_stopband_changes(
             cleaned,
             filtered,
-            plans,
+            evidence.plans,
             round_settings,
         )
+        if evidence.scanner_plan is not None:
+            changes_db += _measure_scanner_stopband_changes(
+                cleaned,
+                filtered,
+                evidence.scanner_plan,
+                round_settings,
+            )
         rounds.append(
-            HarmonicRemovalRound(model, plans, filter_plan, changes_db)
+            HarmonicRemovalRound(
+                evidence.model,
+                evidence.plans,
+                filter_plan,
+                changes_db,
+                evidence.scanner_harmonics,
+                evidence.scanner_plan,
+            )
         )
         cleaned = filtered
 
@@ -785,9 +1168,9 @@ def _band_availability_fields(
     }
 
 
-def artifact_manifest_rows(
+def line_manifest_rows(
     recording: str,
-    model: lines.ArtifactModel,
+    model: lines.LineModel,
     plans: Sequence[ChannelNotchPlan],
     analysed_bands: tuple[tuple[str, float, float], ...],
     settings: HarmonicNotchSettings,
@@ -801,7 +1184,7 @@ def artifact_manifest_rows(
         raise ValueError("Channel plans must cover exactly the affected EEG channels.")
     if not channel_plans:
         return [
-            _null_artifact_manifest_row(
+            _null_line_manifest_row(
                 recording,
                 model,
                 settings,
@@ -818,14 +1201,6 @@ def artifact_manifest_rows(
             analysed_bands,
         )
         assigned_positions = []
-        fundamental_hz: float | str = (
-            "" if channel.fundamental_hz is None else channel.fundamental_hz
-        )
-        comb_p_value: float | str = (
-            ""
-            if channel.comb_corrected_p_value is None
-            else channel.comb_corrected_p_value
-        )
         for row, stopband in zip(
             rows,
             channel_plan.geometry.stopbands,
@@ -843,12 +1218,12 @@ def artifact_manifest_rows(
             assigned_positions.extend(line.position_hz for line in supported)
             row.update(
                 {
-                    "outcome": "artifact_detected",
+                    "outcome": "line_detected",
                     "channel": channel.channel_name,
                     "detected_line_frequencies_hz": ";".join(
                         f"{line.position_hz:.17g}" for line in supported
                     ),
-                    "detected_line_raw_p_values": ";".join(
+                    "detected_line_input_p_values": ";".join(
                         f"{line.raw_p_value:.17g}" for line in supported
                     ),
                     "detected_line_corrected_p_values": ";".join(
@@ -858,19 +1233,20 @@ def artifact_manifest_rows(
                         ",".join(str(index) for index in line.window_indices)
                         for line in supported
                     ),
-                    "detected_line_harmonics": ";".join(
-                        "" if line.harmonic is None else str(line.harmonic)
-                        for line in supported
+                    "fundamental_hz": "",
+                    "scanner_family_corrected_p_value": "",
+                    "scanner_supporting_harmonics": "",
+                    "scanner_repetition_time_s": settings.scanner_repetition_time_s,
+                    "scanner_trigger_event_name": settings.scanner_trigger_event_name,
+                    "multiple_testing_method": _line_method_for_round(
+                        round_index
                     ),
-                    "fundamental_hz": fundamental_hz,
-                    "comb_corrected_p_value": comb_p_value,
-                    "multiple_testing_method": "holm",
                     "multiple_testing_scope": (
-                        "average_referenced_eeg_recording_removal_sequence"
+                        "as_recorded_non_bad_eeg_recording_removal_sequence"
                     ),
                     "familywise_error_rate": settings.familywise_error_rate,
                     "round_familywise_error_rate": (
-                        settings.error_rate_for_round(round_index)
+                        settings.error_rate_for_round(round_index) / 2.0
                     ),
                     "estimation_window_count": model.window_count,
                     "tested_eeg_channel_count": model.channel_count,
@@ -889,6 +1265,55 @@ def artifact_manifest_rows(
             )
         manifest_rows.extend(rows)
     return manifest_rows
+
+
+def scanner_harmonic_manifest_rows(
+    recording: str,
+    evidence: ScannerHarmonicEvidence,
+    plan: HarmonicNotchPlan,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+    settings: HarmonicNotchSettings,
+    *,
+    round_index: int,
+) -> list[dict[str, float | int | str]]:
+    """Attach prespecified scanner-harmonic evidence to its authorized plan."""
+    rows = harmonic_exclusion_rows(recording, plan, analysed_bands)
+    supporting = ";".join(str(value) for value in evidence.supporting_harmonics)
+    for row in rows:
+        row.update(
+            {
+                "outcome": "scanner_harmonics_detected",
+                "channel": "",
+                "detected_line_frequencies_hz": "",
+                "detected_line_input_p_values": "",
+                "detected_line_corrected_p_values": "",
+                "detected_line_window_indices": "",
+                "fundamental_hz": evidence.fundamental_hz,
+                "scanner_family_corrected_p_value": evidence.corrected_p_value,
+                "scanner_supporting_harmonics": supporting,
+                "scanner_repetition_time_s": settings.scanner_repetition_time_s,
+                "scanner_trigger_event_name": settings.scanner_trigger_event_name,
+                "multiple_testing_method": "bonferroni",
+                "multiple_testing_scope": (
+                    "trigger_prespecified_harmonics_across_windows_channels_and_recording"
+                ),
+                "familywise_error_rate": settings.familywise_error_rate,
+                "round_familywise_error_rate": (
+                    settings.error_rate_for_round(round_index) / 2.0
+                ),
+                "estimation_window_count": evidence.window_count,
+                "tested_eeg_channel_count": evidence.channel_count,
+                "detection_test_count_per_channel": (
+                    evidence.window_count * evidence.frequency_count
+                ),
+                "total_detection_test_count": (
+                    evidence.window_count
+                    * evidence.channel_count
+                    * evidence.frequency_count
+                ),
+            }
+        )
+    return rows
 
 
 def cleaning_manifest_rows(
@@ -918,14 +1343,29 @@ def cleaning_manifest_rows(
     )
     manifest_rows = []
     for round_index, removal_round in enumerate(result.rounds, start=1):
-        rows = artifact_manifest_rows(
-            recording,
-            removal_round.model,
-            removal_round.plans,
-            analysed_bands,
-            settings,
-            round_index=round_index,
-        )
+        rows = []
+        if removal_round.model.channels:
+            rows.extend(
+                line_manifest_rows(
+                    recording,
+                    removal_round.model,
+                    removal_round.plans,
+                    analysed_bands,
+                    settings,
+                    round_index=round_index,
+                )
+            )
+        if removal_round.scanner_harmonics is not None:
+            rows.extend(
+                scanner_harmonic_manifest_rows(
+                    recording,
+                    removal_round.scanner_harmonics,
+                    removal_round.scanner_plan,
+                    analysed_bands,
+                    settings,
+                    round_index=round_index,
+                )
+            )
         design = characterize_harmonic_filter(
             sampling_frequency_hz,
             removal_round.filter_plan,
@@ -941,7 +1381,7 @@ def cleaning_manifest_rows(
             row["in_stopband_change_db"] = change_db
         manifest_rows.extend(rows)
 
-    terminal_rows = artifact_manifest_rows(
+    terminal_rows = line_manifest_rows(
         recording,
         result.residual_model,
         (),
@@ -965,9 +1405,9 @@ def cleaning_manifest_rows(
     return manifest_rows
 
 
-def _null_artifact_manifest_row(
+def _null_line_manifest_row(
     recording: str,
-    model: lines.ArtifactModel,
+    model: lines.LineModel,
     settings: HarmonicNotchSettings,
     *,
     round_index: int,
@@ -975,7 +1415,7 @@ def _null_artifact_manifest_row(
     """Represent a valid null result without inventing filter geometry."""
     return {
         "recording": recording,
-        "outcome": "no_artifact_detected",
+        "outcome": "no_line_detected",
         "channel": "",
         "kind": "",
         "harmonics": "",
@@ -985,16 +1425,24 @@ def _null_artifact_manifest_row(
         "unavailable_high_hz": "",
         "transition_bandwidth_hz": "",
         "detected_line_frequencies_hz": "",
-        "detected_line_raw_p_values": "",
+        "detected_line_input_p_values": "",
         "detected_line_corrected_p_values": "",
         "detected_line_window_indices": "",
-        "detected_line_harmonics": "",
         "fundamental_hz": "",
-        "comb_corrected_p_value": "",
-        "multiple_testing_method": "holm",
-        "multiple_testing_scope": "average_referenced_eeg_recording_removal_sequence",
+        "scanner_family_corrected_p_value": "",
+        "scanner_supporting_harmonics": "",
+        "scanner_repetition_time_s": settings.scanner_repetition_time_s,
+        "scanner_trigger_event_name": settings.scanner_trigger_event_name,
+        "multiple_testing_method": (
+            f"{_line_method_for_round(round_index)}_and_scanner_bonferroni"
+        ),
+        "multiple_testing_scope": (
+            "joint_as_recorded_line_and_trigger_anchored_scanner_families"
+        ),
         "familywise_error_rate": settings.familywise_error_rate,
-        "round_familywise_error_rate": settings.error_rate_for_round(round_index),
+        "round_familywise_error_rate": (
+            settings.error_rate_for_round(round_index) / 2.0
+        ),
         "estimation_window_count": model.window_count,
         "tested_eeg_channel_count": model.channel_count,
         "detection_test_count_per_channel": model.test_count_per_channel,
@@ -1002,6 +1450,13 @@ def _null_artifact_manifest_row(
             model.test_count_per_channel * model.channel_count
         ),
     }
+
+
+def _line_method_for_round(round_index: int) -> str:
+    """Statistical line-shape family fitted at one pre-allocated round."""
+    if round_index == 1:
+        return "bonferroni_two_shape_union_then_holm"
+    return "holm"
 
 
 def harmonic_plan_from_rows(
@@ -1044,12 +1499,12 @@ def channel_plans_from_rows(
     if not rows:
         raise ValueError("A recording's line-notch manifest has no stopbands.")
     outcomes = {str(row["outcome"]) for row in rows}
-    if outcomes == {"no_artifact_detected"}:
+    if outcomes == {"no_line_detected"}:
         if len(rows) != 1:
             raise ValueError("A null recording must have exactly one manifest row.")
         return ()
-    if outcomes != {"artifact_detected"}:
-        raise ValueError("A recording cannot mix artifact and null manifest outcomes.")
+    if outcomes != {"line_detected"}:
+        raise ValueError("A recording cannot mix line and null manifest outcomes.")
     channels = []
     for row in rows:
         channel_name = str(row["channel"])
@@ -1094,14 +1549,26 @@ def removal_rounds_from_rows(
         outcomes = {str(row["outcome"]) for row in block}
         is_terminal = round_index == unique_rounds[-1]
         if is_terminal:
-            if outcomes != {"no_artifact_detected"} or len(block) != 1:
+            if outcomes != {"no_line_detected"} or len(block) != 1:
                 raise ValueError("The final removal round must be one terminal null row.")
             continue
-        if outcomes != {"artifact_detected"}:
-            raise ValueError("Every non-terminal removal round must contain an artifact.")
-        plan_rounds.append(
-            recording_plan_from_channel_plans(channel_plans_from_rows(block))
-        )
+        if not outcomes <= {"line_detected", "scanner_harmonics_detected"}:
+            raise ValueError(
+                "Every non-terminal removal round must contain line or scanner-comb "
+                "evidence."
+            )
+        geometries = []
+        line_rows = [row for row in block if str(row["outcome"]) == "line_detected"]
+        if line_rows:
+            geometries.extend(
+                plan.geometry for plan in channel_plans_from_rows(line_rows)
+            )
+        scanner_rows = [
+            row for row in block if str(row["outcome"]) == "scanner_harmonics_detected"
+        ]
+        if scanner_rows:
+            geometries.append(harmonic_plan_from_rows(scanner_rows))
+        plan_rounds.append(merge_recording_plans(tuple(geometries)))
     return tuple(plan_rounds)
 
 
@@ -1118,14 +1585,25 @@ def validate_residual_postcondition(
     settings,
     *,
     round_index: int = 1,
-) -> lines.ArtifactModel:
-    """Require no residual at the next pre-allocated sequential test level."""
-    residual_model = fit_harmonic_model(raw, settings, round_index=round_index)
+) -> lines.LineModel:
+    """Require a joint line and trigger-anchored null at the next test level."""
+    evidence = fit_harmonic_round(
+        raw,
+        settings,
+        round_index=round_index,
+    )
+    residual_model = evidence.model
     if residual_model.channels:
         raise RuntimeError(
             "The cleaned derivative contains "
             f"{residual_model.line_count} Holm-significant residual line(s) across "
             f"{len(residual_model.channels)} EEG channel(s)."
+        )
+
+    if evidence.scanner_harmonics is not None:
+        raise RuntimeError(
+            "The cleaned derivative contains a statistically authorized "
+            "trigger-anchored scanner-comb residual."
         )
     return residual_model
 
@@ -1225,6 +1703,41 @@ def _measure_channel_stopband_changes(
     )
 
 
+def _measure_scanner_stopband_changes(
+    raw_before,
+    raw_after,
+    plan: HarmonicNotchPlan,
+    settings: HarmonicNotchSettings,
+) -> tuple[float, ...]:
+    """Measure trigger-anchored stopbands in the equal-channel mean spectrum."""
+    import mne
+
+    picks = mne.pick_types(raw_before.info, eeg=True, exclude="bads")
+    frequencies_hz, before_psd = recordings.psd(raw_before, picks, settings)
+    after_frequencies_hz, after_psd = recordings.psd(raw_after, picks, settings)
+    if not np.array_equal(frequencies_hz, after_frequencies_hz):
+        raise ValueError("Before and after spectra use different frequency grids.")
+    before_mean = before_psd.mean(axis=0)
+    after_mean = after_psd.mean(axis=0)
+    return tuple(
+        _change_db(
+            band_power(
+                frequencies_hz,
+                before_mean,
+                stopband.low_hz,
+                stopband.high_hz,
+            ),
+            band_power(
+                frequencies_hz,
+                after_mean,
+                stopband.low_hz,
+                stopband.high_hz,
+            ),
+        )
+        for stopband in plan.stopbands
+    )
+
+
 def clean_harmonic_run(
     vhdr: Path,
     output_root: Path,
@@ -1318,31 +1831,51 @@ def write_harmonic_derivative_description(
             "Name": "decomb",
             "Version": __version__,
             "Description": (
-                "Thomson multitaper F tests identified sinusoidal components in the "
-                "common-average subspace of non-bad EEG channels, with Holm "
-                "family-wise correction across every non-bad EEG channel, continuous "
-                "estimation window, and tested frequency in the recording. A summable "
-                "alpha-spending sequence controlled adaptive removal rounds. Supported "
-                "components were "
+                "Complementary Thomson sinusoid and persistent narrowband-power tests "
+                "identified source components in the as-recorded non-bad EEG channels. "
+                "Their p-values were Bonferroni-combined before recording-family Holm "
+                "correction; residual rounds used Thomson tests because prior notches "
+                "shape local power. Each pre-allocated "
+                "round split its error rate equally between (1) Holm correction across "
+                "every channel, continuous estimation window, and tested frequency and "
+                "(2) a trigger-anchored scanner-harmonic test. The scanner test used the "
+                "configured TR and exact event name, Bonferroni-corrected each expected "
+                "harmonic across windows, channels, and the prespecified harmonic grid. "
+                "One supported harmonic authorized its local-background envelope; "
+                "at least two supported harmonics authorized that wider geometry at "
+                "supported teeth and narrow localization-width notches at every other "
+                "in-range tooth. A "
+                "summable alpha-spending sequence pre-allocated error rates across "
+                "adaptive removal rounds. Supported components were "
                 "merged into one recording plan and removed from every EEG channel with "
                 "zero-phase MNE FIR notches, then the "
-                "complete residual family was tested again with its pre-allocated Holm "
-                "correction. Filtering continued until a fresh Holm fit was null. "
-                "Harmonic classification never added an unobserved target. "
+                "complete residual families were tested again at their pre-allocated "
+                "rates. Filtering continued until both fresh tests were null. "
                 "Every removal round, stopband, transition, and terminal null is listed "
                 f"with its channel evidence in {MANIFEST_NAME}."
             ),
             "Parameters": {
-                "multiple_testing_method": "holm",
+                "multiple_testing_method": MULTIPLE_TESTING_METHOD,
                 "familywise_error_unit": (
-                    "average_referenced_eeg_recording_removal_sequence"
+                    "as_recorded_non_bad_eeg_recording_removal_sequence"
                 ),
-                "detection_reference": "common_average_of_non_bad_eeg_channels",
+                "detection_reference": "as_recorded_non_bad_eeg_channels",
                 "filter_scope": "all_eeg_channels",
                 "spatial_invariance": "identical_recording_plan_for_every_eeg_channel",
-                "convergence_rule": "fresh_holm_null",
-                "multiple_testing_scope": "recording_wide_alpha_spending_sequence",
+                "convergence_rule": "fresh_joint_line_and_scanner_harmonics_null",
+                "multiple_testing_scope": (
+                    "recording_wide_alpha_spending_split_equally_between_test_families"
+                ),
                 "alpha_spending_rule": settings.alpha_spending_rule,
+                "scanner_harmonics_estimation_window_s": (
+                    SCANNER_HARMONIC_ESTIMATION_WINDOW_S
+                ),
+                "scanner_harmonics_local_supporting_harmonics": 1,
+                "scanner_harmonics_complete_comb_supporting_harmonics": 2,
+                "scanner_harmonics_target_rule": (
+                    "one_supported_harmonic_targets_its_tooth_"
+                    "two_target_complete_comb"
+                ),
                 "library_versions": {
                     "mne": mne.__version__,
                     "numpy": np.__version__,
@@ -1362,6 +1895,15 @@ def write_harmonic_derivative_description(
                     for name, value in asdict(settings).items()
                 },
                 "frequency_bin_width_hz": settings.frequency_bin_width_hz,
+                "ordinary_line_stopband_width_hz": (
+                    settings.ordinary_line_stopband_width_hz
+                ),
+                "supported_scanner_harmonic_stopband_width_hz": (
+                    settings.supported_scanner_harmonic_stopband_width_hz
+                ),
+                "filter_resolution_window_s": (
+                    settings.filter_resolution_window_s
+                ),
                 "transition_bandwidth_hz": settings.transition_bandwidth_hz,
                 "per_edge_transition_bandwidth_hz": (
                     settings.per_edge_transition_bandwidth_hz
@@ -1411,6 +1953,12 @@ def settings_for_verification(
             frequency_range_hz=tuple(
                 float(value) for value in parameters["frequency_range_hz"]
             ),
+            scanner_repetition_time_s=float(
+                parameters["scanner_repetition_time_s"]
+            ),
+            scanner_trigger_event_name=str(
+                parameters["scanner_trigger_event_name"]
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
@@ -1418,14 +1966,25 @@ def settings_for_verification(
         ) from error
 
     expected_provenance = {
-        "multiple_testing_method": "holm",
-        "familywise_error_unit": "average_referenced_eeg_recording_removal_sequence",
-        "detection_reference": "common_average_of_non_bad_eeg_channels",
+        "multiple_testing_method": MULTIPLE_TESTING_METHOD,
+        "familywise_error_unit": "as_recorded_non_bad_eeg_recording_removal_sequence",
+        "detection_reference": "as_recorded_non_bad_eeg_channels",
         "filter_scope": "all_eeg_channels",
         "spatial_invariance": "identical_recording_plan_for_every_eeg_channel",
-        "convergence_rule": "fresh_holm_null",
-        "multiple_testing_scope": "recording_wide_alpha_spending_sequence",
+        "convergence_rule": "fresh_joint_line_and_scanner_harmonics_null",
+        "multiple_testing_scope": (
+            "recording_wide_alpha_spending_split_equally_between_test_families"
+        ),
         "alpha_spending_rule": applied_settings.alpha_spending_rule,
+        "scanner_harmonics_estimation_window_s": SCANNER_HARMONIC_ESTIMATION_WINDOW_S,
+        "scanner_harmonics_local_supporting_harmonics": 1,
+        "scanner_harmonics_complete_comb_supporting_harmonics": 2,
+        "scanner_harmonics_target_rule": (
+            "one_supported_harmonic_targets_its_tooth_two_target_complete_comb"
+        ),
+        "supported_scanner_harmonic_stopband_width_hz": (
+            applied_settings.supported_scanner_harmonic_stopband_width_hz
+        ),
         "library_versions": {
             "mne": mne.__version__,
             "numpy": np.__version__,
@@ -1439,6 +1998,12 @@ def settings_for_verification(
         "pad": FIR_PAD,
         "skip_by_annotation": list(recordings.ACQUISITION_BOUNDARY_ANNOTATIONS),
         "frequency_bin_width_hz": applied_settings.frequency_bin_width_hz,
+        "ordinary_line_stopband_width_hz": (
+            applied_settings.ordinary_line_stopband_width_hz
+        ),
+        "filter_resolution_window_s": (
+            applied_settings.filter_resolution_window_s
+        ),
         "transition_bandwidth_hz": applied_settings.transition_bandwidth_hz,
         "per_edge_transition_bandwidth_hz": (
             applied_settings.per_edge_transition_bandwidth_hz
@@ -1496,7 +2061,7 @@ def run(args: argparse.Namespace) -> None:
             f"Incomplete staging output exists at {staging}; inspect it before retrying."
         )
     staging.mkdir(parents=True)
-    print(f"Applying automatic line notches to {len(runs)} recordings")
+    print(f"Applying automatic line and scanner-comb notches to {len(runs)} recordings")
     print(f"  copied {recordings.mirror_sidecars(source_root, staging)} sidecars")
 
     rows: list[dict[str, float | str]] = []
@@ -1510,31 +2075,17 @@ def run(args: argparse.Namespace) -> None:
             analysed_bands,
         )
         rows.extend(measured)
-        artifact_rows = [
-            row for row in measured if row["outcome"] == "artifact_detected"
+        detected_rows = [
+            row for row in measured if row["outcome"] != "no_line_detected"
         ]
-        if not artifact_rows:
+        if not detected_rows:
             print(
                 f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
-                f"no supported line; copied unchanged "
+                f"no authorized line or scanner comb; copied unchanged "
                 f"({time.time() - started:.0f}s)"
             )
             continue
-        artifact_round_indices = sorted(
-            {int(row["removal_round"]) for row in artifact_rows}
-        )
-        filter_plans = [
-            recording_plan_from_channel_plans(
-                channel_plans_from_rows(
-                    [
-                        row
-                        for row in artifact_rows
-                        if int(row["removal_round"]) == round_index
-                    ]
-                )
-            )
-            for round_index in artifact_round_indices
-        ]
+        filter_plans = removal_rounds_from_rows(measured)
         filter_stopband_count = sum(
             len(plan.stopbands) for plan in filter_plans
         )
@@ -1545,7 +2096,7 @@ def run(args: argparse.Namespace) -> None:
         )
         median_change_db = float(
             np.median(
-                [float(row["in_stopband_change_db"]) for row in artifact_rows]
+                [float(row["in_stopband_change_db"]) for row in detected_rows]
             )
         )
         print(
@@ -1635,32 +2186,17 @@ def _validate_manifest_evidence(
         )
         _validate_round_manifest_evidence(block, settings)
 
-    count_fields = (
-        "estimation_window_count",
-        "tested_eeg_channel_count",
-        "detection_test_count_per_channel",
-        "total_detection_test_count",
-    )
-    if any(len({int(row[name]) for row in rows}) != 1 for name in count_fields):
-        raise ValueError("Every removal round must use the same hypothesis family.")
-
-
 def _validate_round_manifest_evidence(
     manifest_rows: Sequence[Mapping[str, object]],
     settings: HarmonicNotchSettings,
 ) -> None:
-    """Require one removal round to carry valid recording-family Holm evidence."""
+    """Require one round to carry valid line, scanner-comb, or joint-null evidence."""
     outcomes = {str(row["outcome"]) for row in manifest_rows}
-    if not outcomes <= {"artifact_detected", "no_artifact_detected"}:
+    allowed = {"line_detected", "scanner_harmonics_detected", "no_line_detected"}
+    if not outcomes <= allowed:
         raise ValueError("Manifest contains an unknown statistical outcome.")
-    if len(outcomes) != 1:
-        raise ValueError("A recording cannot mix artifact and null outcomes.")
-    methods = {str(row["multiple_testing_method"]) for row in manifest_rows}
-    if methods != {"holm"}:
-        raise ValueError("Manifest targets must use Holm multiple-testing correction.")
-    scopes = {str(row["multiple_testing_scope"]) for row in manifest_rows}
-    if scopes != {"average_referenced_eeg_recording_removal_sequence"}:
-        raise ValueError("Manifest targets must declare their sequential recording scope.")
+    if "no_line_detected" in outcomes and len(outcomes) != 1:
+        raise ValueError("A recording cannot mix detected and null outcomes.")
     error_rates = {float(row["familywise_error_rate"]) for row in manifest_rows}
     if error_rates != {settings.familywise_error_rate}:
         raise ValueError("Manifest family-wise error rate differs from apply settings.")
@@ -1672,7 +2208,10 @@ def _validate_round_manifest_evidence(
     }
     if len(round_indices) != 1:
         raise ValueError("A manifest block must contain one removal round.")
-    expected_round_error_rate = settings.error_rate_for_round(round_indices.pop())
+    round_index = round_indices.pop()
+    expected_round_error_rate = (
+        settings.error_rate_for_round(round_index) / 2.0
+    )
     round_error_rates = {
         float(row["round_familywise_error_rate"])
         for row in manifest_rows
@@ -1680,6 +2219,77 @@ def _validate_round_manifest_evidence(
     if round_error_rates != {expected_round_error_rate}:
         raise ValueError("Manifest round error rate does not match alpha spending.")
 
+    if outcomes == {"no_line_detected"}:
+        if len(manifest_rows) != 1:
+            raise ValueError("A null recording must have exactly one manifest row.")
+        row = manifest_rows[0]
+        expected_method = (
+            f"{_line_method_for_round(round_index)}_and_scanner_bonferroni"
+        )
+        if str(row["multiple_testing_method"]) != expected_method:
+            raise ValueError("A terminal null must record both statistical families.")
+        if str(row["multiple_testing_scope"]) != (
+            "joint_as_recorded_line_and_trigger_anchored_scanner_families"
+        ):
+            raise ValueError("A terminal null must declare its joint recording scope.")
+        _manifest_test_counts(manifest_rows)
+        null_fields = (
+            "channel",
+            "kind",
+            "harmonics",
+            "stopband_low_hz",
+            "stopband_high_hz",
+            "detected_line_frequencies_hz",
+            "detected_line_input_p_values",
+            "detected_line_corrected_p_values",
+            "detected_line_window_indices",
+            "fundamental_hz",
+            "scanner_family_corrected_p_value",
+            "scanner_supporting_harmonics",
+        )
+        if any(not _missing(row[name]) for name in null_fields):
+            raise ValueError("A null result cannot contain line or filter evidence.")
+        return
+
+    line_rows = tuple(
+        row for row in manifest_rows if str(row["outcome"]) == "line_detected"
+    )
+    if line_rows:
+        if {str(row["multiple_testing_method"]) for row in line_rows} != {
+            _line_method_for_round(round_index)
+        }:
+            raise ValueError("Line targets record the wrong shape-test correction.")
+        if {str(row["multiple_testing_scope"]) for row in line_rows} != {
+            "as_recorded_non_bad_eeg_recording_removal_sequence"
+        }:
+            raise ValueError("Line targets must declare their recording scope.")
+        counts = _manifest_test_counts(line_rows)
+        channel_names = [str(row["channel"]) for row in line_rows]
+        if any(not name.strip() for name in channel_names):
+            raise ValueError("Line-manifest channel names must not be empty.")
+        for channel_name in dict.fromkeys(channel_names):
+            channel_rows = [
+                row for row in line_rows if str(row["channel"]) == channel_name
+            ]
+            _validate_channel_manifest_evidence(channel_rows, settings, counts)
+
+    scanner_rows = tuple(
+        row
+        for row in manifest_rows
+        if str(row["outcome"]) == "scanner_harmonics_detected"
+    )
+    if scanner_rows:
+        _validate_scanner_harmonic_manifest_evidence(
+            scanner_rows,
+            settings,
+            expected_round_error_rate,
+        )
+
+
+def _manifest_test_counts(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, int]:
+    """Return one internally consistent positive hypothesis-family shape."""
     count_fields = (
         "estimation_window_count",
         "tested_eeg_channel_count",
@@ -1688,49 +2298,78 @@ def _validate_round_manifest_evidence(
     )
     counts = {}
     for name in count_fields:
-        values = {float(row[name]) for row in manifest_rows}
+        values = {float(row[name]) for row in rows}
         if len(values) != 1 or next(iter(values)) <= 0.0:
             raise ValueError(f"Manifest {name} must be one positive count.")
         if not next(iter(values)).is_integer():
             raise ValueError(f"Manifest {name} must be an integer.")
         counts[name] = int(next(iter(values)))
-    expected_total = (
+    if counts["total_detection_test_count"] != (
         counts["tested_eeg_channel_count"]
         * counts["detection_test_count_per_channel"]
-    )
-    if counts["total_detection_test_count"] != expected_total:
+    ):
         raise ValueError("Manifest total test count does not match its channel families.")
+    return counts
 
-    if outcomes == {"no_artifact_detected"}:
-        if len(manifest_rows) != 1:
-            raise ValueError("A null recording must have exactly one manifest row.")
-        row = manifest_rows[0]
-        null_fields = (
-            "channel",
-            "kind",
-            "harmonics",
-            "stopband_low_hz",
-            "stopband_high_hz",
-            "detected_line_frequencies_hz",
-            "detected_line_raw_p_values",
-            "detected_line_corrected_p_values",
-            "detected_line_window_indices",
-            "detected_line_harmonics",
-            "fundamental_hz",
-            "comb_corrected_p_value",
+
+def _validate_scanner_harmonic_manifest_evidence(
+    rows: Sequence[Mapping[str, object]],
+    settings: HarmonicNotchSettings,
+    round_error_rate: float,
+) -> None:
+    """Validate a trigger-prespecified harmonic family and its exact plan."""
+    if {str(row["multiple_testing_method"]) for row in rows} != {
+        "bonferroni"
+    }:
+        raise ValueError("Scanner-harmonic targets require Bonferroni correction.")
+    if {str(row["multiple_testing_scope"]) for row in rows} != {
+        "trigger_prespecified_harmonics_across_windows_channels_and_recording"
+    }:
+        raise ValueError(
+            "Scanner-harmonic targets must declare their trigger-prespecified scope."
         )
-        if any(not _missing(row[name]) for name in null_fields):
-            raise ValueError("A null result cannot contain line or filter evidence.")
-        return
-
-    channel_names = [str(row["channel"]) for row in manifest_rows]
-    if any(not name.strip() for name in channel_names):
-        raise ValueError("Manifest channel names must not be empty.")
-    for channel_name in dict.fromkeys(channel_names):
-        channel_rows = [
-            row for row in manifest_rows if str(row["channel"]) == channel_name
-        ]
-        _validate_channel_manifest_evidence(channel_rows, settings, counts)
+    _manifest_test_counts(rows)
+    if any(str(row["channel"]).strip() for row in rows):
+        raise ValueError(
+            "Scanner-harmonic evidence is recording-level, not channel-level."
+        )
+    if {float(row["scanner_repetition_time_s"]) for row in rows} != {
+        settings.scanner_repetition_time_s
+    } or {str(row["scanner_trigger_event_name"]) for row in rows} != {
+        settings.scanner_trigger_event_name
+    }:
+        raise ValueError("Manifest scanner timing differs from apply settings.")
+    fundamentals = {float(row["fundamental_hz"]) for row in rows}
+    if fundamentals != {1.0 / settings.scanner_repetition_time_s}:
+        raise ValueError("Manifest scanner fundamental does not equal one over the TR.")
+    p_values = {float(row["scanner_family_corrected_p_value"]) for row in rows}
+    if len(p_values) != 1 or not 0.0 <= next(iter(p_values)) < round_error_rate:
+        raise ValueError("Manifest scanner harmonics are not statistically supported.")
+    support = {
+        _semicolon_ints(row["scanner_supporting_harmonics"])
+        for row in rows
+    }
+    if len(support) != 1 or not next(iter(support)):
+        raise ValueError("Scanner-harmonic evidence requires supporting harmonics.")
+    supported_harmonics = next(iter(support))
+    planned = tuple(
+        harmonic for row in rows for harmonic in _semicolon_ints(row["harmonics"])
+    )
+    expected = (
+        tuple(range(min(planned), max(planned) + 1))
+        if len(supported_harmonics) >= 2
+        else supported_harmonics
+    )
+    if planned != expected:
+        raise ValueError("The scanner-harmonic plan does not match its evidence.")
+    empty_line_fields = (
+        "detected_line_frequencies_hz",
+        "detected_line_input_p_values",
+        "detected_line_corrected_p_values",
+        "detected_line_window_indices",
+    )
+    if any(not _missing(row[name]) for row in rows for name in empty_line_fields):
+        raise ValueError("Scanner-comb rows cannot claim individual line evidence.")
 
 
 def _validate_refitted_evidence(
@@ -1763,15 +2402,14 @@ def _authorization_records(
                 _optional_float(row["stopband_high_hz"]),
                 _optional_float(row["transition_bandwidth_hz"]),
                 frequencies_hz,
-                _semicolon_floats(row["detected_line_raw_p_values"]),
+                _semicolon_floats(row["detected_line_input_p_values"]),
                 _semicolon_floats(row["detected_line_corrected_p_values"]),
                 _window_index_groups(row["detected_line_window_indices"]),
-                _line_harmonics(
-                    row["detected_line_harmonics"],
-                    len(frequencies_hz),
-                ),
                 _optional_float(row["fundamental_hz"]),
-                _optional_float(row["comb_corrected_p_value"]),
+                _optional_float(row["scanner_family_corrected_p_value"]),
+                _semicolon_ints(row["scanner_supporting_harmonics"]),
+                float(row["scanner_repetition_time_s"]),
+                _text(row["scanner_trigger_event_name"]),
                 _text(row["multiple_testing_method"]),
                 _text(row["multiple_testing_scope"]),
                 float(row["familywise_error_rate"]),
@@ -1791,36 +2429,26 @@ def _validate_channel_manifest_evidence(
     counts: Mapping[str, int],
 ) -> None:
     """Validate one affected channel's model and line evidence."""
+    if any(
+        not _missing(row[field])
+        for row in rows
+        for field in (
+            "scanner_family_corrected_p_value",
+            "scanner_supporting_harmonics",
+        )
+    ):
+        raise ValueError("Channel-line rows cannot claim scanner-harmonic evidence.")
     round_error_rates = {float(row["round_familywise_error_rate"]) for row in rows}
     if len(round_error_rates) != 1:
         raise ValueError("Manifest channel evidence must use one round error rate.")
     round_error_rate = round_error_rates.pop()
-    fundamentals = {
-        None if _missing(row["fundamental_hz"]) else float(row["fundamental_hz"])
-        for row in rows
-    }
-    comb_p_values = {
-        None
-        if _missing(row["comb_corrected_p_value"])
-        else float(row["comb_corrected_p_value"])
-        for row in rows
-    }
-    if len(fundamentals) != 1 or len(comb_p_values) != 1:
-        raise ValueError("Manifest comb evidence must be channel-level and consistent.")
-    fundamental_hz = fundamentals.pop()
-    comb_p_value = comb_p_values.pop()
-    if (fundamental_hz is None) != (comb_p_value is None):
-        raise ValueError("Manifest comb fundamental and corrected p-value must occur together.")
-    if fundamental_hz is not None:
-        if not np.isfinite(fundamental_hz) or fundamental_hz <= 0.0:
-            raise ValueError("Manifest comb fundamental must be finite and positive.")
-        if not 0.0 <= comb_p_value < round_error_rate:
-            raise ValueError("Manifest comb is not statistically supported.")
+    if any(not _missing(row["fundamental_hz"]) for row in rows):
+        raise ValueError("Ordinary line rows cannot claim a scanner fundamental.")
 
     positions = []
     for row in rows:
         frequencies_hz = _semicolon_floats(row["detected_line_frequencies_hz"])
-        raw_p_values = _semicolon_floats(row["detected_line_raw_p_values"])
+        raw_p_values = _semicolon_floats(row["detected_line_input_p_values"])
         corrected_p_values = _semicolon_floats(
             row["detected_line_corrected_p_values"]
         )
@@ -1847,7 +2475,9 @@ def _validate_channel_manifest_evidence(
             if not low_hz <= frequency_hz <= high_hz:
                 raise ValueError("Every detected line must lie inside its stopband.")
             if not 0.0 <= raw_p_value <= corrected_p_value:
-                raise ValueError("Manifest raw and Holm-adjusted p-values are invalid.")
+                raise ValueError(
+                    "Manifest Holm-input and adjusted p-values are invalid."
+                )
             if corrected_p_value >= round_error_rate:
                 raise ValueError("Every filtered line must be statistically supported.")
             window_indices = tuple(int(value) for value in window_group.split(","))
@@ -1888,21 +2518,6 @@ def _window_index_groups(value: object) -> tuple[tuple[int, ...], ...]:
         tuple(int(index) for index in group.split(","))
         for group in str(value).split(";")
     )
-
-
-def _line_harmonics(
-    value: object,
-    line_count: int,
-) -> tuple[int | None, ...]:
-    if _missing(value):
-        return tuple(None for _ in range(line_count))
-    labels = tuple(
-        None if entry == "" else int(float(entry))
-        for entry in str(value).split(";")
-    )
-    if len(labels) != line_count:
-        raise ValueError("Manifest harmonic labels must match detected lines.")
-    return labels
 
 
 def _semicolon_floats(value: object) -> tuple[float, ...]:
@@ -1965,28 +2580,57 @@ def verify_harmonic_run(
     sampling_frequency_hz = float(original.info["sfreq"])
     for round_index in round_indices:
         block = tuple(row for index, row in indexed_rows if index == round_index)
-        refitted_model = fit_harmonic_model(
+        round_settings = settings.for_round(round_index)
+        evidence = fit_harmonic_round(
             current,
             settings,
             round_index=round_index,
         )
-        refitted_plans = plan_channel_notches(refitted_model, settings)
-        refitted_rows = artifact_manifest_rows(
-            source_vhdr.stem,
-            refitted_model,
-            refitted_plans,
-            (),
-            settings,
-            round_index=round_index,
-        )
+        refitted_model = evidence.model
+        refitted_plans = evidence.plans
+        scanner_harmonics = evidence.scanner_harmonics
+        scanner_plan = evidence.scanner_plan
+
+        refitted_rows = []
+        if refitted_plans:
+            refitted_rows.extend(
+                line_manifest_rows(
+                    source_vhdr.stem,
+                    refitted_model,
+                    refitted_plans,
+                    (),
+                    settings,
+                    round_index=round_index,
+                )
+            )
+        if scanner_harmonics is not None:
+            refitted_rows.extend(
+                scanner_harmonic_manifest_rows(
+                    source_vhdr.stem,
+                    scanner_harmonics,
+                    scanner_plan,
+                    (),
+                    settings,
+                    round_index=round_index,
+                )
+            )
+        if not refitted_rows:
+            refitted_rows = line_manifest_rows(
+                source_vhdr.stem,
+                refitted_model,
+                (),
+                (),
+                settings,
+                round_index=round_index,
+            )
         _validate_refitted_evidence(block, refitted_rows)
 
-        if not refitted_plans:
+        if not refitted_plans and scanner_plan is None:
             verification_rows.append(
                 {
                     "recording": source_vhdr.stem,
                     "removal_round": round_index,
-                    "outcome": "no_artifact_detected",
+                    "outcome": "no_line_detected",
                     "channel": "",
                     "kind": "",
                     "harmonics": "",
@@ -1999,7 +2643,10 @@ def verify_harmonic_run(
             )
             continue
 
-        filter_plan = recording_plan_from_channel_plans(refitted_plans)
+        geometries = tuple(plan.geometry for plan in refitted_plans)
+        if scanner_plan is not None:
+            geometries = (*geometries, scanner_plan)
+        filter_plan = merge_recording_plans(geometries)
         design = characterize_harmonic_filter(
             sampling_frequency_hz,
             filter_plan,
@@ -2011,8 +2658,15 @@ def verify_harmonic_run(
             current,
             filtered,
             refitted_plans,
-            settings,
+            round_settings,
         )
+        if scanner_plan is not None:
+            changes_db += _measure_scanner_stopband_changes(
+                current,
+                filtered,
+                scanner_plan,
+                round_settings,
+            )
         change_index = 0
         for channel_plan in refitted_plans:
             for stopband, unavailable in zip(
@@ -2024,8 +2678,32 @@ def verify_harmonic_run(
                     {
                         "recording": source_vhdr.stem,
                         "removal_round": round_index,
-                        "outcome": "artifact_detected",
+                        "outcome": "line_detected",
                         "channel": channel_plan.channel_name,
+                        "kind": stopband.kind,
+                        "harmonics": ";".join(
+                            str(value) for value in stopband.harmonics
+                        ),
+                        "stopband_low_hz": stopband.low_hz,
+                        "stopband_high_hz": stopband.high_hz,
+                        "unavailable_low_hz": unavailable[0],
+                        "unavailable_high_hz": unavailable[1],
+                        "verified_stopband_change_db": changes_db[change_index],
+                    }
+                )
+                change_index += 1
+        if scanner_plan is not None:
+            for stopband, unavailable in zip(
+                scanner_plan.stopbands,
+                scanner_plan.unavailable_edges(),
+                strict=True,
+            ):
+                verification_rows.append(
+                    {
+                        "recording": source_vhdr.stem,
+                        "removal_round": round_index,
+                        "outcome": "scanner_harmonics_detected",
+                        "channel": "",
                         "kind": stopband.kind,
                         "harmonics": ";".join(
                             str(value) for value in stopband.harmonics
@@ -2057,6 +2735,16 @@ def verify_harmonic_run(
     return verification_rows
 
 
+def _read_manifest(path: Path) -> pd.DataFrame:
+    """Read an authored manifest without converting empty fields to NaN."""
+    return pd.read_csv(
+        path,
+        sep="\t",
+        float_precision="round_trip",
+        keep_default_na=False,
+    )
+
+
 def run_verify(args: argparse.Namespace) -> None:
     """Refit and audit the written converged line-notch derivative."""
     from decomb import effective
@@ -2074,7 +2762,7 @@ def run_verify(args: argparse.Namespace) -> None:
         raise FileNotFoundError(
             f"No line-notch manifest at {manifest_path}. Run `decomb apply` first."
         )
-    manifest = pd.read_csv(manifest_path, sep="\t", float_precision="round_trip")
+    manifest = _read_manifest(manifest_path)
     required = {
         "recording",
         "removal_round",
@@ -2083,12 +2771,14 @@ def run_verify(args: argparse.Namespace) -> None:
         "kind",
         "harmonics",
         "fundamental_hz",
-        "comb_corrected_p_value",
+        "scanner_family_corrected_p_value",
+        "scanner_supporting_harmonics",
+        "scanner_repetition_time_s",
+        "scanner_trigger_event_name",
         "detected_line_frequencies_hz",
-        "detected_line_raw_p_values",
+        "detected_line_input_p_values",
         "detected_line_corrected_p_values",
         "detected_line_window_indices",
-        "detected_line_harmonics",
         "multiple_testing_method",
         "multiple_testing_scope",
         "familywise_error_rate",

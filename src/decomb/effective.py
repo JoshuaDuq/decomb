@@ -22,14 +22,30 @@ from decomb.config import DecombConfig
 #: each. These appear in no config file, so without this they are invisible to a reader.
 DERIVED: tuple[tuple[str, str], ...] = (
     (
+        "removal.filter_resolution_window_s",
+        "fixed 54 s reference for selective MNE Hamming FIR transitions",
+    ),
+    (
         "removal.transition_bandwidth_hz",
-        "total notch transition: 3.3 / estimation_window_s",
+        "total notch transition: 3.3 / filter_resolution_window_s",
     ),
     (
         "removal.per_edge_transition_bandwidth_hz",
         "transition_bandwidth_hz / 2; MNE FIR length uses this width",
     ),
     ("removal.frequency_bin_width_hz", "1 / estimation_window_s"),
+    (
+        "removal.ordinary_line_stopband_width_hz",
+        "max(frequency_bin_width_hz, scanner_harmonics_stopband_width_hz)",
+    ),
+    (
+        "removal.scanner_harmonics_stopband_width_hz",
+        "1 / fixed 4 s scanner-comb localization horizon",
+    ),
+    (
+        "removal.supported_scanner_harmonic_stopband_width_hz",
+        "scanner_harmonics_stopband_width_hz + 2 * fixed 1 Hz local background",
+    ),
     (
         "removal.alpha_spending_rule",
         "familywise alpha / (round * (round + 1))",
