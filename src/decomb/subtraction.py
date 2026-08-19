@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from decomb import recovery
+from decomb import notch, recovery
 
 
 def authorized_frequencies(evidence, settings) -> tuple[float, ...]:
@@ -47,6 +47,38 @@ class SubtractionRecord:
     frequencies_hz: tuple[float, ...]
     window_s: float
 
+    def manifest_rows(
+        self,
+        recording: str,
+        analysed_bands: tuple[tuple[str, float, float], ...],
+        settings,
+    ) -> list[dict[str, float | str]]:
+        """One row per merged interval, in the same contract as a stopband."""
+        intervals = damage_intervals(self.frequencies_hz, settings)
+        shares = notch.band_availability_from_intervals(intervals, analysed_bands)
+        rows = []
+        for low_hz, high_hz in intervals:
+            covered = [
+                frequency
+                for frequency in self.frequencies_hz
+                if low_hz <= frequency <= high_hz
+            ]
+            rows.append(
+                {
+                    **_inapplicable_manifest_fields(settings),
+                    "recording": recording,
+                    "kind": "subtracted",
+                    "subtracted_frequencies_hz": ";".join(
+                        str(frequency) for frequency in covered
+                    ),
+                    "recovery_window_s": self.window_s,
+                    "unavailable_low_hz": low_hz,
+                    "unavailable_high_hz": high_hz,
+                    **shares,
+                }
+            )
+        return rows
+
 
 def subtract_authorized(raw, evidence, settings, *, n_jobs: int = -1):
     """Fit and remove every authorized frequency, returning the record."""
@@ -67,3 +99,14 @@ def subtract_authorized(raw, evidence, settings, *, n_jobs: int = -1):
     cleaned = raw.copy()
     cleaned._data[picks] = result.cleaned_data
     return cleaned, record
+
+
+def _inapplicable_manifest_fields(settings) -> dict[str, float | str]:
+    """Every manifest column a subtraction row must carry but does not populate."""
+    fields = dict.fromkeys(notch.MANIFEST_REQUIRED_COLUMNS, "")
+    fields["outcome"] = "line_subtracted"
+    fields["scanner_repetition_time_s"] = settings.scanner_repetition_time_s
+    fields["scanner_trigger_event_name"] = settings.scanner_trigger_event_name
+    fields["familywise_error_rate"] = settings.familywise_error_rate
+    fields["in_stopband_change_db"] = ""
+    return fields

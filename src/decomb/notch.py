@@ -29,6 +29,40 @@ MULTIPLE_TESTING_METHOD = (
 )
 SCANNER_HARMONIC_ESTIMATION_WINDOW_S = 4.0
 VERIFICATION_NAME = "line_notch_verification.tsv"
+MANIFEST_REQUIRED_COLUMNS = frozenset(
+    {
+        "recording",
+        "removal_round",
+        "outcome",
+        "channel",
+        "kind",
+        "harmonics",
+        "fundamental_hz",
+        "scanner_family_corrected_p_value",
+        "scanner_supporting_harmonics",
+        "scanner_repetition_time_s",
+        "scanner_trigger_event_name",
+        "detected_line_frequencies_hz",
+        "detected_line_input_p_values",
+        "detected_line_corrected_p_values",
+        "detected_line_window_indices",
+        "multiple_testing_method",
+        "multiple_testing_scope",
+        "familywise_error_rate",
+        "round_familywise_error_rate",
+        "estimation_window_count",
+        "tested_eeg_channel_count",
+        "detection_test_count_per_channel",
+        "total_detection_test_count",
+        "stopband_low_hz",
+        "stopband_high_hz",
+        "transition_bandwidth_hz",
+        "fir_filter_length_samples",
+        "fir_filter_length_s",
+        "fir_minimum_stopband_attenuation_db",
+        "fir_maximum_passband_deviation_db",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -2804,39 +2838,7 @@ def run_verify(args: argparse.Namespace) -> None:
             f"No line-notch manifest at {manifest_path}. Run `decomb apply` first."
         )
     manifest = _read_manifest(manifest_path)
-    required = {
-        "recording",
-        "removal_round",
-        "outcome",
-        "channel",
-        "kind",
-        "harmonics",
-        "fundamental_hz",
-        "scanner_family_corrected_p_value",
-        "scanner_supporting_harmonics",
-        "scanner_repetition_time_s",
-        "scanner_trigger_event_name",
-        "detected_line_frequencies_hz",
-        "detected_line_input_p_values",
-        "detected_line_corrected_p_values",
-        "detected_line_window_indices",
-        "multiple_testing_method",
-        "multiple_testing_scope",
-        "familywise_error_rate",
-        "round_familywise_error_rate",
-        "estimation_window_count",
-        "tested_eeg_channel_count",
-        "detection_test_count_per_channel",
-        "total_detection_test_count",
-        "stopband_low_hz",
-        "stopband_high_hz",
-        "transition_bandwidth_hz",
-        "fir_filter_length_samples",
-        "fir_filter_length_s",
-        "fir_minimum_stopband_attenuation_db",
-        "fir_maximum_passband_deviation_db",
-    }
-    missing = required - set(manifest.columns)
+    missing = MANIFEST_REQUIRED_COLUMNS - set(manifest.columns)
     if missing:
         raise ValueError(f"Line-notch manifest is missing columns: {sorted(missing)}")
     recording_names = {vhdr.stem for vhdr in runs}

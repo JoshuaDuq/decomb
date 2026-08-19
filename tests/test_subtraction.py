@@ -105,3 +105,30 @@ def test_subtraction_removes_the_authorized_frequency_from_the_data():
     assert record.frequencies_hz == (40.0,)
     assert record.window_s == settings.estimation_window_s
     assert np.abs(cleaned.get_data()).max() < 0.2 * np.abs(raw.get_data()).max()
+
+
+def test_subtraction_manifest_rows_declare_unavailable_bandwidth():
+    settings = _settings()
+    half = 2.0 * settings.frequency_bin_width_hz
+    record = subtraction.SubtractionRecord((40.0,), settings.estimation_window_s)
+
+    rows = record.manifest_rows("sub-0001_run-1_eeg", BANDS, settings)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "subtracted"
+    assert row["recording"] == "sub-0001_run-1_eeg"
+    assert row["subtracted_frequencies_hz"] == "40.0"
+    assert row["unavailable_low_hz"] == pytest.approx(40.0 - half)
+    assert row["unavailable_high_hz"] == pytest.approx(40.0 + half)
+    assert row["gamma_unavailable_share"] == pytest.approx(2.0 * half / (80.0 - 30.1))
+    assert row["beta_unavailable_share"] == 0.0
+
+
+def test_subtraction_manifest_rows_carry_every_required_manifest_column():
+    settings = _settings()
+    record = subtraction.SubtractionRecord((40.0,), settings.estimation_window_s)
+
+    row = record.manifest_rows("sub-0001_run-1_eeg", BANDS, settings)[0]
+
+    assert notch.MANIFEST_REQUIRED_COLUMNS <= set(row)
