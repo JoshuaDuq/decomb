@@ -1170,27 +1170,34 @@ def harmonic_exclusion_rows(
     return rows
 
 
-def _band_availability_fields(
-    plan: HarmonicNotchPlan,
+def band_availability_from_intervals(
+    intervals: Sequence[tuple[float, float]],
     analysed_bands: tuple[tuple[str, float, float], ...],
 ) -> dict[str, float]:
-    """Return recording-wide unavailable and retained shares for each study band."""
-    unavailable_edges = plan.unavailable_edges()
-    unavailable_shares = {
+    """Unavailable and retained shares per study band, from bare intervals."""
+    shares = {
         name: sum(
-            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in unavailable_edges
+            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in intervals
         )
         / (high_hz - low_hz)
         for name, low_hz, high_hz in analysed_bands
     }
     return {
         field: value
-        for name, share in unavailable_shares.items()
+        for name, share in shares.items()
         for field, value in (
             (f"{name}_unavailable_share", share),
             (f"{name}_retained_share", 1.0 - share),
         )
     }
+
+
+def _band_availability_fields(
+    plan: HarmonicNotchPlan,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+) -> dict[str, float]:
+    """Recording-wide unavailable and retained shares for each study band."""
+    return band_availability_from_intervals(plan.unavailable_edges(), analysed_bands)
 
 
 def line_manifest_rows(
