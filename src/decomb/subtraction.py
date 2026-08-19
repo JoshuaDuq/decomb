@@ -120,3 +120,14 @@ def subtraction_rows(rows: Sequence[dict]) -> list[dict]:
 def notch_rows(rows: Sequence[dict]) -> list[dict]:
     """The FIR-cascade rows of a manifest, which alone declare removal rounds."""
     return [row for row in rows if str(row.get("kind", "")) != "subtracted"]
+
+
+def recorded_frequencies(rows: Sequence[dict]) -> tuple[float, ...]:
+    """Every frequency a manifest's subtraction rows say was removed."""
+    frequencies = [
+        float(value)
+        for row in rows
+        for value in str(row["subtracted_frequencies_hz"]).split(";")
+        if value
+    ]
+    return tuple(sorted(set(frequencies)))

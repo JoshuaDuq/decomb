@@ -2649,26 +2649,71 @@ def _validate_exact_derivative(
     )
 
 
+def _replay_recorded_subtraction(original, subtracted_rows, settings):
+    """Reproduce apply's subtraction, requiring the source to authorize exactly it."""
+    from decomb import subtraction
+
+    if not subtracted_rows:
+        return original
+    recorded = subtraction.recorded_frequencies(subtracted_rows)
+    evidence = fit_harmonic_round(original, settings, round_index=1)
+    if recorded != subtraction.authorized_frequencies(evidence, settings):
+        raise ValueError(
+            "Manifest subtracted frequencies do not equal the frequencies the "
+            "source's round-one evidence authorizes subtracting."
+        )
+    recovered, _ = subtraction.subtract_authorized(original, evidence, settings)
+    return recovered
+
+
+def _subtraction_verification_rows(
+    recording: str,
+    subtracted_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, float | str]]:
+    """Declare each replayed subtraction interval alongside the verified stopbands."""
+    return [
+        {
+            "recording": recording,
+            "removal_round": "",
+            "outcome": "line_subtracted",
+            "channel": "",
+            "kind": "subtracted",
+            "harmonics": "",
+            "stopband_low_hz": "",
+            "stopband_high_hz": "",
+            "unavailable_low_hz": row["unavailable_low_hz"],
+            "unavailable_high_hz": row["unavailable_high_hz"],
+            "verified_stopband_change_db": "",
+        }
+        for row in subtracted_rows
+    ]
+
+
 def verify_harmonic_run(
     source_vhdr: Path,
     cleaned_vhdr: Path,
     manifest_rows: Sequence[Mapping[str, object]],
     settings,
 ) -> list[dict[str, float | str]]:
-    """Refit and replay every removal round, including the terminal null."""
+    """Refit and replay the subtraction and every removal round, including the null."""
+    from decomb import subtraction
+
     original = recordings.read_bids_raw(source_vhdr)
     cleaned = recordings.read_bids_raw(cleaned_vhdr)
     _validate_matching_recordings(original, cleaned)
-    _validate_manifest_evidence(manifest_rows, settings)
+    subtracted_rows = subtraction.subtraction_rows(manifest_rows)
+    cascade_rows = subtraction.notch_rows(manifest_rows)
+    _validate_manifest_evidence(cascade_rows, settings)
 
+    source = _replay_recorded_subtraction(original, subtracted_rows, settings)
     indexed_rows = tuple(
         (int(row["removal_round"]), row)
-        for row in manifest_rows
+        for row in cascade_rows
     )
     round_indices = tuple(sorted({index for index, _ in indexed_rows}))
-    current = original
+    current = source
     plan_rounds = []
-    verification_rows = []
+    verification_rows = _subtraction_verification_rows(source_vhdr.stem, subtracted_rows)
     sampling_frequency_hz = float(original.info["sfreq"])
     for round_index in round_indices:
         block = tuple(row for index, row in indexed_rows if index == round_index)
@@ -2812,7 +2857,7 @@ def verify_harmonic_run(
         current = filtered
 
     maximum_sample_deviation_v = _validate_exact_derivative(
-        original,
+        source,
         cleaned,
         cleaned_vhdr,
         plan_rounds,

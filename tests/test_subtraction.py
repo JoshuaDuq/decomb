@@ -134,14 +134,25 @@ def test_subtraction_manifest_rows_carry_every_required_manifest_column():
     assert notch.MANIFEST_REQUIRED_COLUMNS <= set(row)
 
 
-def _synthetic_bids_recording(tmp_path):
+def _drifting_line(times):
+    """A line that sweeps a whole bin, so subtraction at one bin leaves a residual."""
+    phase = 2 * np.pi * (60.0 * times + 0.5 * times**2 / times[-1])
+    return np.vstack([np.sin(phase)] * 2) * 1e-6
+
+
+def _stationary_line(times):
+    """A line that holds still, which subtraction removes outright."""
+    return np.vstack([np.sin(2 * np.pi * 40.0 * times)] * 2) * 1e-6
+
+
+def _synthetic_bids_recording(tmp_path, make_line=_drifting_line):
     import mne
     from mne_bids import BIDSPath, write_raw_bids
 
     sfreq = 200.0
     duration_s = 180.0
     times = np.arange(0, duration_s, 1.0 / sfreq)
-    data = np.vstack([np.sin(2 * np.pi * 40.0 * times)] * 2) * 1e-6
+    data = make_line(times)
     data += np.random.default_rng(0).normal(scale=1e-7, size=data.shape)
     raw = mne.io.RawArray(
         data, mne.create_info(["C3", "C4"], sfreq, "eeg"), verbose="ERROR"
@@ -164,6 +175,14 @@ def _synthetic_bids_recording(tmp_path):
     )
     write_raw_bids(raw, path, format="BrainVision", allow_preload=True, verbose="ERROR")
     return root, path.fpath
+
+
+def _fir_round_indices(rows) -> set[int]:
+    return {
+        int(row["removal_round"])
+        for row in subtraction.notch_rows(rows)
+        if str(row["outcome"]) != "no_line_detected"
+    }
 
 
 def test_clean_harmonic_run_emits_subtracted_rows(monkeypatch, tmp_path):
@@ -207,10 +226,10 @@ def test_replayed_subtraction_reproduces_the_recorded_frequencies():
     )
 
 
-def _apply_to_synthetic_recording(tmp_path):
+def _apply_to_synthetic_recording(tmp_path, make_line=_drifting_line):
     from decomb import recordings
 
-    source_root, vhdr = _synthetic_bids_recording(tmp_path)
+    source_root, vhdr = _synthetic_bids_recording(tmp_path, make_line)
     output_root = tmp_path / "out"
     recordings.mirror_sidecars(source_root, output_root)
     rows = notch.clean_harmonic_run(
@@ -224,10 +243,35 @@ def test_verify_replays_subtraction_and_the_fir_cascade(tmp_path):
     vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
 
     assert subtraction.subtraction_rows(rows)
+    assert _fir_round_indices(rows), "fixture must leave a residual line for the FIR"
 
     verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
 
     assert verified
+
+
+def test_verify_replays_a_subtraction_that_leaves_no_residual_line(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path, _stationary_line)
+
+    assert subtraction.subtraction_rows(rows)
+    assert not _fir_round_indices(rows)
+
+    assert notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
+
+
+def test_verify_rejects_a_derivative_the_replayed_chain_does_not_reproduce(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
+    from decomb import recordings
+
+    written = recordings.read_bids_raw(cleaned_vhdr)
+    tampered_data = written.get_data()
+    tampered_data[0, :100] += 5e-6
+    recordings.write_eeg_binary(
+        cleaned_vhdr, cleaned_vhdr.with_suffix(".eeg"), tampered_data, written.ch_names
+    )
+
+    with pytest.raises(RuntimeError, match="does not equal the declared"):
+        notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
 
 
 def test_verify_rejects_a_manifest_whose_subtraction_is_unauthorized(tmp_path):
