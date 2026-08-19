@@ -242,7 +242,7 @@ def test_sequential_authorization_includes_trigger_anchored_comb_targets():
             ),
         )
     )
-    spec = injection.SinusoidInjection("stationary", 3.0, 1e-6)
+    spec = injection.SinusoidInjection("stationary", 2.0, 1e-6)
 
     supported, unsupported = validation.sequential_authorization_outcomes(
         cleaning,

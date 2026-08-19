@@ -49,7 +49,7 @@ def test_diagnosis_reports_trigger_anchored_scanner_harmonics(monkeypatch):
 
     assert result.model_row["scanner_harmonics_authorized"] == 1
     assert result.model_row["scanner_supporting_harmonics"] == "2;4"
-    assert result.model_row["n_scanner_plan_harmonics"] == 5
+    assert result.model_row["n_scanner_plan_harmonics"] == 2
     assert {row["outcome"] for row in result.stopband_rows} == {
         "scanner_harmonics_detected"
     }

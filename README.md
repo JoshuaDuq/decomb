@@ -156,11 +156,11 @@ The scanner family is fixed before the spectrum is inspected. Its fundamental is
 `1 / TR`, after the configured event sequence passes the timing check above. A separate
 4-second Thomson fit evaluates the nearest Fourier bin to each in-range integer harmonic.
 Each harmonic is Bonferroni-corrected across its windows, channels, and the prespecified
-harmonic grid. One supported harmonic authorizes only its 2.25 Hz local-background
-envelope: the 0.25 Hz localization width plus the fixed 1 Hz neighborhood on each side.
-At least two supported harmonics authorize that wider envelope at supported teeth and a
-0.25 Hz notch at every other trigger-anchored harmonic in the recording's study range.
-No unconfigured or data-inferred fundamental can authorize either plan.
+harmonic grid. Each supported harmonic authorizes only its own 2.25 Hz
+local-background envelope: the 0.25 Hz localization width plus the fixed 1 Hz
+neighborhood on each side. Support at one tooth is never extrapolated to another: a tooth
+that fails its own test is left in place, however many of its neighbors passed.
+No unconfigured or data-inferred fundamental can authorize the plan.
 
 The summable allocation bounds the nominal error budgets made available to the rounds.
 It does not by itself prove exact post-selection null behavior after earlier
@@ -182,8 +182,8 @@ expanded by 0.125 Hz on each side. Its minimum 0.25 Hz width removes the visible
 structure represented by an authorized line; a coarser configured Fourier bin makes the
 minimum correspondingly wider. A statistically supported scanner harmonic uses the
 2.25 Hz envelope above so its visible skirts are not left beside a deep central notch.
-When replicated support authorizes the complete comb, all other prespecified teeth use
-the 0.25 Hz localization width. Stopbands are merged only when their FIR transitions
+A prespecified tooth that carries no support of its own is not
+notched at all. Stopbands are merged only when their FIR transitions
 would overlap. Other unsupported frequencies stay in the passband.
 
 The total transition bandwidth is fixed at `3.3 / 54 = 0.061111` Hz. MNE assigns half
