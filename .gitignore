@@ -69,3 +69,6 @@ scratch/
 /probe_*.py
 /run_pipeline.sh
 /run_trials.sh
+
+# Preserved study artifacts are tracked deliberately, logs included.
+!studies/**/*.log

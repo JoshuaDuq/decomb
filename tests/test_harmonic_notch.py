@@ -245,11 +245,9 @@ def test_two_supported_scanner_harmonics_authorize_the_complete_comb():
 
     assert local_evidence is not None
     assert local_evidence.supporting_harmonics == (2,)
-    assert not local_evidence.authorizes_complete_comb
     assert supported is not None
     assert supported.fundamental_hz == 1.0
     assert supported.supporting_harmonics == (2, 4)
-    assert supported.authorizes_complete_comb
     assert supported.corrected_p_value < 0.025
     assert supported.frequency_count == 5
 
@@ -272,7 +270,6 @@ def test_one_trigger_anchored_harmonic_authorizes_only_its_local_notch():
     )
 
     assert evidence.supporting_harmonics == (2,)
-    assert not evidence.authorizes_complete_comb
     assert tuple(
         harmonic
         for stopband in plan.stopbands
@@ -283,7 +280,32 @@ def test_one_trigger_anchored_harmonic_authorizes_only_its_local_notch():
     )
 
 
-def test_scanner_harmonics_plan_contains_every_harmonic_in_the_study_range():
+def test_supported_scanner_harmonics_each_receive_the_supported_envelope():
+    """Every planned tooth is a supported tooth, so every one gets the wide envelope."""
+    evidence = notch.ScannerHarmonicEvidence(
+        fundamental_hz=10.0,
+        corrected_p_value=1e-12,
+        supporting_harmonics=(2, 4),
+    )
+
+    plan = notch.plan_scanner_harmonic_notches(
+        evidence,
+        _settings(),
+        maximum_hz=49.0,
+    )
+
+    widths_by_harmonic = {
+        stopband.harmonics[0]: stopband.width_hz for stopband in plan.stopbands
+    }
+    assert set(widths_by_harmonic) == {2, 4}
+    for width_hz in widths_by_harmonic.values():
+        assert width_hz == pytest.approx(
+            _settings().supported_scanner_harmonic_stopband_width_hz
+        )
+
+
+def test_two_supported_harmonics_do_not_authorize_untested_teeth():
+    """Support at two teeth is evidence about those teeth, not about the whole grid."""
     evidence = notch.ScannerHarmonicEvidence(
         fundamental_hz=10.0,
         corrected_p_value=1e-12,
@@ -300,21 +322,10 @@ def test_scanner_harmonics_plan_contains_every_harmonic_in_the_study_range():
         harmonic
         for stopband in plan.stopbands
         for harmonic in stopband.harmonics
-    ) == (1, 2, 3, 4)
-    widths_by_harmonic = {
-        stopband.harmonics[0]: stopband.width_hz for stopband in plan.stopbands
-    }
-    assert widths_by_harmonic[1] == pytest.approx(0.25)
-    assert widths_by_harmonic[2] == pytest.approx(
-        _settings().supported_scanner_harmonic_stopband_width_hz
-    )
-    assert widths_by_harmonic[3] == pytest.approx(0.25)
-    assert widths_by_harmonic[4] == pytest.approx(
-        _settings().supported_scanner_harmonic_stopband_width_hz
-    )
+    ) == (2, 4)
 
 
-def test_cleaning_applies_the_complete_supported_scanner_harmonics(monkeypatch):
+def test_cleaning_applies_the_supported_scanner_harmonics(monkeypatch):
     raw = mne.io.RawArray(
         np.zeros((2, 12_000)),
         mne.create_info(["C3", "C4"], 1_000.0, "eeg"),
@@ -374,7 +385,7 @@ def test_cleaning_applies_the_complete_supported_scanner_harmonics(monkeypatch):
         harmonic
         for stopband in removal_round.scanner_plan.stopbands
         for harmonic in stopband.harmonics
-    ) == (1, 2, 3, 4, 5)
+    ) == (2, 4)
     assert result.residual_model.channels == ()
     assert result.residual_scanner_harmonics is None
 
@@ -416,7 +427,7 @@ def test_first_round_diagnosis_matches_the_joint_cleaning_evidence(monkeypatch):
         harmonic
         for stopband in evidence.scanner_plan.stopbands
         for harmonic in stopband.harmonics
-    ) == (1, 2, 3, 4, 5)
+    ) == (2, 4)
     assert evidence.filter_plan == evidence.scanner_plan
 
 
@@ -959,7 +970,7 @@ def test_manifest_records_trigger_anchored_comb_evidence():
 
     detected = rows[:-1]
     assert len(detected) == len(scanner_plan.stopbands)
-    assert {row["harmonics"] for row in detected} == {"1;2;3;4;5"}
+    assert {row["harmonics"] for row in detected} == {"2;4"}
     assert {row["outcome"] for row in detected} == {"scanner_harmonics_detected"}
     assert {row["fundamental_hz"] for row in detected} == {1.0}
     assert {row["scanner_family_corrected_p_value"] for row in detected} == {

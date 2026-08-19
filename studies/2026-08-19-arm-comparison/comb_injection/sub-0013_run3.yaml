@@ -1,0 +1,17 @@
+paths:
+  bids_root: "/Volumes/KINGSTON/EEG_fMRI_data/bids_output/eeg"
+  output_root: "/Volumes/KINGSTON/EEG_fMRI_data/bids_output/eeg_decombed_auto"
+removal:
+  scanner_repetition_time_s: 0.9
+  scanner_trigger_event_name: "Volume/V  1"
+  comb_fundamental_hz: 1.2
+execution:
+  n_jobs: 8
+frequency_bands:
+  delta: [1.0, 1.05]
+  theta: [4.0, 4.05]
+  alpha: [8.0, 8.05]
+  beta: [13.0, 13.05]
+  gamma: [30.1, 30.15]
+  comb80: [80.0250, 82.0250]
+  comb86: [85.9750, 87.9750]

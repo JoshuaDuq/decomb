@@ -1,0 +1,3 @@
+recording	participant	arm	stopbands	of_lines	peaks_above_2dB	worst_prom_db	worst_level_db	median_suppression_db	comb_db	correlation	change_rms	fir_rounds	delta_kept	theta_kept	alpha_kept	beta_kept	gamma_kept
+sub-0005_task-thermalactive_run-6_eeg	sub-0005	combined	4	115	8	35.030000000000001	-2.3599999999999999	-4.8099999999999996	0	0.99709000000000003	0.047629999999999999	2	1	1	1	0.93630000000000002	0.88190000000000002
+sub-0001_task-thermalactive_run-6_eeg	sub-0001	combined	6	147	5	5.6600000000000001	-0.76000000000000001	-5.8600000000000003	-0.31	0.97997000000000001	0.19688	2	1	1	1	1	0.93540000000000001

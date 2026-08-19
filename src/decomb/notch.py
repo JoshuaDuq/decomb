@@ -262,11 +262,6 @@ class ScannerHarmonicEvidence:
         if min(self.window_count, self.channel_count, self.frequency_count) < 1:
             raise ValueError("Scanner-harmonic test dimensions must be positive.")
 
-    @property
-    def authorizes_complete_comb(self) -> bool:
-        """Whether distinct supported harmonics justify the full expected comb."""
-        return len(self.supporting_harmonics) >= 2
-
 
 @dataclass(frozen=True)
 class HarmonicNotchPlan:
@@ -584,7 +579,7 @@ def plan_scanner_harmonic_notches(
     *,
     maximum_hz: float,
 ) -> HarmonicNotchPlan:
-    """Plan supported scanner lines, or the full comb when support is replicated."""
+    """Plan a notch at each supported scanner harmonic and nowhere else."""
     upper_hz = min(float(maximum_hz), settings.frequency_range_hz[1])
     if not np.isfinite(upper_hz) or upper_hz <= settings.frequency_range_hz[0]:
         raise ValueError("The scanner-comb upper frequency must exceed the study minimum.")
@@ -596,11 +591,7 @@ def plan_scanner_harmonic_notches(
     if last_harmonic < first_harmonic:
         raise ValueError("No scanner harmonic lies inside the recording's study range.")
 
-    planned_harmonics = (
-        range(first_harmonic, last_harmonic + 1)
-        if evidence.authorizes_complete_comb
-        else evidence.supporting_harmonics
-    )
+    planned_harmonics = evidence.supporting_harmonics
     if any(
         harmonic < first_harmonic or harmonic > last_harmonic
         for harmonic in planned_harmonics
@@ -609,11 +600,7 @@ def plan_scanner_harmonic_notches(
 
     stopbands = []
     for harmonic in planned_harmonics:
-        width_hz = (
-            settings.supported_scanner_harmonic_stopband_width_hz
-            if harmonic in evidence.supporting_harmonics
-            else settings.scanner_harmonics_stopband_width_hz
-        )
+        width_hz = settings.supported_scanner_harmonic_stopband_width_hz
         centre_hz = harmonic * evidence.fundamental_hz
         stopbands.append(
             HarmonicStopband(
@@ -1881,10 +1868,9 @@ def write_harmonic_derivative_description(
                 "(2) a trigger-anchored scanner-harmonic test. The scanner test used the "
                 "configured TR and exact event name, Bonferroni-corrected each expected "
                 "harmonic across windows, channels, and the prespecified harmonic grid. "
-                "One supported harmonic authorized its local-background envelope; "
-                "at least two supported harmonics authorized that wider geometry at "
-                "supported teeth and narrow localization-width notches at every other "
-                "in-range tooth. A "
+                "Each supported harmonic authorized its own local-background "
+                "envelope; no unsupported tooth on the prespecified grid was "
+                "notched. A "
                 "summable alpha-spending sequence pre-allocated error rates across "
                 "adaptive removal rounds. Supported components were "
                 "merged into one recording plan and removed from every EEG channel with "
@@ -2408,12 +2394,7 @@ def _validate_scanner_harmonic_manifest_evidence(
     planned = tuple(
         harmonic for row in rows for harmonic in _semicolon_ints(row["harmonics"])
     )
-    expected = (
-        tuple(range(min(planned), max(planned) + 1))
-        if len(supported_harmonics) >= 2
-        else supported_harmonics
-    )
-    if planned != expected:
+    if planned != supported_harmonics:
         raise ValueError("The scanner-harmonic plan does not match its evidence.")
     empty_line_fields = (
         "detected_line_frequencies_hz",
