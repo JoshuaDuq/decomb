@@ -18,6 +18,7 @@ class BandPreservationMetric:
     name: str
     low_hz: float
     high_hz: float
+    power_ratio: float
     power_change_db: float
     phase_error_degrees: float | None
 
@@ -91,9 +92,8 @@ def _band_metric(
     cleaned_power = float(np.sum(np.abs(cleaned) ** 2))
     if original_power <= 0.0:
         raise ValueError(f"analysis band {name!r} has no original power")
-    power_change_db = 10.0 * np.log10(
-        max(cleaned_power, np.finfo(float).tiny) / original_power
-    )
+    power_ratio = cleaned_power / original_power
+    power_change_db = 10.0 * np.log10(max(power_ratio, np.finfo(float).tiny))
 
     weights = np.abs(original) * np.abs(cleaned)
     phase_error_degrees = None
@@ -108,8 +108,46 @@ def _band_metric(
         name,
         low_hz,
         high_hz,
+        float(power_ratio),
         float(power_change_db),
         phase_error_degrees,
+    )
+
+
+def measure_band_preservation(
+    original: NDArray[np.floating],
+    cleaned: NDArray[np.floating],
+    sampling_frequency_hz: float,
+    band: tuple[str, float, float],
+    *,
+    window_s: float,
+) -> BandPreservationMetric:
+    """Describe paired power and phase within one band, including complete removal."""
+    original_values, cleaned_values = _validated_pair(original, cleaned)
+    window_samples = recordings.estimation_window_samples(
+        sampling_frequency_hz,
+        window_s,
+    )
+    bounds = recordings.overlapping_window_bounds(
+        n_times=original_values.shape[-1],
+        window_samples=window_samples,
+        overlap=0.5,
+    )
+    name, low_hz, high_hz = _validated_bands(
+        (band,),
+        sampling_frequency_hz,
+    )[0]
+    frequencies_hz = np.fft.rfftfreq(
+        window_samples,
+        d=1.0 / sampling_frequency_hz,
+    )
+    return _band_metric(
+        name,
+        low_hz,
+        high_hz,
+        frequencies_hz,
+        _windowed_spectra(original_values, bounds),
+        _windowed_spectra(cleaned_values, bounds),
     )
 
 

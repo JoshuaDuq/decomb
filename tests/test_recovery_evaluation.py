@@ -53,3 +53,21 @@ def test_preservation_metrics_describe_band_power_loss_without_failing():
     assert np.isclose(metrics["theta"].power_change_db, -6.0206, atol=1e-3)
     assert abs(metrics["alpha"].power_change_db) < 1e-3
     assert 0.0 < result.normalized_change_rms < 1.0
+
+
+def test_band_preservation_reports_complete_removal_without_requiring_correlation():
+    sampling_frequency_hz = 100.0
+    times_s = np.arange(1_000) / sampling_frequency_hz
+    original = np.sin(2.0 * np.pi * 10.0 * times_s)[np.newaxis, :]
+
+    metric = recovery_evaluation.measure_band_preservation(
+        original,
+        np.zeros_like(original),
+        sampling_frequency_hz,
+        ("alpha", 8.0, 12.9),
+        window_s=2.0,
+    )
+
+    assert metric.power_ratio == 0.0
+    assert metric.power_change_db < -3_000.0
+    assert metric.phase_error_degrees is None

@@ -1,4 +1,4 @@
-"""Stationary, drifting, and intermittent sinusoid injections for recovery trials.
+"""Neural-like sinusoid injections for paired recovery trials.
 
 Used to measure what a detection-and-notch procedure does to a known component of known
 strength, added to a sinusoid-free surrogate background so no pre-existing line can bias
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-KINDS = ("stationary", "drifting", "intermittent")
+KINDS = ("stationary", "drifting", "intermittent", "phase_modulated")
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class SinusoidInjection:
     drift_hz: float = 0.0
     occupancy: float = 1.0
     phase_rad: float = 0.0
+    phase_modulation_hz: float = 0.0
+    phase_deviation_rad: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -45,6 +47,23 @@ class SinusoidInjection:
             raise ValueError("occupancy must lie in (0, 1].")
         if not np.isfinite(self.phase_rad):
             raise ValueError("phase_rad must be finite.")
+        if not np.isfinite(self.phase_modulation_hz):
+            raise ValueError("phase_modulation_hz must be finite.")
+        if not np.isfinite(self.phase_deviation_rad):
+            raise ValueError("phase_deviation_rad must be finite.")
+        if self.kind == "phase_modulated":
+            if self.phase_modulation_hz <= 0.0:
+                raise ValueError(
+                    "phase_modulation_hz must be positive for phase modulation."
+                )
+            if self.phase_deviation_rad <= 0.0:
+                raise ValueError(
+                    "phase_deviation_rad must be positive for phase modulation."
+                )
+        elif self.phase_modulation_hz != 0.0 or self.phase_deviation_rad != 0.0:
+            raise ValueError(
+                "phase modulation parameters must be zero outside phase modulation."
+            )
 
 
 @dataclass(frozen=True)
@@ -57,6 +76,8 @@ class FactorialInjectionTarget:
     drift_hz: float = 0.0
     occupancy: float = 1.0
     phase_rad: float = 0.0
+    phase_modulation_hz: float = 0.0
+    phase_deviation_rad: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -75,6 +96,23 @@ class FactorialInjectionTarget:
             raise ValueError("occupancy must lie in (0, 1].")
         if not np.isfinite(self.phase_rad):
             raise ValueError("phase_rad must be finite.")
+        if not np.isfinite(self.phase_modulation_hz):
+            raise ValueError("phase_modulation_hz must be finite.")
+        if not np.isfinite(self.phase_deviation_rad):
+            raise ValueError("phase_deviation_rad must be finite.")
+        if self.kind == "phase_modulated":
+            if self.phase_modulation_hz <= 0.0:
+                raise ValueError(
+                    "phase_modulation_hz must be positive for phase modulation."
+                )
+            if self.phase_deviation_rad <= 0.0:
+                raise ValueError(
+                    "phase_deviation_rad must be positive for phase modulation."
+                )
+        elif self.phase_modulation_hz != 0.0 or self.phase_deviation_rad != 0.0:
+            raise ValueError(
+                "phase modulation parameters must be zero outside phase modulation."
+            )
 
     def as_specification(self, amplitude_v: float) -> SinusoidInjection:
         """Attach a background-scaled voltage amplitude to this fixed design point."""
@@ -85,6 +123,8 @@ class FactorialInjectionTarget:
             drift_hz=self.drift_hz,
             occupancy=self.occupancy,
             phase_rad=self.phase_rad,
+            phase_modulation_hz=self.phase_modulation_hz,
+            phase_deviation_rad=self.phase_deviation_rad,
         )
 
 
@@ -135,10 +175,19 @@ def realize_injection(
     if n_samples < 2:
         raise ValueError("n_samples must be at least two.")
     sampling_frequency = _positive(sampling_frequency_hz, "sampling_frequency_hz")
-    trajectory_edges_hz = (
-        spec.frequency_hz,
-        spec.frequency_hz + spec.drift_hz,
-    )
+    if spec.kind == "phase_modulated":
+        frequency_deviation_hz = (
+            spec.phase_deviation_rad * spec.phase_modulation_hz
+        )
+        trajectory_edges_hz = (
+            spec.frequency_hz - frequency_deviation_hz,
+            spec.frequency_hz + frequency_deviation_hz,
+        )
+    else:
+        trajectory_edges_hz = (
+            spec.frequency_hz,
+            spec.frequency_hz + spec.drift_hz,
+        )
     if min(trajectory_edges_hz) <= 0.0 or max(trajectory_edges_hz) >= (
         sampling_frequency / 2.0
     ):
@@ -154,6 +203,12 @@ def realize_injection(
         carrier_phase = 2.0 * np.pi * (
             spec.frequency_hz * times_s
             + spec.drift_hz * times_s**2 / (2.0 * duration_s)
+        )
+    elif spec.kind == "phase_modulated":
+        carrier_phase = (
+            2.0 * np.pi * spec.frequency_hz * times_s
+            + spec.phase_deviation_rad
+            * np.sin(2.0 * np.pi * spec.phase_modulation_hz * times_s)
         )
     else:
         carrier_phase = 2.0 * np.pi * spec.frequency_hz * times_s
@@ -182,8 +237,15 @@ def injected_frequency_band_hz(
     """
     if not np.isfinite(half_width_hz) or half_width_hz < 0.0:
         raise ValueError("half_width_hz must be finite and non-negative.")
-    low_hz = min(spec.frequency_hz, spec.frequency_hz + spec.drift_hz)
-    high_hz = max(spec.frequency_hz, spec.frequency_hz + spec.drift_hz)
+    if spec.kind == "phase_modulated":
+        frequency_deviation_hz = (
+            spec.phase_deviation_rad * spec.phase_modulation_hz
+        )
+        low_hz = spec.frequency_hz - frequency_deviation_hz
+        high_hz = spec.frequency_hz + frequency_deviation_hz
+    else:
+        low_hz = min(spec.frequency_hz, spec.frequency_hz + spec.drift_hz)
+        high_hz = max(spec.frequency_hz, spec.frequency_hz + spec.drift_hz)
     return (low_hz - half_width_hz, high_hz + half_width_hz)
 
 

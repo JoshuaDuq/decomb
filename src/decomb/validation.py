@@ -28,6 +28,10 @@ class PairedEnergyMetrics:
     component_to_background_db: float
     remaining_fraction: float
     collateral_fraction: float
+    amplitude_ratio: float
+    component_error_fraction: float
+    component_correlation: float | None
+    phase_error_degrees: float | None
 
 
 @dataclass(frozen=True)
@@ -199,6 +203,11 @@ def realize_factorial_injection(
     rng: np.random.Generator,
 ) -> tuple[injection.SinusoidInjection, injection.InjectionRealization]:
     """Scale one fixed factorial target to its requested background-subspace SNR."""
+    import mne
+
+    picks = mne.pick_types(background.info, eeg=True, exclude="bads")
+    if len(picks) < 2:
+        raise ValueError("Factorial injection scaling requires two non-bad EEG channels.")
     unit_spec = target.as_specification(1.0)
     unit = injection.realize_injection(
         unit_spec,
@@ -213,7 +222,7 @@ def realize_factorial_injection(
     )
     if np.linalg.matrix_rank(triangular) != unit.temporal_basis.shape[0]:
         raise ValueError("The factorial injection subspace must have full rank.")
-    background_data = background.get_data()[:, valid_samples]
+    background_data = background.get_data(picks=picks)[:, valid_samples]
     projected_background = (background_data @ basis) @ basis.T
     background_energy_v2 = float(np.sum(projected_background**2))
 
@@ -222,9 +231,7 @@ def realize_factorial_injection(
         channel_name,
         unit,
     )
-    unit_component = (
-        unit_injected.get_data()[:, valid_samples] - background_data
-    )
+    unit_component = unit_injected.get_data(picks=picks)[:, valid_samples] - background_data
     unit_energy_v2 = float(np.sum(unit_component**2))
     if background_energy_v2 <= 0.0 or unit_energy_v2 <= 0.0:
         raise ValueError("Factorial injection scaling requires positive energies.")
@@ -326,6 +333,18 @@ def paired_energy_metrics(
     difference_energy_v2 = float(np.sum(cleaned_difference**2))
     remaining_energy_v2 = float(np.sum(projected_difference**2))
     collateral_energy_v2 = float(np.sum(collateral_difference**2))
+    component_error_v2 = float(np.sum((projected_difference - component) ** 2))
+    component_correlation = _component_correlation(
+        component,
+        projected_difference,
+        remaining_energy_v2,
+    )
+    phase_error_degrees = _phase_error_degrees(
+        component,
+        projected_difference,
+        basis[:, mask],
+        remaining_energy_v2,
+    )
     return PairedEnergyMetrics(
         injected_energy_v2=injected_energy_v2,
         difference_energy_v2=difference_energy_v2,
@@ -334,6 +353,53 @@ def paired_energy_metrics(
         ),
         remaining_fraction=remaining_energy_v2 / injected_energy_v2,
         collateral_fraction=collateral_energy_v2 / injected_energy_v2,
+        amplitude_ratio=float(np.sqrt(remaining_energy_v2 / injected_energy_v2)),
+        component_error_fraction=component_error_v2 / injected_energy_v2,
+        component_correlation=component_correlation,
+        phase_error_degrees=phase_error_degrees,
+    )
+
+
+def _component_correlation(
+    component: np.ndarray,
+    projected_difference: np.ndarray,
+    remaining_energy_v2: float,
+) -> float | None:
+    if remaining_energy_v2 <= np.finfo(float).eps * float(np.sum(component**2)):
+        return None
+    correlation = float(
+        np.sum(component * projected_difference)
+        / np.sqrt(np.sum(component**2) * remaining_energy_v2)
+    )
+    return float(np.clip(correlation, -1.0, 1.0))
+
+
+def _phase_error_degrees(
+    component: np.ndarray,
+    projected_difference: np.ndarray,
+    temporal_basis: np.ndarray,
+    remaining_energy_v2: float,
+) -> float | None:
+    injected_energy_v2 = float(np.sum(component**2))
+    if remaining_energy_v2 <= np.finfo(float).eps * injected_energy_v2:
+        return None
+    design = temporal_basis.T
+    injected_coefficients = np.linalg.lstsq(design, component.T, rcond=None)[0]
+    recovered_coefficients = np.linalg.lstsq(
+        design,
+        projected_difference.T,
+        rcond=None,
+    )[0]
+    injected_phasors = injected_coefficients[0] + 1j * injected_coefficients[1]
+    recovered_phasors = recovered_coefficients[0] + 1j * recovered_coefficients[1]
+    weights = np.abs(injected_phasors) * np.abs(recovered_phasors)
+    if float(weights.sum()) <= np.finfo(float).eps:
+        return None
+    phase_errors = np.angle(recovered_phasors * np.conj(injected_phasors))
+    return float(
+        np.sqrt(np.average(phase_errors**2, weights=weights))
+        * 180.0
+        / np.pi
     )
 
 

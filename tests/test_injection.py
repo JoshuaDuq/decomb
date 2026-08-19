@@ -99,6 +99,32 @@ def test_realized_waveform_lies_exactly_in_its_declared_subspace():
     )
 
 
+def test_phase_modulated_injection_has_the_requested_instantaneous_frequency_bounds():
+    spec = injection.SinusoidInjection(
+        kind="phase_modulated",
+        frequency_hz=10.0,
+        amplitude_v=1.0,
+        phase_modulation_hz=0.2,
+        phase_deviation_rad=0.5,
+    )
+
+    realization = injection.realize_injection(
+        spec,
+        20_000,
+        200.0,
+        np.random.default_rng(31),
+    )
+    low_hz, high_hz = injection.injected_frequency_band_hz(
+        spec,
+        half_width_hz=0.0,
+    )
+
+    assert low_hz == pytest.approx(9.9)
+    assert high_hz == pytest.approx(10.1)
+    assert np.isfinite(realization.waveform_v).all()
+    assert np.linalg.matrix_rank(realization.temporal_basis) == 2
+
+
 def test_kind_and_parameter_combinations_are_validated():
     with pytest.raises(ValueError, match="kind"):
         injection.SinusoidInjection(kind="bursty", frequency_hz=10.0, amplitude_v=1.0)
@@ -126,6 +152,12 @@ def test_kind_and_parameter_combinations_are_validated():
             kind="stationary",
             frequency_hz=10.0,
             component_to_background_db=np.nan,
+        )
+    with pytest.raises(ValueError, match="phase_modulation_hz"):
+        injection.SinusoidInjection(
+            kind="phase_modulated",
+            frequency_hz=10.0,
+            amplitude_v=1.0,
         )
 
 

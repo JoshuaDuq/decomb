@@ -102,6 +102,37 @@ def test_paired_energy_decomposition_is_exact_for_identity_cleaning():
     assert metrics.remaining_fraction == pytest.approx(1.0)
     assert metrics.collateral_fraction == pytest.approx(0.0, abs=1e-28)
     assert metrics.difference_energy_v2 == pytest.approx(metrics.injected_energy_v2)
+    assert metrics.amplitude_ratio == pytest.approx(1.0)
+    assert metrics.component_error_fraction == pytest.approx(0.0, abs=1e-28)
+    assert metrics.component_correlation == pytest.approx(1.0)
+    assert metrics.phase_error_degrees == pytest.approx(0.0, abs=1e-12)
+
+
+def test_paired_energy_metrics_detect_phase_distortion_inside_the_same_subspace():
+    times = np.arange(1_000) / 100.0
+    sine = np.sin(2.0 * np.pi * 10.0 * times)
+    cosine = np.cos(2.0 * np.pi * 10.0 * times)
+    basis = np.stack([sine, cosine])
+    component = np.stack([sine, -sine])
+    phase_shifted = np.stack([cosine, -cosine])
+    background = np.ones_like(component)
+    valid = np.ones(times.size, dtype=bool)
+
+    metrics = validation.paired_energy_metrics(
+        background,
+        background + component,
+        background,
+        background + phase_shifted,
+        basis,
+        valid,
+    )
+
+    assert metrics.remaining_fraction == pytest.approx(1.0)
+    assert metrics.collateral_fraction == pytest.approx(0.0, abs=1e-28)
+    assert metrics.amplitude_ratio == pytest.approx(1.0)
+    assert metrics.component_error_fraction == pytest.approx(2.0)
+    assert metrics.component_correlation == pytest.approx(0.0, abs=1e-12)
+    assert metrics.phase_error_degrees == pytest.approx(90.0)
 
 
 def test_paired_energy_components_sum_to_the_cleaned_difference_energy():
@@ -183,6 +214,48 @@ def test_recovery_trial_rejects_a_background_missing_the_channel():
             participant="sub-test",
             channel_name="C9",
         )
+
+
+def test_factorial_injection_strength_uses_eeg_background_only():
+    sampling_frequency_hz = 100.0
+    n_samples = 4_000
+    eeg = np.random.default_rng(20).normal(scale=1e-6, size=(2, n_samples))
+    target = injection.FactorialInjectionTarget(
+        "stationary",
+        10.0,
+        -10.0,
+    )
+    eeg_raw = mne.io.RawArray(
+        eeg,
+        mne.create_info(["Cz", "C3"], sampling_frequency_hz, "eeg"),
+        verbose="ERROR",
+    )
+    times_s = np.arange(n_samples) / sampling_frequency_hz
+    ecg = np.sin(2.0 * np.pi * 10.0 * times_s)
+    eeg_ecg_raw = mne.io.RawArray(
+        np.vstack((eeg, ecg)),
+        mne.create_info(
+            ["Cz", "C3", "ECG"],
+            sampling_frequency_hz,
+            ["eeg", "eeg", "ecg"],
+        ),
+        verbose="ERROR",
+    )
+
+    eeg_spec, _ = validation.realize_factorial_injection(
+        eeg_raw,
+        "Cz",
+        target,
+        np.random.default_rng(21),
+    )
+    eeg_ecg_spec, _ = validation.realize_factorial_injection(
+        eeg_ecg_raw,
+        "Cz",
+        target,
+        np.random.default_rng(21),
+    )
+
+    assert eeg_ecg_spec.amplitude_v == pytest.approx(eeg_spec.amplitude_v)
 
 
 def test_sequential_authorization_distinguishes_injected_and_unsupported_lines():

@@ -121,6 +121,7 @@ def recover_with_multitaper(
     targets: RecoveryTargets,
     *,
     window_s: float,
+    n_jobs: int = 1,
 ):
     """Apply the multitaper candidate to every first-round target."""
     picks, data = _eeg_data(raw)
@@ -129,6 +130,46 @@ def recover_with_multitaper(
         float(raw.info["sfreq"]),
         targets.all_frequencies_hz,
         window_s=window_s,
+        n_jobs=n_jobs,
+    )
+    return _replace_eeg(raw, picks, result.cleaned_data)
+
+
+def fit_spatial_line_subspace(
+    raw,
+    targets: RecoveryTargets,
+    *,
+    window_s: float,
+    rank: int,
+    n_jobs: int = 1,
+) -> recovery.SpatialLineSubspaceModel:
+    """Learn frozen per-frequency spatial bases from the background EEG."""
+    _, data = _eeg_data(raw)
+    return recovery.fit_spatial_line_subspace(
+        data,
+        float(raw.info["sfreq"]),
+        targets.all_frequencies_hz,
+        window_s=window_s,
+        rank=rank,
+        n_jobs=n_jobs,
+    )
+
+
+def recover_with_spatial_line_subspace(
+    raw,
+    model: recovery.SpatialLineSubspaceModel,
+    *,
+    window_s: float,
+    n_jobs: int = 1,
+):
+    """Remove fitted line activity only inside a frozen spatial subspace."""
+    picks, data = _eeg_data(raw)
+    result = recovery.subtract_spatial_line_subspace(
+        data,
+        float(raw.info["sfreq"]),
+        model,
+        window_s=window_s,
+        n_jobs=n_jobs,
     )
     return _replace_eeg(raw, picks, result.cleaned_data)
 
@@ -138,6 +179,7 @@ def _subtract_ordinary_lines(
     sampling_frequency_hz: float,
     targets: RecoveryTargets,
     window_s: float,
+    n_jobs: int = 1,
 ) -> np.ndarray:
     if not targets.ordinary_frequencies_hz:
         return data
@@ -146,6 +188,7 @@ def _subtract_ordinary_lines(
         sampling_frequency_hz,
         targets.ordinary_frequencies_hz,
         window_s=window_s,
+        n_jobs=n_jobs,
     ).cleaned_data
 
 
@@ -170,6 +213,7 @@ def recover_with_trigger_basis(
     trigger_event_name: str,
     maximum_component_count: int,
     ordinary_window_s: float,
+    n_jobs: int = 1,
 ):
     """Apply trigger-locked OBA to scanner targets, then ordinary line fits."""
     if (
@@ -195,12 +239,14 @@ def recover_with_trigger_basis(
             triggers,
             repetition_time_s=repetition_time_s,
             component_count=component_count,
+            n_jobs=n_jobs,
         ).cleaned_data
     recovered_data = _subtract_ordinary_lines(
         recovered_data,
         sampling_frequency_hz,
         targets,
         ordinary_window_s,
+        n_jobs=n_jobs,
     )
     return _replace_eeg(raw, picks, recovered_data)
 
@@ -211,23 +257,29 @@ def recover_with_trajectory_pca(
     *,
     recovery_settings: recovery.TrajectoryPCASettings,
     ordinary_window_s: float,
+    n_jobs: int = 1,
 ):
-    """Apply authorized trajectory PCA, then ordinary multitaper line fits."""
+    """Apply trajectory PCA, then ordinary multitaper line fits.
+
+    rsPCA takes no frequency list: it selects components by their own single-peak and
+    excess-kurtosis rules, so no target class authorizes or withholds it. It used to be
+    gated on the scanner-comb targets, which it cannot remove -- comb teeth are not
+    isolated single peaks -- so a recording with lines but no comb skipped it entirely.
+    """
     picks, data = _eeg_data(raw)
     sampling_frequency_hz = float(raw.info["sfreq"])
-    recovered_data = data
-    if targets.scanner_frequencies_hz:
-        recovered_data = recovery.subtract_recursive_trajectory_pca(
-            data,
-            sampling_frequency_hz,
-            targets.scanner_frequencies_hz,
-            recovery_settings,
-        ).cleaned_data
+    recovered_data = recovery.subtract_recursive_trajectory_pca(
+        data,
+        sampling_frequency_hz,
+        recovery_settings,
+        n_jobs=n_jobs,
+    ).cleaned_data
     recovered_data = _subtract_ordinary_lines(
         recovered_data,
         sampling_frequency_hz,
         targets,
         ordinary_window_s,
+        n_jobs=n_jobs,
     )
     return _replace_eeg(raw, picks, recovered_data)
 
@@ -294,7 +346,16 @@ class RecoveryBenchmarkSettings:
 
     ordinary_window_s: float = 10.0
     trigger_maximum_component_count: int = 4
-    trajectory_segment_s: float = 2.0
+    #: Measured operating point (docs/rspca_validation.md). At 1 kHz this is dim=300.
+    #: The published 2.0 s cannot work here on either count: the eigenvector spectral
+    #: resolution of 1/segment_s then resolves the artifact cluster into many peaks, so
+    #: the single-peak rule never fires, and runtime scales about dim^2.7, which puts
+    #: dim=2000 at hours per channel. Re-measure before changing it.
+    trajectory_segment_s: float = 0.30
+    n_jobs: int = -1
+
+    def __post_init__(self) -> None:
+        recordings.validated_n_jobs(self.n_jobs)
 
     def trajectory_settings(self) -> recovery.TrajectoryPCASettings:
         return recovery.TrajectoryPCASettings(segment_s=self.trajectory_segment_s)
@@ -307,15 +368,46 @@ class JointResidualCleaningResult:
     cleaned: object
     harmonic_results: tuple[notch.HarmonicCleaningResult, ...]
     local_background_plans: tuple[notch.HarmonicNotchPlan, ...]
+    #: The target-local test that ended the loop, measured on `cleaned` itself.
+    terminal_local_background: object
+
+    def __post_init__(self) -> None:
+        if len(self.harmonic_results) != len(self.local_background_plans) + 1:
+            raise ValueError(
+                "joint residual cleaning requires one harmonic result before and "
+                "after every local-background plan"
+            )
+
+    @property
+    def terminal_residual_detector_null(self) -> bool:
+        """No coherent line or scanner tooth survived any round's terminal fit."""
+        return all(
+            not result.residual_model.channels
+            and result.residual_scanner_harmonics is None
+            for result in self.harmonic_results
+        )
+
+    @property
+    def targeted_local_background_excess_null(self) -> bool:
+        """The test that ended the loop found no persistent excess at any target."""
+        return not self.terminal_local_background.detections
+
+    @property
+    def artifact_gate_passed(self) -> bool:
+        """Both terminal nulls hold, which is what authorizes the cleaned output."""
+        return (
+            self.terminal_residual_detector_null
+            and self.targeted_local_background_excess_null
+        )
 
     @property
     def filter_plans(self) -> tuple[notch.HarmonicNotchPlan, ...]:
-        harmonic_plans = tuple(
-            round_.filter_plan
-            for result in self.harmonic_results
-            for round_ in result.rounds
-        )
-        return (*harmonic_plans, *self.local_background_plans)
+        plans = []
+        for index, result in enumerate(self.harmonic_results):
+            plans.extend(round_.filter_plan for round_ in result.rounds)
+            if index < len(self.local_background_plans):
+                plans.append(self.local_background_plans[index])
+        return tuple(plans)
 
     @property
     def round_count(self) -> int:
@@ -328,6 +420,8 @@ def clean_joint_residuals(
     raw,
     targets: RecoveryTargets,
     settings: notch.HarmonicNotchSettings,
+    *,
+    n_jobs: int = -1,
 ) -> JointResidualCleaningResult:
     """Alternate residual line and target-local tests until both are null."""
     maximum_hz = min(
@@ -335,7 +429,9 @@ def clean_joint_residuals(
         float(np.nextafter(float(raw.info["sfreq"]) / 2.0, 0.0)),
     )
     frequency_range_hz = (settings.frequency_range_hz[0], maximum_hz)
-    harmonic_results = [notch.clean_until_no_supported_lines(raw, settings)]
+    harmonic_results = [
+        notch.clean_until_no_supported_lines(raw, settings, n_jobs=n_jobs)
+    ]
     local_background_plans = []
 
     while True:
@@ -352,6 +448,7 @@ def clean_joint_residuals(
                 cleaned,
                 tuple(harmonic_results),
                 tuple(local_background_plans),
+                detection,
             )
 
         model = lines.build_line_model(
@@ -360,14 +457,18 @@ def clean_joint_residuals(
         )
         channel_plans = notch.plan_channel_notches(model, settings)
         local_plan = notch.recording_plan_from_channel_plans(channel_plans)
-        filtered = notch.apply_harmonic_notches(cleaned, local_plan)
+        filtered = notch.apply_harmonic_notches(
+            cleaned,
+            local_plan,
+            n_jobs=n_jobs,
+        )
         if np.array_equal(filtered.get_data(), cleaned.get_data()):
             raise RuntimeError(
                 "A target-local residual remains, but its FIR changed no samples"
             )
         local_background_plans.append(local_plan)
         harmonic_results.append(
-            notch.clean_until_no_supported_lines(filtered, settings)
+            notch.clean_until_no_supported_lines(filtered, settings, n_jobs=n_jobs)
         )
 
 
@@ -410,6 +511,7 @@ def _measurement_rows(
             "band": band.name,
             "band_low_hz": band.low_hz,
             "band_high_hz": band.high_hz,
+            "band_power_ratio": band.power_ratio,
             "band_power_change_db": band.power_change_db,
             "band_phase_error_degrees": (
                 "" if band.phase_error_degrees is None else band.phase_error_degrees
@@ -433,6 +535,7 @@ def _evaluate_recovered(
     recovery_runtime_s: float,
     settings: notch.HarmonicNotchSettings,
     bands: tuple[tuple[str, float, float], ...],
+    n_jobs: int = -1,
 ) -> list[dict[str, float | int | str | bool]]:
     import mne
 
@@ -448,7 +551,7 @@ def _evaluate_recovered(
     )
 
     residual_started = time.perf_counter()
-    cleaning = clean_joint_residuals(recovered, targets, settings)
+    cleaning = clean_joint_residuals(recovered, targets, settings, n_jobs=n_jobs)
     residual_runtime_s = time.perf_counter() - residual_started
     cleaned_data = cleaning.cleaned.get_data(picks=picks)
     final_metrics = recovery_evaluation.measure_preservation(
@@ -485,9 +588,11 @@ def _evaluate_recovered(
             cleaning.local_background_plans
         ),
         "first_residual_stopband_count": first_residual_stopband_count,
-        "terminal_residual_detector_null": True,
-        "targeted_local_background_excess_null": True,
-        "artifact_gate_passed": True,
+        "terminal_residual_detector_null": cleaning.terminal_residual_detector_null,
+        "targeted_local_background_excess_null": (
+            cleaning.targeted_local_background_excess_null
+        ),
+        "artifact_gate_passed": cleaning.artifact_gate_passed,
         "recovery_change_rms_ratio": _rms_ratio(
             recovered_data - original_data,
             original_data,
@@ -512,6 +617,7 @@ def _benchmark_multitaper(
         raw,
         targets,
         window_s=settings.ordinary_window_s,
+        n_jobs=settings.n_jobs,
     )
 
 
@@ -528,6 +634,7 @@ def _benchmark_trigger_basis(
         trigger_event_name=notch_settings.scanner_trigger_event_name,
         maximum_component_count=settings.trigger_maximum_component_count,
         ordinary_window_s=settings.ordinary_window_s,
+        n_jobs=settings.n_jobs,
     )
 
 
@@ -541,6 +648,7 @@ def _benchmark_trajectory_pca(
         targets,
         recovery_settings=settings.trajectory_settings(),
         ordinary_window_s=settings.ordinary_window_s,
+        n_jobs=settings.n_jobs,
     )
 
 
@@ -554,6 +662,7 @@ def _benchmark_candidate(
     participant: str,
     notch_settings: notch.HarmonicNotchSettings,
     bands: tuple[tuple[str, float, float], ...],
+    n_jobs: int = -1,
 ) -> list[dict[str, float | int | str | bool]]:
     started = time.perf_counter()
     recovered = recover()
@@ -568,6 +677,7 @@ def _benchmark_candidate(
         recovery_runtime_s=recovery_runtime_s,
         settings=notch_settings,
         bands=bands,
+        n_jobs=n_jobs,
     )
 
 
@@ -590,6 +700,7 @@ def benchmark_multitaper_recording(
         participant=participant,
         notch_settings=notch_settings,
         bands=bands,
+        n_jobs=benchmark_settings.n_jobs,
     )
 
 
@@ -617,6 +728,7 @@ def benchmark_trigger_recording(
         participant=participant,
         notch_settings=notch_settings,
         bands=bands,
+        n_jobs=benchmark_settings.n_jobs,
     )
 
 
@@ -643,6 +755,7 @@ def benchmark_trajectory_recording(
         participant=participant,
         notch_settings=notch_settings,
         bands=bands,
+        n_jobs=benchmark_settings.n_jobs,
     )
 
 
@@ -685,6 +798,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--subjects", nargs="+", required=True)
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help=(
+            "override execution.n_jobs for this run: -1 for every core, or a positive "
+            "integer. Channels are independent, so this changes speed, not results."
+        ),
+    )
     return parser
 
 
@@ -719,10 +841,21 @@ def run(args: argparse.Namespace) -> None:
     source_root = config.path("bids_root")
     notch_settings = notch.HarmonicNotchSettings.from_config(config)
     bands = notch.analysed_bands_from_config(config)
-    benchmark_settings = RecoveryBenchmarkSettings(
-        ordinary_window_s=notch_settings.estimation_window_s
+    n_jobs = (
+        recordings.n_jobs_from_config(config)
+        if args.n_jobs is None
+        else recordings.validated_n_jobs(args.n_jobs)
     )
-    manifest = pd.read_csv(args.manifest, sep="\t", keep_default_na=False)
+    benchmark_settings = RecoveryBenchmarkSettings(
+        ordinary_window_s=notch_settings.estimation_window_s,
+        n_jobs=n_jobs,
+    )
+    manifest = pd.read_csv(
+        args.manifest,
+        sep="\t",
+        keep_default_na=False,
+        float_precision="round_trip",
+    )
     runs = recordings.discover_runs(source_root, args.subjects, task="*")
 
     if args.output.exists():
@@ -731,7 +864,12 @@ def run(args: argparse.Namespace) -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     if staging.exists():
-        checkpoint = pd.read_csv(staging, sep="\t", keep_default_na=False)
+        checkpoint = pd.read_csv(
+            staging,
+            sep="\t",
+            keep_default_na=False,
+            float_precision="round_trip",
+        )
         completed = _completed_candidate_keys(checkpoint, bands)
         rows = checkpoint.to_dict(orient="records")
         print(f"Resuming {len(completed)} completed candidate checkpoints", flush=True)
