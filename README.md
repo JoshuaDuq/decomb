@@ -100,6 +100,7 @@ ordinary line test, and two recording-specific inputs pre-specify the scanner co
 | `removal.estimation_window_s` | 10.0 s | Ordinary-line stationarity interval and spectral resolution |
 | `removal.familywise_error_rate` | 0.05 | Target error budget allocated across one recording's adaptive removal sequence |
 | `removal.frequency_range_hz` | 0.0 to 100.0 Hz | Frequencies eligible for detection and filtering |
+| `removal.comb_fundamental_hz` | null | Comb fundamental; null derives it from the TR above |
 
 The default ordinary-line window gives Fourier bins separated by 0.1 Hz. Changing that
 duration changes its frequency spacing; ordinary-line stopbands remain at least 0.25 Hz
@@ -108,6 +109,17 @@ covers its fixed 1 Hz local-background neighborhood on each side, while prespeci
 weak teeth retain the 0.25 Hz localization width. FIR selectivity remains fixed at the
 54-second reference geometry. Thus scanner users need to provide only the TR and exact
 trigger name; no harmonic count, fundamental, search radius, or filter width is tuned.
+
+A periodic source does not have to run at the volume rate. `removal.comb_fundamental_hz`
+declares its frequency directly when it does not: a cryogenic cold head at 72 cycles per
+minute is 1.2 Hz, while a 0.9 s TR gives 1.1111 Hz, and a grid built on the wrong one
+tests frequencies between the teeth. Left null the fundamental is derived from the TR, so
+existing configurations are unchanged. The declared value must come from what the
+hardware does rather than from a spectrum: fixing the grid before any spectrum is
+inspected is what keeps the comb from being fished out of the data, and the trigger check
+still validates the recording's timing either way. In this cohort the comb is at 1.200 Hz
+in 88 of 90 recordings and the trigger-derived grid carries nothing; see
+[`docs/artifact_survey.md`](docs/artifact_survey.md).
 
 `paths.bids_root` identifies the input dataset. Output and report locations have
 packaged defaults. Optional `frequency_bands` entries report unavailable and retained
@@ -307,6 +319,17 @@ The availability cost is substantial because removal was allowed to follow all
 statistically authorized geometry without a minimum retained-band constraint. Replicated
 scanner evidence authorized the complete comb in 53 of 90 recordings; supported teeth
 also use the wider local-background envelope needed to remove their visible skirts.
+
+Two measurements since that audit bear on this cost.
+[`docs/artifact_survey.md`](docs/artifact_survey.md) reports that the comb in this cohort
+is at 1.200 Hz rather than the 1.1111 Hz the TR implies, so most of the geometry above was
+spent on frequencies the artifact does not occupy; declaring the fundamental removes the
+comb 5 dB further while notching fewer places.
+[`docs/removal_operating_point.md`](docs/removal_operating_point.md) measures subtracting
+a line instead of notching it, which raises mean gamma availability from 0.592 to 0.900
+and alpha from 0.850 to 0.975 across the same 90 recordings, at the cost of leaving the
+comb near its background. Neither is what `apply` writes today; both are evaluated, not
+enabled.
 
 ## Software and testing
 
