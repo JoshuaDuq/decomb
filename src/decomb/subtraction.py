@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+
+from decomb import recovery
 
 
 def authorized_frequencies(evidence, settings) -> tuple[float, ...]:
@@ -35,3 +38,32 @@ def damage_intervals(
         else:
             merged.append([low_hz, high_hz])
     return tuple((low_hz, high_hz) for low_hz, high_hz in merged)
+
+
+@dataclass(frozen=True)
+class SubtractionRecord:
+    """What one recording's subtraction removed, and at what resolution."""
+
+    frequencies_hz: tuple[float, ...]
+    window_s: float
+
+
+def subtract_authorized(raw, evidence, settings, *, n_jobs: int = -1):
+    """Fit and remove every authorized frequency, returning the record."""
+    import mne
+
+    frequencies = authorized_frequencies(evidence, settings)
+    record = SubtractionRecord(frequencies, float(settings.estimation_window_s))
+    if not frequencies:
+        return raw.copy(), record
+    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    result = recovery.subtract_multitaper_sinusoids(
+        raw.get_data(picks=picks),
+        float(raw.info["sfreq"]),
+        frequencies,
+        window_s=record.window_s,
+        n_jobs=n_jobs,
+    )
+    cleaned = raw.copy()
+    cleaned._data[picks] = result.cleaned_data
+    return cleaned, record

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from decomb import lines, notch, subtraction
@@ -78,3 +79,29 @@ def test_separated_damage_intervals_do_not_merge():
     intervals = subtraction.damage_intervals((40.0, 40.0 + 5.0 * half), settings)
 
     assert len(intervals) == 2
+
+
+def test_subtraction_removes_the_authorized_frequency_from_the_data():
+    import mne
+
+    settings = _settings()
+    sfreq = 200.0
+    times = np.arange(0, 60.0, 1.0 / sfreq)
+    data = np.vstack([np.sin(2 * np.pi * 40.0 * times)] * 2) * 1e-6
+    raw = mne.io.RawArray(
+        data, mne.create_info(["C3", "C4"], sfreq, "eeg"), verbose="ERROR"
+    )
+    round_evidence = SimpleNamespace(
+        model=lines.LineModel((), 1, 2, 5),
+        scanner_harmonics=notch.ScannerHarmonicEvidence(
+            fundamental_hz=40.0, corrected_p_value=1e-12, supporting_harmonics=(1,)
+        ),
+    )
+
+    cleaned, record = subtraction.subtract_authorized(
+        raw, round_evidence, settings, n_jobs=1
+    )
+
+    assert record.frequencies_hz == (40.0,)
+    assert record.window_s == settings.estimation_window_s
+    assert np.abs(cleaned.get_data()).max() < 0.2 * np.abs(raw.get_data()).max()
