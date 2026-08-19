@@ -132,3 +132,110 @@ def test_subtraction_manifest_rows_carry_every_required_manifest_column():
     row = record.manifest_rows("sub-0001_run-1_eeg", BANDS, settings)[0]
 
     assert notch.MANIFEST_REQUIRED_COLUMNS <= set(row)
+
+
+def _synthetic_bids_recording(tmp_path):
+    import mne
+    from mne_bids import BIDSPath, write_raw_bids
+
+    sfreq = 200.0
+    duration_s = 180.0
+    times = np.arange(0, duration_s, 1.0 / sfreq)
+    data = np.vstack([np.sin(2 * np.pi * 40.0 * times)] * 2) * 1e-6
+    data += np.random.default_rng(0).normal(scale=1e-7, size=data.shape)
+    raw = mne.io.RawArray(
+        data, mne.create_info(["C3", "C4"], sfreq, "eeg"), verbose="ERROR"
+    )
+    raw.set_annotations(
+        mne.Annotations(
+            onset=np.arange(0.0, duration_s, 0.9),
+            duration=0.0,
+            description="Volume/V  1",
+        )
+    )
+    root = tmp_path / "bids"
+    path = BIDSPath(
+        subject="0001",
+        task="thermalactive",
+        run="1",
+        datatype="eeg",
+        root=root,
+        extension=".vhdr",
+    )
+    write_raw_bids(raw, path, format="BrainVision", allow_preload=True, verbose="ERROR")
+    return root, path.fpath
+
+
+def test_clean_harmonic_run_emits_subtracted_rows(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_subtract(raw, evidence, settings, *, n_jobs=-1):
+        captured["called"] = True
+        return raw.copy(), subtraction.SubtractionRecord(
+            (40.0,), settings.estimation_window_s
+        )
+
+    monkeypatch.setattr(subtraction, "subtract_authorized", fake_subtract)
+    from decomb import recordings
+
+    source_root, vhdr = _synthetic_bids_recording(tmp_path)
+    recordings.mirror_sidecars(source_root, tmp_path / "out")
+    rows = notch.clean_harmonic_run(
+        vhdr, tmp_path / "out", source_root, _settings(), BANDS, n_jobs=1
+    )
+
+    assert captured["called"]
+    assert any(row["kind"] == "subtracted" for row in rows)
+
+
+def test_manifest_without_subtracted_rows_still_verifies():
+    rows = [
+        {"recording": "sub-0001_run-1_eeg", "kind": "isolated", "harmonics": "2"},
+    ]
+
+    assert subtraction.subtraction_rows(rows) == []
+
+
+def test_replayed_subtraction_reproduces_the_recorded_frequencies():
+    settings = _settings()
+    record = subtraction.SubtractionRecord((40.0, 60.0), settings.estimation_window_s)
+    rows = record.manifest_rows("sub-0001_run-1_eeg", BANDS, settings)
+
+    assert subtraction.recorded_frequencies(subtraction.subtraction_rows(rows)) == (
+        40.0,
+        60.0,
+    )
+
+
+def _apply_to_synthetic_recording(tmp_path):
+    from decomb import recordings
+
+    source_root, vhdr = _synthetic_bids_recording(tmp_path)
+    output_root = tmp_path / "out"
+    recordings.mirror_sidecars(source_root, output_root)
+    rows = notch.clean_harmonic_run(
+        vhdr, output_root, source_root, _settings(), BANDS, n_jobs=1
+    )
+    cleaned_vhdr = recordings.derivative_vhdr_path(vhdr, source_root, output_root)
+    return vhdr, cleaned_vhdr, rows
+
+
+def test_verify_replays_subtraction_and_the_fir_cascade(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
+
+    assert subtraction.subtraction_rows(rows)
+
+    verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
+
+    assert verified
+
+
+def test_verify_rejects_a_manifest_whose_subtraction_is_unauthorized(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
+    tampered = [dict(row) for row in rows]
+    for row in tampered:
+        if row["kind"] == "subtracted":
+            row["subtracted_frequencies_hz"] = "17.0"
+
+    with pytest.raises(ValueError, match="subtract"):
+        notch.verify_harmonic_run(vhdr, cleaned_vhdr, tampered, _settings())

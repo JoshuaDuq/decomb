@@ -1814,8 +1814,17 @@ def clean_harmonic_run(
     n_jobs: int = -1,
 ) -> list[dict[str, float | str]]:
     """Fit supported residual rounds, write, and require a terminal null."""
+    from decomb import subtraction
+
     raw = recordings.read_bids_raw(vhdr)
-    result = clean_until_no_supported_lines(raw, settings, n_jobs=n_jobs)
+    evidence = fit_harmonic_round(raw, settings, round_index=1)
+    recovered, record = subtraction.subtract_authorized(
+        raw,
+        evidence,
+        settings,
+        n_jobs=n_jobs,
+    )
+    result = clean_until_no_supported_lines(recovered, settings, n_jobs=n_jobs)
     filtered = result.cleaned
 
     destination_vhdr = recordings.derivative_vhdr_path(
@@ -1851,11 +1860,14 @@ def clean_harmonic_run(
         round_index=len(result.rounds) + 1,
     )
 
-    rows = cleaning_manifest_rows(
-        vhdr.stem,
-        result,
-        analysed_bands,
-        settings,
+    rows = record.manifest_rows(vhdr.stem, analysed_bands, settings)
+    rows.extend(
+        cleaning_manifest_rows(
+            vhdr.stem,
+            result,
+            analysed_bands,
+            settings,
+        )
     )
     for row in rows:
         row["roundtrip_deviation_v"] = deviation_v
@@ -2111,7 +2123,7 @@ def run(args: argparse.Namespace) -> None:
 
     import mne
 
-    from decomb import effective
+    from decomb import effective, subtraction
     from decomb.config import load_config
 
     mne.set_log_level("ERROR")
@@ -2153,17 +2165,22 @@ def run(args: argparse.Namespace) -> None:
             n_jobs=n_jobs,
         )
         rows.extend(measured)
+        notched = subtraction.notch_rows(measured)
         detected_rows = [
-            row for row in measured if row["outcome"] != "no_line_detected"
+            row for row in notched if row["outcome"] != "no_line_detected"
         ]
         if not detected_rows:
+            outcome = (
+                "no residual line after subtraction"
+                if subtraction.subtraction_rows(measured)
+                else "no authorized line or scanner comb; copied unchanged"
+            )
             print(
                 f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
-                f"no authorized line or scanner comb; copied unchanged "
-                f"({time.time() - started:.0f}s)"
+                f"{outcome} ({time.time() - started:.0f}s)"
             )
             continue
-        filter_plans = removal_rounds_from_rows(measured)
+        filter_plans = removal_rounds_from_rows(notched)
         filter_stopband_count = sum(
             len(plan.stopbands) for plan in filter_plans
         )

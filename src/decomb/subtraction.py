@@ -110,3 +110,13 @@ def _inapplicable_manifest_fields(settings) -> dict[str, float | str]:
     fields["familywise_error_rate"] = settings.familywise_error_rate
     fields["in_stopband_change_db"] = ""
     return fields
+
+
+def subtraction_rows(rows: Sequence[dict]) -> list[dict]:
+    """The subtraction rows of a manifest, empty for manifests written before it."""
+    return [row for row in rows if str(row.get("kind", "")) == "subtracted"]
+
+
+def notch_rows(rows: Sequence[dict]) -> list[dict]:
+    """The FIR-cascade rows of a manifest, which alone declare removal rounds."""
+    return [row for row in rows if str(row.get("kind", "")) != "subtracted"]
