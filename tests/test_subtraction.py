@@ -52,3 +52,29 @@ def test_authorized_frequencies_match_what_the_planner_would_notch():
     )
 
     assert subtraction.authorized_frequencies(round_evidence, _settings()) == planned
+
+
+def test_damage_interval_spans_two_frequency_bins_each_side():
+    settings = _settings()
+    half = 2.0 * settings.frequency_bin_width_hz
+
+    assert subtraction.damage_intervals((40.0,), settings) == ((40.0 - half, 40.0 + half),)
+
+
+def test_overlapping_damage_intervals_merge():
+    settings = _settings()
+    half = 2.0 * settings.frequency_bin_width_hz
+    close = 40.0 + half
+
+    merged = subtraction.damage_intervals((40.0, close), settings)
+
+    assert merged == ((40.0 - half, close + half),)
+
+
+def test_separated_damage_intervals_do_not_merge():
+    settings = _settings()
+    half = 2.0 * settings.frequency_bin_width_hz
+
+    intervals = subtraction.damage_intervals((40.0, 40.0 + 5.0 * half), settings)
+
+    assert len(intervals) == 2
