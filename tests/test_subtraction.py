@@ -283,3 +283,29 @@ def test_verify_rejects_a_manifest_whose_subtraction_is_unauthorized(tmp_path):
 
     with pytest.raises(ValueError, match="subtract"):
         notch.verify_harmonic_run(vhdr, cleaned_vhdr, tampered, _settings())
+
+
+def test_apply_then_verify_round_trips_subtraction_through_the_manifest(tmp_path):
+    import argparse
+
+    source_root, _ = _synthetic_bids_recording(tmp_path)
+    args = argparse.Namespace(
+        config=None,
+        bids_root=source_root,
+        output_root=tmp_path / "derivative",
+        report_dir=tmp_path / "reports",
+        n_jobs=1,
+    )
+
+    notch.run(args)
+
+    manifest = notch._read_manifest(args.output_root / notch.MANIFEST_NAME)
+    assert notch.MANIFEST_REQUIRED_COLUMNS <= set(manifest.columns)
+    rows = manifest.to_dict("records")
+    assert subtraction.subtraction_rows(rows)
+    assert _fir_round_indices(rows)
+
+    notch.run_verify(args)
+
+    verification = notch._read_manifest(args.report_dir / notch.VERIFICATION_NAME)
+    assert (verification["kind"] == "subtracted").any()
