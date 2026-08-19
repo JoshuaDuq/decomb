@@ -33,15 +33,17 @@ LOCAL_CONFIG_NAME = "decomb.yaml"
 
 #: Paths another path may refer to with a ``<name>`` placeholder.
 REFERENCEABLE = ("bids_root", "output_root")
-ALLOWED_TOP_LEVEL = {"paths", "removal", "frequency_bands"}
+ALLOWED_TOP_LEVEL = {"paths", "removal", "execution", "frequency_bands"}
 ALLOWED_PATHS = {"bids_root", "output_root", "diagnosis_dir", "removal_dir"}
 ALLOWED_REMOVAL = {
+    "comb_fundamental_hz",
     "estimation_window_s",
     "familywise_error_rate",
     "frequency_range_hz",
     "scanner_repetition_time_s",
     "scanner_trigger_event_name",
 }
+ALLOWED_EXECUTION = {"n_jobs"}
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -174,7 +176,11 @@ def _validate_user_config(user: Mapping[str, Any]) -> None:
     unknown_sections = set(user) - ALLOWED_TOP_LEVEL
     if unknown_sections:
         raise ValueError(f"Unknown config section(s): {sorted(unknown_sections)}.")
-    for section, allowed in (("paths", ALLOWED_PATHS), ("removal", ALLOWED_REMOVAL)):
+    for section, allowed in (
+        ("paths", ALLOWED_PATHS),
+        ("removal", ALLOWED_REMOVAL),
+        ("execution", ALLOWED_EXECUTION),
+    ):
         block = user.get(section)
         if block is None:
             if section in user:

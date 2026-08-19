@@ -347,7 +347,7 @@ def test_cleaning_applies_the_complete_supported_scanner_harmonics(monkeypatch):
                 probabilities[0, 1, 3] = 1e-12
         return frequencies_hz, probabilities
 
-    def apply(raw, plan):
+    def apply(raw, plan, *, n_jobs=-1):
         filtered = raw.copy()
         filtered._data[0, 0] += 1.0
         return filtered
@@ -731,7 +731,7 @@ def test_cleaning_continues_until_a_fresh_holm_fit_is_null(monkeypatch):
     monkeypatch.setattr(notch, "_line_test_p_values", p_values)
     monkeypatch.setattr(notch, "_thomson_f_p_values", p_values)
 
-    def attenuate(raw, plan):
+    def attenuate(raw, plan, *, n_jobs=-1):
         filtered = raw.copy()
         filtered._data *= 0.5
         return filtered
@@ -779,7 +779,9 @@ def test_persistent_peak_family_is_fitted_only_on_the_unfiltered_source(
     monkeypatch.setattr(
         notch,
         "apply_harmonic_notches",
-        lambda raw, plan: raw.copy().apply_function(lambda data: data * 0.5),
+        lambda raw, plan, *, n_jobs=-1: raw.copy().apply_function(
+            lambda data: data * 0.5
+        ),
     )
     monkeypatch.setattr(
         notch,
@@ -817,7 +819,7 @@ def test_cleaning_spends_the_recording_error_rate_across_rounds(monkeypatch):
     monkeypatch.setattr(notch, "_line_test_p_values", p_values)
     monkeypatch.setattr(notch, "_thomson_f_p_values", p_values)
 
-    def attenuate(raw, plan):
+    def attenuate(raw, plan, *, n_jobs=-1):
         filtered = raw.copy()
         filtered._data *= 0.5
         return filtered
@@ -1070,7 +1072,7 @@ def test_verification_refits_and_replays_scanner_harmonics_evidence(
                 probabilities[0, 1, 3] = 1e-12
         return frequencies_hz, probabilities
 
-    def apply(raw, plan):
+    def apply(raw, plan, *, n_jobs=-1):
         filtered = raw.copy()
         filtered._data[:, 0] += 1.0
         return filtered
@@ -1572,3 +1574,73 @@ def test_public_pipeline_has_one_automatic_correction_stage():
     from decomb import cli
 
     assert cli.STAGES == ("diagnose", "apply", "verify", "psd")
+
+
+def test_comb_fundamental_defaults_to_one_over_the_tr():
+    settings = notch.HarmonicNotchSettings(
+        estimation_window_s=10.0,
+        familywise_error_rate=0.05,
+        frequency_range_hz=(0.0, 100.0),
+        scanner_repetition_time_s=0.9,
+    )
+
+    assert settings.comb_fundamental_hz is None
+    assert settings.comb_fundamental == pytest.approx(1.0 / 0.9)
+
+
+def test_declared_comb_fundamental_replaces_the_tr_derived_grid():
+    """A cold head at 72 cycles per minute is 1.2 Hz, not the 1.1111 Hz volume rate."""
+    settings = notch.HarmonicNotchSettings(
+        estimation_window_s=10.0,
+        familywise_error_rate=0.05,
+        frequency_range_hz=(0.0, 100.0),
+        scanner_repetition_time_s=0.9,
+        comb_fundamental_hz=1.2,
+    )
+
+    assert settings.comb_fundamental == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.2, float("nan"), float("inf")])
+def test_invalid_declared_comb_fundamental_is_refused(value):
+    with pytest.raises(ValueError, match="comb_fundamental_hz"):
+        notch.HarmonicNotchSettings(
+            estimation_window_s=10.0,
+            familywise_error_rate=0.05,
+            frequency_range_hz=(0.0, 100.0),
+            comb_fundamental_hz=value,
+        )
+
+
+def test_declared_fundamental_is_used_after_the_trigger_check_still_passes(monkeypatch):
+    """The declared grid replaces the TR grid; the trigger timing check still runs."""
+    import mne
+
+    raw = mne.io.RawArray(
+        np.zeros((2, 4_000)),
+        mne.create_info(["Cz", "C3"], 1_000.0, "eeg"),
+        verbose="ERROR",
+    )
+    raw.set_annotations(
+        mne.Annotations(onset=[0.0, 0.9, 1.8], duration=[0.0] * 3,
+                        description=["Volume/V  1"] * 3)
+    )
+    settings = notch.HarmonicNotchSettings(
+        estimation_window_s=10.0,
+        familywise_error_rate=0.05,
+        frequency_range_hz=(0.0, 100.0),
+        scanner_repetition_time_s=0.9,
+        comb_fundamental_hz=1.2,
+    )
+
+    assert notch.scanner_fundamental_hz(raw, settings) == pytest.approx(1.2)
+
+    mistimed = notch.HarmonicNotchSettings(
+        estimation_window_s=10.0,
+        familywise_error_rate=0.05,
+        frequency_range_hz=(0.0, 100.0),
+        scanner_repetition_time_s=0.8,
+        comb_fundamental_hz=1.2,
+    )
+    with pytest.raises(ValueError, match="TR within half a sample"):
+        notch.scanner_fundamental_hz(raw, mistimed)

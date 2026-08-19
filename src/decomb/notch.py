@@ -40,6 +40,7 @@ class HarmonicNotchSettings:
     frequency_range_hz: tuple[float, float]
     scanner_repetition_time_s: float = 0.9
     scanner_trigger_event_name: str = "Volume/V  1"
+    comb_fundamental_hz: float | None = None
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.estimation_window_s) or self.estimation_window_s <= 0.0:
@@ -73,6 +74,31 @@ class HarmonicNotchSettings:
             raise ValueError(
                 "removal.scanner_trigger_event_name must be a non-empty string."
             )
+        if self.comb_fundamental_hz is not None and (
+            not np.isfinite(self.comb_fundamental_hz)
+            or self.comb_fundamental_hz <= 0.0
+        ):
+            raise ValueError(
+                "removal.comb_fundamental_hz must be finite and positive when set."
+            )
+
+    @property
+    def comb_fundamental(self) -> float:
+        """The comb's fundamental, declared outright or derived from the TR.
+
+        A periodic device does not have to run at the volume rate. When the artifact's
+        source has its own known rate -- a cold head at 72 cycles per minute is
+        1.2 Hz, against a 1.1111 Hz volume rate for a 0.9 s TR -- the trigger-derived
+        grid lands between the teeth and tests frequencies the artifact never occupies.
+
+        Declaring the rate keeps the property the trigger anchoring exists to protect:
+        the grid is still fixed before any spectrum is inspected, so it cannot be
+        fished out of the data. It is a stated fact about the hardware, exactly as the
+        TR is, and the trigger check still validates the recording's timing.
+        """
+        if self.comb_fundamental_hz is not None:
+            return float(self.comb_fundamental_hz)
+        return 1.0 / self.scanner_repetition_time_s
 
     @property
     def estimation_overlap(self) -> float:
@@ -166,6 +192,11 @@ class HarmonicNotchSettings:
                 block["scanner_repetition_time_s"]
             ),
             scanner_trigger_event_name=block["scanner_trigger_event_name"],
+            comb_fundamental_hz=(
+                None
+                if block["comb_fundamental_hz"] is None
+                else float(block["comb_fundamental_hz"])
+            ),
         )
 
 
@@ -723,7 +754,7 @@ def scanner_fundamental_hz(raw, settings: HarmonicNotchSettings) -> float:
             f"Scanner trigger intervals do not equal the configured "
             f"{settings.scanner_repetition_time_s:g} s TR within half a sample."
         )
-    return 1.0 / settings.scanner_repetition_time_s
+    return settings.comb_fundamental
 
 
 def detect_scanner_harmonics(
@@ -958,12 +989,14 @@ def _line_model_from_detection(raw, result) -> lines.LineModel:
 def clean_until_no_supported_lines(
     raw,
     settings: HarmonicNotchSettings,
+    *,
+    n_jobs: int = -1,
 ) -> HarmonicCleaningResult:
     """Apply FIR rounds until line and trigger-anchored comb tests are null."""
-    return _clean_until_model_null(raw, settings)
+    return _clean_until_model_null(raw, settings, n_jobs=n_jobs)
 
 
-def _clean_until_model_null(raw, settings) -> HarmonicCleaningResult:
+def _clean_until_model_null(raw, settings, *, n_jobs: int = -1) -> HarmonicCleaningResult:
     """Iterate line and scanner-comb evidence to their joint terminal null."""
     cleaned = raw.copy()
     rounds = []
@@ -985,7 +1018,7 @@ def _clean_until_model_null(raw, settings) -> HarmonicCleaningResult:
             )
 
         filter_plan = evidence.filter_plan
-        filtered = apply_harmonic_notches(cleaned, filter_plan)
+        filtered = apply_harmonic_notches(cleaned, filter_plan, n_jobs=n_jobs)
         if np.array_equal(filtered.get_data(), cleaned.get_data()):
             raise RuntimeError(
                 "A supported residual line remains, but its FIR round changed no samples."
@@ -1016,7 +1049,7 @@ def _clean_until_model_null(raw, settings) -> HarmonicCleaningResult:
         cleaned = filtered
 
 
-def apply_harmonic_notches(raw, plan: HarmonicNotchPlan):
+def apply_harmonic_notches(raw, plan: HarmonicNotchPlan, *, n_jobs: int = -1):
     """Return a copy with the evidence-bounded line intervals removed from EEG."""
     import mne
 
@@ -1024,11 +1057,16 @@ def apply_harmonic_notches(raw, plan: HarmonicNotchPlan):
     if len(picks) == 0:
         raise ValueError("Harmonic notching requires at least one EEG channel.")
     filtered = raw.copy()
-    _apply_harmonic_notches(filtered, plan, picks)
+    _apply_harmonic_notches(filtered, plan, picks, n_jobs=n_jobs)
     return filtered
 
 
-def apply_channel_notches(raw, plans: Sequence[ChannelNotchPlan]):
+def apply_channel_notches(
+    raw,
+    plans: Sequence[ChannelNotchPlan],
+    *,
+    n_jobs: int = -1,
+):
     """Apply each statistically supported geometry only to its EEG channel."""
     import mne
 
@@ -1053,11 +1091,11 @@ def apply_channel_notches(raw, plans: Sequence[ChannelNotchPlan]):
 
     filtered = raw.copy()
     for geometry, names in geometries.items():
-        _apply_harmonic_notches(filtered, geometry, names)
+        _apply_harmonic_notches(filtered, geometry, names, n_jobs=n_jobs)
     return filtered
 
 
-def _apply_harmonic_notches(raw, plan, picks):
+def _apply_harmonic_notches(raw, plan, picks, *, n_jobs: int = -1):
     """Apply one validated FIR geometry to selected channels in place."""
     sampling_frequency_hz = float(raw.info["sfreq"])
     nyquist_hz = sampling_frequency_hz / 2.0
@@ -1102,7 +1140,7 @@ def _apply_harmonic_notches(raw, plan, picks):
         fir_design=FIR_DESIGN,
         pad=FIR_PAD,
         skip_by_annotation=recordings.ACQUISITION_BOUNDARY_ANNOTATIONS,
-        n_jobs=-1,
+        n_jobs=n_jobs,
         verbose="ERROR",
     )
 
@@ -1744,10 +1782,12 @@ def clean_harmonic_run(
     source_root: Path,
     settings,
     analysed_bands: tuple[tuple[str, float, float], ...],
+    *,
+    n_jobs: int = -1,
 ) -> list[dict[str, float | str]]:
     """Fit supported residual rounds, write, and require a terminal null."""
     raw = recordings.read_bids_raw(vhdr)
-    result = clean_until_no_supported_lines(raw, settings)
+    result = clean_until_no_supported_lines(raw, settings, n_jobs=n_jobs)
     filtered = result.cleaned
 
     destination_vhdr = recordings.derivative_vhdr_path(
@@ -1959,6 +1999,11 @@ def settings_for_verification(
             scanner_trigger_event_name=str(
                 parameters["scanner_trigger_event_name"]
             ),
+            comb_fundamental_hz=(
+                None
+                if parameters.get("comb_fundamental_hz") is None
+                else float(parameters["comb_fundamental_hz"])
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
@@ -2049,6 +2094,11 @@ def run(args: argparse.Namespace) -> None:
     report_dir = config.path("removal_dir", override=getattr(args, "report_dir", None))
     settings = HarmonicNotchSettings.from_config(config)
     analysed_bands = analysed_bands_from_config(config)
+    n_jobs = (
+        recordings.n_jobs_from_config(config)
+        if getattr(args, "n_jobs", None) is None
+        else recordings.validated_n_jobs(args.n_jobs)
+    )
     runs = recordings.discover_runs(source_root, subjects=None, task="*")
 
     if output_root.exists():
@@ -2073,6 +2123,7 @@ def run(args: argparse.Namespace) -> None:
             source_root,
             settings,
             analysed_bands,
+            n_jobs=n_jobs,
         )
         rows.extend(measured)
         detected_rows = [
@@ -2340,8 +2391,10 @@ def _validate_scanner_harmonic_manifest_evidence(
     }:
         raise ValueError("Manifest scanner timing differs from apply settings.")
     fundamentals = {float(row["fundamental_hz"]) for row in rows}
-    if fundamentals != {1.0 / settings.scanner_repetition_time_s}:
-        raise ValueError("Manifest scanner fundamental does not equal one over the TR.")
+    if fundamentals != {settings.comb_fundamental}:
+        raise ValueError(
+            "Manifest comb fundamental does not equal the configured fundamental."
+        )
     p_values = {float(row["scanner_family_corrected_p_value"]) for row in rows}
     if len(p_values) != 1 or not 0.0 <= next(iter(p_values)) < round_error_rate:
         raise ValueError("Manifest scanner harmonics are not statistically supported.")

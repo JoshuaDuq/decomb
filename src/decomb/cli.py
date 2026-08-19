@@ -57,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--report-dir", type=Path, default=None, help="apply/verify/psd: where reports go"
     )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help=(
+            "override execution.n_jobs for this run: -1 for every core, or a positive "
+            "integer. Channels are independent, so this changes speed, not results."
+        ),
+    )
     return parser
 
 

@@ -18,6 +18,15 @@ removal:
   scanner_repetition_time_s: 0.9
   scanner_trigger_event_name: "Volume/V  1"
 
+  # The comb's fundamental, in hertz. Left null it is derived from the TR above, which
+  # assumes the periodic source is the volume acquisition. Set it when the source runs
+  # at its own known rate: a cryogenic cold head at 72 cycles per minute is 1.2 Hz,
+  # while a 0.9 s TR gives 1.1111 Hz, and a grid built on the wrong one tests
+  # frequencies between the teeth. Declare it from what the hardware does, never from
+  # a spectrum -- the point of fixing the grid in advance is that it cannot be fished
+  # out of the data. The trigger check above still validates the recording's timing.
+  comb_fundamental_hz: null
+
   # Ordinary line fits use MNE's documented 10 s stationarity horizon. Scanner-comb
   # localization uses a fixed 4 s horizon while its frequency is fixed by the TR above.
   # Ordinary lines and weak scanner teeth use a derived minimum 0.25 Hz stopband. A
@@ -37,6 +46,18 @@ removal:
   # Study span eligible for detection and removal. Each recording clips the upper edge
   # to frequencies strictly below its Nyquist limit.
   frequency_range_hz: [0.0, 100.0]
+
+
+# How the work is executed. Nothing here changes a result: the per-channel stages are
+# independent across channels, so the worker count decides only how long a run takes.
+# Kept apart from `removal` for exactly that reason -- `removal` holds the irreducible
+# scientific choices, and this does not belong among them.
+execution:
+  # Worker processes for the per-channel stages: the selective FIR notches and, when a
+  # recovery stage runs, its per-channel fits. -1 uses every core; a positive number
+  # pins the count. Lower it if a recovery stage's per-channel working set is large
+  # enough that several workers together would exhaust memory.
+  n_jobs: -1
 
 # Optional study definitions used only to report unavailable bandwidth. They never decide
 # which frequencies are detected or removed.

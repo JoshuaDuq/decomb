@@ -26,6 +26,10 @@ def test_correction_config_contains_only_irreducible_user_choices():
         "frequency_range_hz",
         "scanner_repetition_time_s",
         "scanner_trigger_event_name",
+        # The comb's fundamental is a fact about the hardware, like the TR. It is here
+        # because a periodic source need not run at the volume rate, and no derivation
+        # can supply it -- only a statement about what the device does.
+        "comb_fundamental_hz",
     }
     assert settings.familywise_error_rate == 0.05
     assert settings.estimation_window_s == 10.0

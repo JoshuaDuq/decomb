@@ -437,6 +437,26 @@ def mirror_sidecars(source_root: Path, output_root: Path) -> int:
     return copied
 
 
+def validated_n_jobs(n_jobs: int) -> int:
+    """Validate a worker count: a positive integer, or -1 for every core."""
+    if not isinstance(n_jobs, int) or isinstance(n_jobs, bool):
+        raise ValueError("n_jobs must be an integer.")
+    if n_jobs == 0 or n_jobs < -1:
+        raise ValueError("n_jobs must be -1 for every core, or a positive integer.")
+    return n_jobs
+
+
+def n_jobs_from_config(config) -> int:
+    """Read `execution.n_jobs`, the worker count for the per-channel stages."""
+    value = config.get("execution.n_jobs")
+    if value is None:
+        raise ValueError("Missing `execution` setting(s): ['n_jobs'].")
+    try:
+        return validated_n_jobs(value)
+    except ValueError as error:
+        raise ValueError(f"execution.n_jobs is invalid: {error}") from error
+
+
 def write_tsv_atomic(frame: pd.DataFrame, path: Path) -> None:
     """Publish a complete TSV or leave the previous table untouched."""
     path.parent.mkdir(parents=True, exist_ok=True)
