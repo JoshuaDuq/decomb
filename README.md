@@ -209,20 +209,27 @@ transfer between recordings.
 **Converge.** The FIR rounds described below then run until fresh ordinary-line and
 scanner-comb fits are both null.
 
-![Removal mechanism and its cohort-level effect](docs/pipeline_stages.png)
+![Comb removal in one recording](docs/comb_removal_spectrum.png)
 
-**Removal mechanism and its effect across the cohort.** **a**, Channel-mean spectra of one
-recording over a 3 Hz window, 0.1 Hz Welch bins. Subtraction removes the fitted component at
-a single bin; the residual stage filters a contiguous band, shown shaded at its stopband.
-Both drive the frequency below its local background, so the distinction between them is
-width, not depth, and that is what their declared intervals encode. **b**, Power removed by
-each stage over 20 to 95 Hz in the same recording, with the number of affected Fourier bins
-and the median depth. Subtraction acts at many frequencies shallowly; the converged rounds
-act deeply on the few strong isolated lines. **c**, Comb prominence, the median height of the
-1.2 Hz teeth above the midpoints between them, in the source and in the derivative; each line
-is one recording. **d**, Bandwidth retained in each study band once all three stages declare
-their cost. Boxes show median and quartiles, points are individual recordings, numbers are
-means.
+**Figure 1. What the pipeline removes.** Channel-mean spectra of one recording over a 12 Hz
+window, 0.1 Hz Welch bins. The shaded area is the power removed. Subtraction takes the comb
+teeth down to the local background; the residual and converged stages filter out the few
+frequencies that survive it, and those stopbands continue below the axis.
+
+![Comb prominence before and after, 90 recordings](docs/comb_removal_cohort.png)
+
+**Figure 2. The comb is removed in every recording.** Comb prominence is the median height of
+the 1.2 Hz teeth above the midpoints between them. Every recording moves from the diagonal,
+where nothing changed, to the horizontal line, where the teeth sit level with their
+background. Points below the line are teeth driven slightly under it.
+
+![Bandwidth retained per band](docs/availability_cost.png)
+
+**Figure 3. What it costs.** Bandwidth retained in each study band once subtraction damage,
+residual stopbands and the FIR cascade are all declared. Each point is one recording, the
+rule marks the mean. Gamma carries almost the whole cost, because that is where the comb and
+the isolated lines are; the single alpha outlier at 53% is sub-0009 run 6, where supported
+lines were detected inside the alpha band.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
