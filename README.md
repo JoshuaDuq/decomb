@@ -187,6 +187,39 @@ If neither family is significant, that joint null result is recorded explicitly 
 recording is copied without filtering. A clean statistical outcome is valid and does not
 abort diagnosis, application, or verification.
 
+### Subtraction and the residual stage
+
+`apply` removes a line by fitting and subtracting it before any filtering, and notches
+only what survives. Three stages run in order.
+
+**Subtract.** A round-one fit selects targets: the statistically supported ordinary lines,
+plus comb teeth standing more than 1 dB proud of their local background. MNE's
+`spectrum_fit` estimates one sinusoid's amplitude and phase per window and removes exactly
+that, so the frequency stays populated and anything the sinusoid does not describe
+survives. The fit window is twice the detection window -- 20 s at the default 10 s --
+which halves the bandwidth a fit destroys without changing what detection can see.
+
+**Notch the residue.** Detected bins closer than three Fourier bins are one physical line;
+a group whose post-subtraction prominence still exceeds 2 dB is notched across its whole
+span plus 1.25 bins each side. Choosing by the residual that survives subtraction, rather
+than by prominence before it, is what makes this threshold transfer between recordings
+[[docs/removal_operating_point.md](docs/removal_operating_point.md)].
+
+**Converge.** The existing FIR rounds then run until fresh ordinary-line and scanner-comb
+fits are both null, exactly as below.
+
+Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
+included, so each subtracted frequency declares an unavailable interval of two Fourier bins
+of the fit window on each side. Those intervals are merged with the FIR stopbands and their
+transitions, and every manifest row carries the single recording-wide share that results.
+`verify` re-derives both stages from the source before replaying them.
+
+This stage is deliberately heuristic: it removes material the converged statistical rounds
+would not remove, which is where its advantage on the comb comes from. The constants come
+from measurements on this cohort, recorded in
+[`docs/removal_operating_point.md`](docs/removal_operating_point.md) and
+[`docs/artifact_survey.md`](docs/artifact_survey.md).
+
 ### Stopbands and FIR filtering
 
 Each ordinary-line stopband covers its statistically supported Fourier-bin positions,
@@ -256,7 +289,7 @@ remains visible, and both figures share one decibel scale.
 
 ### Validation scope
 
-Null calibration uses stationary Gaussian surrogates whose channel spectra match
+Null calibration used stationary Gaussian surrogates whose channel spectra match
 median-smoothed real-recording periodograms. This deliberately line-free null tests the
 implementation under a known stochastic model; it does not establish calibration for
 arbitrary nonstationary, non-Gaussian EEG. The primary null result is the proportion of
@@ -291,6 +324,13 @@ significant digits.
 `diagnose` writes `model.tsv`, `detected_lines.tsv`, and `stopbands.tsv`. `apply` writes
 `line_notch_manifest.tsv`, and `verify` writes `line_notch_verification.tsv`.
 
+`apply` also writes two advisory tables. `comb_analysis_mask.tsv` lists every comb tooth in
+the band where the comb was measured, at the width a subtracted tooth declares, whether or
+not a given recording removed that tooth; `analysis_availability.tsv` gives each band's
+retained share with and without that mask. Both are for downstream analysis only. Neither
+describes the derivative: the manifest records what was destroyed, these record what an
+analyst may additionally choose to distrust.
+
 ## Before and after
 
 All 90 recordings, representing 12.09 hours of continuous acquisition after excluding
@@ -309,27 +349,29 @@ power; each recording has equal weight.
 
 | Band | Before availability | After availability | Made unavailable |
 | --- | ---: | ---: | ---: |
-| Delta | 100.000% | 80.234% | 19.766 percentage points |
-| Theta | 100.000% | 81.247% | 18.753 percentage points |
-| Alpha | 100.000% | 85.044% | 14.956 percentage points |
-| Beta | 100.000% | 77.227% | 22.773 percentage points |
-| Gamma | 100.000% | 59.210% | 40.790 percentage points |
+| Delta | 100.000% | 98.778% | 1.222 percentage points |
+| Theta | 100.000% | 99.943% | 0.057 percentage points |
+| Alpha | 100.000% | 99.476% | 0.524 percentage points |
+| Beta | 100.000% | 92.718% | 7.282 percentage points |
+| Gamma | 100.000% | 77.812% | 22.188 percentage points |
 
-The availability cost is substantial because removal was allowed to follow all
-statistically authorized geometry without a minimum retained-band constraint. Replicated
-scanner evidence authorized the complete comb in 53 of 90 recordings; supported teeth
-also use the wider local-background envelope needed to remove their visible skirts.
+These declare all three removal stages -- subtraction damage, residual stopbands and the
+FIR cascade -- merged per recording. Gamma carries almost the whole cost, because that is
+where the comb and the isolated lines are. An earlier notching-only configuration of this
+pipeline retained 59.210% of gamma and 85.044% of alpha for the same cohort.
 
-Two measurements since that audit bear on this cost.
+Two measurements set the current configuration.
 [`docs/artifact_survey.md`](docs/artifact_survey.md) reports that the comb in this cohort
-is at 1.200 Hz rather than the 1.1111 Hz the TR implies, so most of the geometry above was
-spent on frequencies the artifact does not occupy; declaring the fundamental removes the
-comb 5 dB further while notching fewer places.
-[`docs/removal_operating_point.md`](docs/removal_operating_point.md) measures subtracting
-a line instead of notching it, which raises mean gamma availability from 0.592 to 0.900
-and alpha from 0.850 to 0.975 across the same 90 recordings, at the cost of leaving the
-comb near its background. Neither is what `apply` writes today; both are evaluated, not
-enabled.
+is at 1.200 Hz rather than the 1.1111 Hz the TR implies, so geometry anchored to the
+trigger grid was spent on frequencies the artifact does not occupy; `removal.comb_fundamental_hz`
+must be declared for the residual stage to test the grid the artifact actually occupies.
+[`docs/removal_operating_point.md`](docs/removal_operating_point.md) derives the fit
+window, the residual floor and the clustering gap from sweeps on these 90 recordings.
+
+The cost of this choice is that the comb is left at its background rather than driven
+below it: notching on the corrected 1.2 Hz grid reaches -6.80 dB where subtraction reaches
+about -0.3 dB, at alpha 0.744 and gamma 0.556. That trade is a study-level decision and is
+recorded in the same document.
 
 ## Software and testing
 
