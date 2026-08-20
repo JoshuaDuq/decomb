@@ -73,3 +73,16 @@ machine-readable list of subtracted frequencies is the outstanding provenance wo
 - In `comb_sweep_w20.tsv`, sub-0003's offsets >= 0.05 Hz fall inside the mains stopband
   (its neighbour tooth is 60.0 Hz) and measure notching, not subtraction. Filter on
   `injected_frequency_fir_unavailable`. sub-0013 run-3 has no on-grid tooth pair at 20 s.
+
+## Scripts extracted to `archive/full-tree`
+
+`arms_declared.py`, `fixed_config.py`, `comb_injection.py`, `comb_injection/`, `psd_after.py`
+and `psd_compare.py` depended on `recovery_benchmark` / `recovery_evaluation`, which are not
+part of the shipped pipeline and were extracted with them. Their **results are still here** --
+`arms_declared.tsv`, `final_config.tsv`, `arm_combined.tsv` and the reports that read them.
+To re-run those arms, check out `archive/full-tree`, which holds the tree exactly as it was
+when they were produced.
+
+Scripts that still run against the shipped pipeline: `derived_shipped.py`,
+`shipped_tuned_probe.py`, `derivative_stats.py`, `raw_comb.py`, `derived_vs_tuned.py`,
+`comb_evidence.py`, `verify_fix.py`.

@@ -19,18 +19,6 @@ def _channels(n_channels: int = 3, n_times: int = 600) -> np.ndarray:
     return rng.normal(scale=0.5, size=(n_channels, n_times)) + artifact
 
 
-@pytest.mark.parametrize("n_jobs", [2, -1])
-def test_trajectory_pca_is_identical_in_parallel(n_jobs):
-    data = _channels()
-    settings = recovery.TrajectoryPCASettings(segment_s=0.2)
-
-    serial = recovery.subtract_recursive_trajectory_pca(data, 100.0, settings, n_jobs=1)
-    parallel = recovery.subtract_recursive_trajectory_pca(
-        data, 100.0, settings, n_jobs=n_jobs
-    )
-
-    np.testing.assert_array_equal(serial.cleaned_data, parallel.cleaned_data)
-    np.testing.assert_array_equal(serial.artifact_data, parallel.artifact_data)
 
 
 def test_multitaper_is_identical_in_parallel():
@@ -46,24 +34,6 @@ def test_multitaper_is_identical_in_parallel():
     np.testing.assert_array_equal(serial.cleaned_data, parallel.cleaned_data)
 
 
-def test_trigger_locked_basis_is_identical_in_parallel():
-    data = _channels(n_times=1_000)
-    triggers = np.arange(0, 900, 90, dtype=np.int64)
-
-    def subtract(n_jobs):
-        return recovery.subtract_trigger_locked_optimal_basis(
-            data,
-            100.0,
-            (11.111111111111111,),
-            triggers,
-            repetition_time_s=0.9,
-            component_count=2,
-            n_jobs=n_jobs,
-        )
-
-    np.testing.assert_array_equal(
-        subtract(1).artifact_data, subtract(2).artifact_data
-    )
 
 
 @pytest.mark.parametrize("n_jobs", [0, -2, 1.0, True, "4"])
