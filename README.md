@@ -209,27 +209,15 @@ transfer between recordings.
 **Converge.** The FIR rounds described below then run until fresh ordinary-line and
 scanner-comb fits are both null.
 
-![Comb removal in one recording](docs/comb_removal_spectrum.png)
+![Power spectral density before and after removal](docs/decomb_psd.png)
 
-**Figure 1. What the pipeline removes.** Channel-mean spectra of one recording over a 12 Hz
-window, 0.1 Hz Welch bins. The shaded area is the power removed. Subtraction takes the comb
-teeth down to the local background; the residual and converged stages filter out the few
-frequencies that survive it, and those stopbands continue below the axis.
-
-![Comb prominence before and after, 90 recordings](docs/comb_removal_cohort.png)
-
-**Figure 2. The comb is removed in every recording.** Comb prominence is the median height of
-the 1.2 Hz teeth above the midpoints between them. Every recording moves from the diagonal,
-where nothing changed, to the horizontal line, where the teeth sit level with their
-background. Points below the line are teeth driven slightly under it.
-
-![Bandwidth retained per band](docs/availability_cost.png)
-
-**Figure 3. What it costs.** Bandwidth retained in each study band once subtraction damage,
-residual stopbands and the FIR cascade are all declared. Each point is one recording, the
-rule marks the mean. Gamma carries almost the whole cost, because that is where the comb and
-the isolated lines are; the single alpha outlier at 53% is sub-0009 run 6, where supported
-lines were detected inside the alpha band.
+**What the pipeline does.** Channel-mean power spectral density of one recording over a 15 Hz
+window, 0.1 Hz Welch bins from 10 s segments. Blue shading is the power removed. Pink bands
+are the frequencies the manifest declares unavailable for inference; their 1.2 Hz spacing is
+the comb. A narrow band is a subtracted line, which costs two Fourier bins of the fit window
+on each side; a wide band is a filter stopband and its transitions, where the spectrum is
+emptied and the trace leaves the axis. Removal is evidence-bounded, so untouched frequencies
+between the bands are bit-identical to the source.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
