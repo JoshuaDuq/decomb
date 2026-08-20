@@ -381,6 +381,36 @@ must be declared for the residual stage to test the grid the artifact actually o
 [`docs/removal_operating_point.md`](docs/removal_operating_point.md) derives the fit
 window, the residual floor and the clustering gap from sweeps on these 90 recordings.
 
+### Removal stays inside the bandwidth it declares
+
+Availability only means something if removal is confined to the intervals the manifest
+names. Measured on the difference between each source and its derivative, which is exactly
+what was removed, over all 90 recordings:
+
+| | mean | median | worst recording |
+| --- | ---: | ---: | ---: |
+| Removed energy inside the declared intervals | 99.889% | 99.911% | 99.439% |
+| Removed energy within the declared intervals plus 0.05 Hz | 99.986% | 99.986% | 99.977% |
+
+| Analytic bound, every filter the pipeline built | Value |
+| --- | ---: |
+| Maximum passband deviation | 0.027 dB |
+| Minimum stopband attenuation | 50.6 dB |
+
+The passband figure is a design-time property recorded for each filter in the manifest, not
+an estimate: outside its stopband and transitions, an FIR built here cannot alter a frequency
+by more than 0.027 dB. The subtraction stage is bounded empirically instead, and it is
+narrower than declared -- on a known stationary line the removed energy is entirely inside
++/- 0.05 Hz, against a declared +/- 0.1 Hz, so the manifest errs about twofold toward
+overstating the damage.
+
+Spectral resolution decides this measurement and it is easy to get wrong. Differencing two
+0.1 Hz-resolution spectra makes removal appear to leak, because a Welch estimate at that
+resolution smears a narrow removal across neighbouring bins; the same removal is 73 percent
+contained at 10 s segments and 100 percent contained at 30 s and finer. The figures above use
+30 s segments and the difference signal, so they measure the removal rather than the
+estimator. `studies/2026-08-19-arm-comparison/confinement.py` records the method.
+
 The cost of this choice is that the comb is left at its background rather than driven
 below it: notching on the corrected 1.2 Hz grid reaches -6.80 dB where subtraction reaches
 about -0.3 dB, at alpha 0.744 and gamma 0.556. That trade is a study-level decision and is
