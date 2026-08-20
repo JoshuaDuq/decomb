@@ -29,6 +29,8 @@ MULTIPLE_TESTING_METHOD = (
 )
 SCANNER_HARMONIC_ESTIMATION_WINDOW_S = 4.0
 VERIFICATION_NAME = "line_notch_verification.tsv"
+COMB_MASK_NAME = "comb_analysis_mask.tsv"
+ANALYSIS_AVAILABILITY_NAME = "analysis_availability.tsv"
 MANIFEST_REQUIRED_COLUMNS = frozenset(
     {
         "recording",
@@ -2247,6 +2249,17 @@ def run(args: argparse.Namespace) -> None:
 
     report_dir.mkdir(parents=True, exist_ok=True)
     recordings.write_tsv_atomic(frame, report_dir / MANIFEST_NAME)
+    mask_path, availability_path = write_comb_analysis_mask(
+        report_dir,
+        frame,
+        analysed_bands,
+        settings,
+        float(
+            mne.io.read_raw_brainvision(runs[0], preload=False, verbose="ERROR").info[
+                "sfreq"
+            ]
+        ),
+    )
     effective_path = effective.write(
         config,
         settings,
@@ -2254,6 +2267,8 @@ def run(args: argparse.Namespace) -> None:
         stage="apply",
     )
     print(f"  declared {output_root / described.name} a derivative of {source_root}")
+    print(f"  wrote {mask_path}")
+    print(f"  wrote {availability_path}")
     print(f"  wrote {report_dir / MANIFEST_NAME}")
     print(f"  wrote {effective_path}")
 
@@ -2925,6 +2940,70 @@ def verify_harmonic_run(
     for row in verification_rows:
         row["maximum_sample_deviation_v"] = maximum_sample_deviation_v
     return verification_rows
+
+
+def write_comb_analysis_mask(
+    report_dir: Path,
+    manifest: pd.DataFrame,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+    settings,
+    sampling_frequency_hz: float,
+) -> tuple[Path, Path]:
+    """Publish a conservative comb mask and the availability it leaves for analysis.
+
+    The mask is advisory. It covers every comb tooth in the band where the comb was
+    measured, at the width a subtracted tooth declares, whether or not this recording
+    removed that tooth. Nothing is removed from the derivative and the manifest is
+    unchanged: the manifest records what was destroyed, this records what an analyst may
+    additionally choose to distrust.
+    """
+    from decomb import residual
+
+    mask = residual.comb_analysis_mask(settings, sampling_frequency_hz)
+    fundamental_hz = float(settings.comb_fundamental)
+    mask_frame = pd.DataFrame(
+        [
+            {
+                "harmonic": int(round((low_hz + high_hz) / 2.0 / fundamental_hz)),
+                "centre_hz": (low_hz + high_hz) / 2.0,
+                "low_hz": low_hz,
+                "high_hz": high_hz,
+            }
+            for low_hz, high_hz in mask
+        ]
+    )
+    rows: list[dict[str, float | str]] = []
+    for recording, block in manifest.groupby("recording", sort=True):
+        declared = [
+            (float(low_hz), float(high_hz))
+            for low_hz, high_hz in zip(
+                block["unavailable_low_hz"],
+                block["unavailable_high_hz"],
+                strict=True,
+            )
+            if str(low_hz) != "" and str(high_hz) != ""
+        ]
+        without = band_availability_from_intervals(declared, analysed_bands)
+        with_mask = band_availability_from_intervals(
+            [*declared, *mask],
+            analysed_bands,
+        )
+        rows.extend(
+            {
+                "recording": recording,
+                "band": name,
+                "low_hz": low_hz,
+                "high_hz": high_hz,
+                "retained_declared": without[f"{name}_retained_share"],
+                "retained_with_comb_mask": with_mask[f"{name}_retained_share"],
+            }
+            for name, low_hz, high_hz in analysed_bands
+        )
+    mask_path = report_dir / COMB_MASK_NAME
+    availability_path = report_dir / ANALYSIS_AVAILABILITY_NAME
+    recordings.write_tsv_atomic(mask_frame, mask_path)
+    recordings.write_tsv_atomic(pd.DataFrame(rows), availability_path)
+    return mask_path, availability_path
 
 
 def _read_manifest(path: Path) -> pd.DataFrame:
