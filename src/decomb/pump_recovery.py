@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -92,3 +93,165 @@ def extract_adjacent_features(
     )
     products = coefficients[:, :, 1:] * np.conj(coefficients[:, :, :-1])
     return products.mean(axis=1)
+
+
+@dataclass(frozen=True)
+class CrossHarmonicModel:
+    """Frozen reduced-rank map from high-harmonic features to EEG coefficients."""
+
+    channel_names: tuple[str, ...]
+    feature_mean: NDArray[np.complex128]
+    feature_scale: NDArray[np.float64]
+    target_mean: NDArray[np.complex128]
+    weights: NDArray[np.complex128]
+
+    def predict(
+        self,
+        features: NDArray[np.complexfloating],
+        channel_names: Sequence[str],
+    ) -> NDArray[np.complex128]:
+        """Predict target coefficients without refitting on target data."""
+        if tuple(channel_names) != self.channel_names:
+            raise ValueError("channel names do not match the fitted model")
+        values = np.asarray(features, dtype=np.complex128)
+        if values.ndim != 2 or values.shape[1] != self.weights.shape[0]:
+            raise ValueError("features do not match the fitted model")
+        if not np.isfinite(values).all():
+            raise ValueError("features must be finite")
+        standardized = (values - self.feature_mean) / self.feature_scale
+        return self.target_mean + standardized @ self.weights
+
+
+def fit_complex_model(
+    features: NDArray[np.complexfloating],
+    targets: NDArray[np.complexfloating],
+    channel_names: Sequence[str],
+    *,
+    rank: int,
+    penalty: float,
+) -> CrossHarmonicModel:
+    """Fit one deterministic reduced-rank complex ridge model."""
+    predictors = np.asarray(features, dtype=np.complex128)
+    responses = np.asarray(targets, dtype=np.complex128)
+    names = tuple(str(name) for name in channel_names)
+    expected_target_shape = (predictors.shape[0], len(names))
+    if predictors.ndim != 2 or responses.shape != expected_target_shape:
+        raise ValueError("features and targets have incompatible shapes")
+    if not names or len(set(names)) != len(names):
+        raise ValueError("channel names must be non-empty and unique")
+    if not np.isfinite(predictors).all() or not np.isfinite(responses).all():
+        raise ValueError("training arrays must be finite")
+    if not isinstance(rank, int) or isinstance(rank, bool) or not (
+        1 <= rank <= min(predictors.shape)
+    ):
+        raise ValueError("rank must fit inside the feature matrix")
+    if not np.isfinite(penalty) or penalty <= 0.0:
+        raise ValueError("penalty must be finite and positive")
+
+    feature_mean = predictors.mean(axis=0)
+    feature_scale = np.sqrt(
+        np.mean(np.abs(predictors - feature_mean) ** 2, axis=0)
+    )
+    if np.any(feature_scale == 0.0):
+        raise ValueError("constant cross-harmonic features cannot train a model")
+    target_mean = responses.mean(axis=0)
+    standardized = (predictors - feature_mean) / feature_scale
+    centered_targets = responses - target_mean
+    left, singular_values, right = np.linalg.svd(
+        standardized,
+        full_matrices=False,
+    )
+    left = left[:, :rank]
+    singular_values = singular_values[:rank]
+    right = right[:rank]
+    shrinkage = singular_values / (singular_values**2 + penalty)
+    weights = right.conj().T @ (
+        shrinkage[:, None] * (left.conj().T @ centered_targets)
+    )
+    return CrossHarmonicModel(
+        names,
+        feature_mean,
+        feature_scale,
+        target_mean,
+        weights,
+    )
+
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """Inner-validation result and the model refitted on every training row."""
+
+    model: CrossHarmonicModel
+    rank: int
+    penalty: float
+    validation_error: float
+    validation_participants: tuple[str, ...]
+
+
+def select_model(
+    features: NDArray[np.complexfloating],
+    targets: NDArray[np.complexfloating],
+    participants: Sequence[str],
+    channel_names: Sequence[str],
+    *,
+    ranks: Sequence[int],
+    penalties: Sequence[float],
+) -> ModelSelection:
+    """Select rank and penalty with participant-balanced inner validation."""
+    predictors = np.asarray(features, dtype=np.complex128)
+    responses = np.asarray(targets, dtype=np.complex128)
+    groups = np.asarray(tuple(str(value) for value in participants))
+    if groups.shape != (predictors.shape[0],):
+        raise ValueError("participants must label every feature row")
+    validation_participants = tuple(sorted(set(groups)))
+    if len(validation_participants) < 2:
+        raise ValueError("model selection requires at least two participants")
+    candidate_ranks = tuple(int(rank) for rank in ranks)
+    candidate_penalties = tuple(float(penalty) for penalty in penalties)
+    if not candidate_ranks or not candidate_penalties:
+        raise ValueError("model selection candidates must not be empty")
+
+    candidates = []
+    for rank in candidate_ranks:
+        for penalty in candidate_penalties:
+            participant_errors = []
+            for participant in validation_participants:
+                validation = groups == participant
+                training = ~validation
+                model = fit_complex_model(
+                    predictors[training],
+                    responses[training],
+                    channel_names,
+                    rank=rank,
+                    penalty=penalty,
+                )
+                prediction = model.predict(
+                    predictors[validation],
+                    channel_names,
+                )
+                target_energy = float(np.sum(np.abs(responses[validation]) ** 2))
+                if target_energy <= 0.0:
+                    raise ValueError("validation targets must have positive energy")
+                error_energy = float(
+                    np.sum(np.abs(prediction - responses[validation]) ** 2)
+                )
+                participant_errors.append(error_energy / target_energy)
+            candidates.append(
+                (float(np.mean(participant_errors)), rank, penalty)
+            )
+
+    validation_error, rank, penalty = min(candidates)
+    model = fit_complex_model(
+        predictors,
+        responses,
+        channel_names,
+        rank=rank,
+        penalty=penalty,
+    )
+    return ModelSelection(
+        model,
+        rank,
+        penalty,
+        validation_error,
+        validation_participants,
+    )

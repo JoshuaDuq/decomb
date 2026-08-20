@@ -1,6 +1,7 @@
 """Tests for target-blind recovery of the 1.2 Hz pump fundamental."""
 
 import numpy as np
+import pytest
 
 from decomb import pump_recovery
 
@@ -37,3 +38,66 @@ def test_adjacent_features_do_not_read_the_exact_fundamental():
     )
 
     np.testing.assert_allclose(injected, original, rtol=0.0, atol=1e-12)
+
+
+def test_reduced_rank_model_predicts_a_held_out_fundamental():
+    rng = np.random.default_rng(4)
+    features = rng.normal(size=(120, 6)) + 1j * rng.normal(size=(120, 6))
+    mapping = rng.normal(size=(6, 3)) + 1j * rng.normal(size=(6, 3))
+    targets = features @ mapping
+
+    model = pump_recovery.fit_complex_model(
+        features[:90],
+        targets[:90],
+        ("Fz", "Cz", "Pz"),
+        rank=6,
+        penalty=1e-8,
+    )
+    predicted = model.predict(features[90:], ("Fz", "Cz", "Pz"))
+
+    np.testing.assert_allclose(predicted, targets[90:], rtol=1e-6, atol=1e-8)
+
+
+def test_model_refuses_reordered_channels():
+    features = np.eye(4, dtype=complex)
+    targets = np.ones((4, 2), dtype=complex)
+    model = pump_recovery.fit_complex_model(
+        features,
+        targets,
+        ("Fz", "Cz"),
+        rank=2,
+        penalty=1.0,
+    )
+
+    with pytest.raises(ValueError, match="channel names"):
+        model.predict(features, ("Cz", "Fz"))
+
+
+def test_model_selection_holds_out_every_training_participant():
+    rng = np.random.default_rng(5)
+    features = rng.normal(size=(60, 4)) + 1j * rng.normal(size=(60, 4))
+    mapping = rng.normal(size=(4, 2)) + 1j * rng.normal(size=(4, 2))
+    targets = features @ mapping
+    participants = np.repeat(("sub-01", "sub-02", "sub-03"), 20)
+
+    selected = pump_recovery.select_model(
+        features,
+        targets,
+        participants,
+        ("Fz", "Cz"),
+        ranks=(2, 4),
+        penalties=(1e-8, 1.0),
+    )
+    repeated = pump_recovery.select_model(
+        features,
+        targets,
+        participants,
+        ("Fz", "Cz"),
+        ranks=(2, 4),
+        penalties=(1e-8, 1.0),
+    )
+
+    assert selected.validation_participants == ("sub-01", "sub-02", "sub-03")
+    assert selected.rank == repeated.rank
+    assert selected.penalty == repeated.penalty
+    assert selected.validation_error == repeated.validation_error
