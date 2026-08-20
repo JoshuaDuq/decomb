@@ -187,36 +187,45 @@ If neither family is significant, that joint null result is recorded explicitly 
 recording is copied without filtering. A clean statistical outcome is valid and does not
 abort diagnosis, application, or verification.
 
-### Subtraction and the residual stage
+### Removal: subtract, then notch what survives
 
-`apply` removes a line by fitting and subtracting it before any filtering, and notches
-only what survives. Three stages run in order.
+`apply` removes a line by fitting and subtracting it, and filters only the residue. Three
+stages run before the derivative is written.
 
 **Subtract.** A round-one fit selects targets: the statistically supported ordinary lines,
-plus comb teeth standing more than 1 dB proud of their local background. MNE's
-`spectrum_fit` estimates one sinusoid's amplitude and phase per window and removes exactly
-that, so the frequency stays populated and anything the sinusoid does not describe
-survives. The fit window is twice the detection window -- 20 s at the default 10 s --
-which halves the bandwidth a fit destroys without changing what detection can see.
+plus comb teeth standing more than 1 dB proud of their local background. MNE `spectrum_fit`
+estimates one sinusoid's amplitude and phase per window by multitaper harmonic analysis and
+removes exactly that [[9](#user-content-ref-9), [10](#user-content-ref-10),
+[11](#user-content-ref-11)], so the frequency stays populated and whatever the sinusoid does
+not describe survives. The fit window is twice the detection window, 20 s at the default
+10 s, which halves the bandwidth each fit destroys without changing what detection sees.
 
-**Notch the residue.** Detected bins closer than three Fourier bins are one physical line;
-a group whose post-subtraction prominence still exceeds 2 dB is notched across its whole
-span plus 1.25 bins each side. Choosing by the residual that survives subtraction, rather
-than by prominence before it, is what makes this threshold transfer between recordings
-[[docs/removal_operating_point.md](docs/removal_operating_point.md)].
+**Notch the residue.** Detected bins closer than three Fourier bins are one physical line; a
+group whose post-subtraction prominence still exceeds 2 dB is filtered across its whole span
+plus 1.25 bins on each side [[6](#user-content-ref-6)]. Thresholding on the residual that
+survives subtraction, rather than on prominence before it, is what makes the threshold
+transfer between recordings.
 
-**Converge.** The existing FIR rounds then run until fresh ordinary-line and scanner-comb
-fits are both null, exactly as below.
+**Converge.** The FIR rounds described below then run until fresh ordinary-line and
+scanner-comb fits are both null.
+
+![Spectral effect of each removal stage in a 12 Hz window](docs/pipeline_stages.png)
+
+One 12 Hz window of a single recording, 0.1 Hz Welch bins averaged across EEG channels on a
+common decibel scale. Dotted lines mark the declared 1.2 Hz comb grid; shading marks the
+bandwidth each stage declares unavailable in the manifest. Subtraction lowers the teeth
+without emptying the band, so the shading in that panel records a cost the spectrum does not
+show; notching removes a band outright and its stopbands continue below the axis.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
-of the fit window on each side. Those intervals are merged with the FIR stopbands and their
+of the fit window on each side. Those intervals merge with the FIR stopbands and their
 transitions, and every manifest row carries the single recording-wide share that results.
 `verify` re-derives both stages from the source before replaying them.
 
-This stage is deliberately heuristic: it removes material the converged statistical rounds
-would not remove, which is where its advantage on the comb comes from. The constants come
-from measurements on this cohort, recorded in
+The residual stage is deliberately heuristic: it removes material the converged statistical
+rounds would not, which is where its advantage on the comb comes from. Its constants are
+measured on this cohort rather than tuned here, in
 [`docs/removal_operating_point.md`](docs/removal_operating_point.md) and
 [`docs/artifact_survey.md`](docs/artifact_survey.md).
 
@@ -277,7 +286,9 @@ applies the destination BrainVision calibration and float32 quantization. Every 
 must equal the written derivative exactly, and an independent fit of the written data must
 also be null. A recording that starts null is reproduced unchanged.
 
-Quality-control spectra use MNE `psd_array_welch` with detrended Hamming windows and are
+Quality-control spectra use MNE `psd_array_welch` with detrended Hamming windows, whose
+sidelobe behaviour bounds the spectral leakage between neighbouring bins
+[[8](#user-content-ref-8)], and are
 wrapped as MNE `SpectrumArray` objects for plotting [[18](#user-content-ref-18)]. Source
 and derivative files use identical EEG channels, complete continuous-acquisition
 windows, segment duration, 50 percent overlap, frequency range, and frequency grid. No
