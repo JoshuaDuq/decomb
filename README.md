@@ -209,13 +209,20 @@ transfer between recordings.
 **Converge.** The FIR rounds described below then run until fresh ordinary-line and
 scanner-comb fits are both null.
 
-![Spectral effect of each removal stage in a 12 Hz window](docs/pipeline_stages.png)
+![Removal mechanism and its cohort-level effect](docs/pipeline_stages.png)
 
-One 12 Hz window of a single recording, 0.1 Hz Welch bins averaged across EEG channels on a
-common decibel scale. Dotted lines mark the declared 1.2 Hz comb grid; shading marks the
-bandwidth each stage declares unavailable in the manifest. Subtraction lowers the teeth
-without emptying the band, so the shading in that panel records a cost the spectrum does not
-show; notching removes a band outright and its stopbands continue below the axis.
+**Removal mechanism and its effect across the cohort.** **a**, Channel-mean spectra of one
+recording over a 3 Hz window, 0.1 Hz Welch bins. Subtraction removes the fitted component at
+a single bin; the residual stage filters a contiguous band, shown shaded at its stopband.
+Both drive the frequency below its local background, so the distinction between them is
+width, not depth, and that is what their declared intervals encode. **b**, Power removed by
+each stage over 20 to 95 Hz in the same recording, with the number of affected Fourier bins
+and the median depth. Subtraction acts at many frequencies shallowly; the converged rounds
+act deeply on the few strong isolated lines. **c**, Comb prominence, the median height of the
+1.2 Hz teeth above the midpoints between them, in the source and in the derivative; each line
+is one recording. **d**, Bandwidth retained in each study band once all three stages declare
+their cost. Boxes show median and quartiles, points are individual recordings, numbers are
+means.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
