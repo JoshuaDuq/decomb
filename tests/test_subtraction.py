@@ -393,3 +393,61 @@ def test_the_manifest_does_not_carry_the_advisory_mask(tmp_path):
     assert float(manifest.gamma_retained_share.iloc[0]) == pytest.approx(
         float(gamma.retained_declared)
     ), "the manifest must keep describing only what was destroyed"
+
+
+def _raw_with_line(duration_s=120.0, sfreq=250.0, line_hz=40.0, amplitude=1e-6):
+    import mne
+
+    times = np.arange(0, duration_s, 1.0 / sfreq)
+    noise = np.random.default_rng(1).normal(scale=2e-7, size=(2, times.size))
+    line = np.vstack([np.sin(2 * np.pi * line_hz * times)] * 2) * amplitude
+    info = mne.create_info(["C3", "C4"], sfreq, "eeg")
+    return (
+        mne.io.RawArray(noise + line, info, verbose="ERROR"),
+        mne.io.RawArray(noise, info, verbose="ERROR"),
+    )
+
+
+def test_confinement_is_one_when_removal_sits_inside_the_declared_interval():
+    settings = _settings()
+    original, cleaned = _raw_with_line()
+
+    share = notch.measure_removal_confinement(
+        original, cleaned, ((39.5, 40.5),), settings
+    )
+
+    assert share > 0.99
+
+
+def test_confinement_falls_when_the_declared_interval_is_elsewhere():
+    settings = _settings()
+    original, cleaned = _raw_with_line()
+
+    share = notch.measure_removal_confinement(
+        original, cleaned, ((60.0, 61.0),), settings
+    )
+
+    assert share < 0.05
+
+
+def test_confinement_is_undefined_when_nothing_was_removed():
+    settings = _settings()
+    original, _ = _raw_with_line()
+
+    share = notch.measure_removal_confinement(
+        original, original.copy(), ((39.5, 40.5),), settings
+    )
+
+    assert np.isnan(share)
+
+
+def test_verify_reports_how_much_removal_stayed_inside_the_declared_bandwidth(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
+
+    verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
+
+    shares = {row["removed_energy_inside_declared_share"] for row in verified}
+    assert len(shares) == 1, "confinement is one figure for the whole recording"
+    share = shares.pop()
+    assert 0.0 <= share <= 1.0
+    assert share > 0.9, f"removal escaped the declared bandwidth: {share:.3f}"

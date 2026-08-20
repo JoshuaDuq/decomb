@@ -2698,6 +2698,56 @@ def _validate_exact_derivative(
     )
 
 
+def measure_removal_confinement(original, cleaned, intervals, settings) -> float:
+    """Share of the removed energy that lies inside the intervals the manifest declares.
+
+    Measured on the difference between the two recordings, which is exactly what removal
+    took out. Differencing two spectra instead would confound the removal with the
+    estimator: at the detection window's resolution a Welch estimate smears a narrow
+    removal across neighbouring bins and it appears to leak when it has not. Segments here
+    are twice the subtraction fit window, which puts eight bins across a declared interval.
+    """
+    import mne
+
+    from decomb import subtraction
+
+    picks = mne.pick_types(original.info, eeg=True, exclude="bads")
+    removed = original.get_data(picks=picks) - cleaned.get_data(picks=picks)
+    if not np.any(removed):
+        return float("nan")
+    sampling_frequency_hz = float(original.info["sfreq"])
+    samples = recordings.estimation_window_samples(
+        sampling_frequency_hz,
+        2.0 * subtraction.fit_window_s(settings),
+    )
+    if removed.shape[-1] < samples:
+        return float("nan")
+    power, frequencies = mne.time_frequency.psd_array_welch(
+        removed,
+        sampling_frequency_hz,
+        fmin=settings.frequency_range_hz[0] or 1.0,
+        fmax=min(
+            settings.frequency_range_hz[1],
+            np.nextafter(sampling_frequency_hz / 2.0, 0.0),
+        ),
+        n_fft=samples,
+        n_per_seg=samples,
+        n_overlap=samples // 2,
+        average="mean",
+        window="hamming",
+        remove_dc=True,
+        verbose="ERROR",
+    )
+    power = power.mean(axis=0)
+    total = power.sum()
+    if not np.isfinite(total) or total <= 0.0:
+        return float("nan")
+    inside = np.zeros(frequencies.size, dtype=bool)
+    for low_hz, high_hz in intervals:
+        inside |= (frequencies >= low_hz) & (frequencies <= high_hz)
+    return float(power[inside].sum() / total)
+
+
 def _replay_removal_stages(original, subtracted_rows, threshold_rows, settings):
     """Reproduce apply's subtraction and residual stages, re-deriving both decisions."""
     from decomb import residual, subtraction
@@ -2937,8 +2987,16 @@ def verify_harmonic_run(
         settings,
         round_index=len(plan_rounds) + 1,
     )
+    declared = merged_intervals(
+        (float(row["unavailable_low_hz"]), float(row["unavailable_high_hz"]))
+        for row in manifest_rows
+        if str(row.get("unavailable_low_hz", "")) != ""
+        and str(row.get("unavailable_high_hz", "")) != ""
+    )
+    confined_share = measure_removal_confinement(original, cleaned, declared, settings)
     for row in verification_rows:
         row["maximum_sample_deviation_v"] = maximum_sample_deviation_v
+        row["removed_energy_inside_declared_share"] = confined_share
     return verification_rows
 
 
