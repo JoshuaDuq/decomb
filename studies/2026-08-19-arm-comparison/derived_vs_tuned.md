@@ -1,161 +1,154 @@
-# The shipped subtraction arm against current notching and the tuned arm
+# Four arms on one availability basis
 
-Measured on all 90 recordings of the thermalactive cohort with `derived_shipped.py`, which
-drives the shipped code path (`subtraction.subtract_authorized`, `subtraction.damage_intervals`,
-`notch.band_availability_from_intervals`, `notch.clean_until_no_supported_lines`) rather than
-reimplementing it. Raw results: `derived_shipped.tsv`, log in `derived_shipped.log`,
-paired analysis in `derived_vs_tuned.py`.
+**This supersedes the first version of this file, which was wrong in three ways.** See
+"What the earlier version got wrong" at the end.
 
-The harness reproduced the six-recording design prototype (`derived_probe.tsv`, arm
-`derived_tr`) exactly -- same target counts, residual peaks, `comb_db` and gamma on all six.
-What ships computes what was designed.
+Measured on all 90 recordings with `arms_declared.py`; raw results `arms_declared.tsv`,
+log `arms_declared.log`. Every number here is recomputed with current code. No figure is
+carried over from `final_config.tsv` or `arm_combined.tsv`, both of which predate the
+scanner-harmonic authorization fix.
 
-## Headline
+## The one basis
 
-Subtraction beats current notching on every axis, including the one it pays for. It does
-**not** beat the tuned arm, and the prototype's claim that it would has not survived the
-full cohort.
+Every arm declares **its own** subtraction damage, not just its filter geometry:
 
-## Availability: what subtraction costs, declared
+- **FIR**: `plan.unavailable_edges()` -- stopband plus transition, exactly what the manifest writes.
+- **subtraction**: `+/- 2 bins = +/- 2 / fit_window_s` around every removed frequency.
 
-| band | derived, declared | derived, FIR only | current notching |
-|---|---:|---:|---:|
-| gamma | **0.733** | 0.955 | 0.592 |
-| beta | **0.915** | 0.983 | 0.766 |
-| alpha | **1.000** | 1.000 | 0.846 |
+That second line is the whole point. The `combined` arm recorded in `arm_combined.tsv`
+subtracts ~147 frequencies at a 20 s window and then reports availability from its FIR
+plans alone, declaring none of that. Comparing it against the shipped arm's fully-declared
+number is not a comparison.
 
-Excluding sub-0008. "Declared" counts the +/- 2-bin damage zone around every subtracted
-frequency on top of the FIR stopbands; "FIR only" is what the manifest would have claimed
-had subtraction declared nothing.
+## Arms
 
-The honest reading: subtraction destroys real bandwidth, and saying so drops gamma from
-0.955 to 0.733. Even after paying that, it retains **0.733 against notching's 0.592** --
-subtraction is more available than notching while being more truthful about what it removes.
-Alpha is untouched at 1.000 because nothing in this cohort is subtracted below 13 Hz.
+| arm | what it does |
+|---|---|
+| `notching` | current shipping behaviour: no subtraction, converged FIR rounds |
+| `tuned` | reproduction of `combined`: subtract ordinary lines + strong teeth at 20 s, notch what still stands proud of 2 dB, then converge |
+| `derived` | the shipped subtraction pipeline: subtract the authorized set at 10 s, then converge |
+| `derived_w20fit` | as `derived`, but the subtraction **fit** uses 20 s while **detection** stays at 10 s |
 
-## Against current notching (paired, 84 recordings, excluding sub-0008)
+## Results (n = 84, excluding sub-0008)
 
-| metric | notching | derived | derived better in |
-|---|---:|---:|---:|
-| comb_db (median) | -0.41 | **-0.06** | 70/84 |
-| \|comb_db\| mean | 1.36 | **0.63** | -- |
-| \|comb_db\| max | 23.90 | **6.58** | -- |
-| correlation | 0.9801 | **0.9930** | 53/84 |
-| change RMS | 0.1443 | **0.0627** | 79/84 |
-| gamma availability | 0.592 | **0.733** | 53/84 |
-| residual peaks, raw 2 dB | 31.8 | **15.2** | -- |
+| arm | gamma | beta | alpha | unavail Hz | subtracted | FIR blocks |
+|---|---:|---:|---:|---:|---:|---:|
+| notching | 0.741 | 0.923 | 1.000 | 23.7 | 0 | 33.1 |
+| tuned | 0.782 | 0.928 | 0.994 | 18.3 | 146.5 | 7.7 |
+| derived | 0.730 | 0.915 | 1.000 | 24.8 | 106.5 | 7.5 |
+| **derived_w20fit** | **0.809** | **0.937** | 1.000 | **17.6** | 106.5 | 8.7 |
 
-Subtraction wins outright. It halves the residual peak count, more than halves the signal
-it disturbs, flattens the comb, and still declares more usable gamma.
+| arm | signed comb_db median | share positive | \|comb_db\| mean | \|comb_db\| max | correlation | change RMS |
+|---|---:|---:|---:|---:|---:|---:|
+| notching | -0.07 | 0.37 | 0.91 | 23.90 | 0.9902 | 0.0712 |
+| tuned | -0.04 | 0.35 | **0.22** | **1.11** | 0.9928 | 0.0624 |
+| derived | -0.06 | 0.46 | 0.63 | 6.58 | 0.9930 | 0.0627 |
+| derived_w20fit | **+0.46** | **0.94** | 0.53 | 2.35 | **0.9931** | **0.0583** |
 
-## Against the tuned arm (paired, 79 recordings, excluding sub-0008 and the five stale excavation recordings)
+`comb_db` is best at zero. Positive means the teeth are still standing; negative means they
+were excavated below the local floor.
 
-| metric | combined (tuned) | derived | derived better in |
-|---|---:|---:|---:|
-| comb_db (median) | -0.07 | -0.08 | 44/79 |
-| \|comb_db\| mean | **0.22** | 0.64 | -- |
-| \|comb_db\| max | **1.11** | 6.58 | -- |
-| correlation | **0.9962** | 0.9929 | 2/79 |
-| change RMS | **0.0625** | 0.0630 | 24/79 |
-| gamma availability | **0.928** | 0.728 | 0/79 |
+## The shipped arm does not beat current notching
 
-`arm_combined.tsv` predates the scanner-harmonic authorization fix, so sub-0003 run-1,
-sub-0006 runs 1-2, sub-0013 run-1 and sub-0014 run-6 carry stale `comb_db` near -6.5.
-They are excluded above, which *helps* the tuned arm -- this is the comparison least
-favourable to the derived design, and the one worth trusting.
+Paired, `derived` minus `notching`:
 
-### This overturns the prototype
+| metric | mean | better in |
+|---|---:|---:|
+| gamma availability | **-0.0103** | **27/84** |
+| \|comb_db\| | -0.2782 | 30/84 |
+| correlation | +0.0028 | 77/84 |
+| change RMS | -0.0085 | 77/84 |
 
-The six-recording prototype predicted the derived arm would win on comb flatness
-(|comb_db| mean 1.32 vs 1.34, max 4.90 vs 6.54) and on change RMS (0.1002 vs 0.1316).
-Neither holds on 90 once the stale rows are removed: the tuned arm's |comb_db| mean is
-0.22 against 0.64, its max 1.11 against 6.58, and change RMS is a tie (0.0625 vs 0.0630)
-rather than a derived win. The prototype's sample was six recordings and included two
-where the tuned arm's recorded numbers were stale.
+On honest accounting the shipped subtraction design is **slightly less available than
+current notching**, not more. It is also not more reliably flat: its \|comb_db\| mean looks
+better only because notching has rare catastrophic failures (\|max\| 23.90 on sub-0009 run-3
+against 6.58), and on a per-recording basis notching flattens the comb better in 54 of 84.
 
-**What survives:** the derived design is a large, unambiguous improvement over what ships
-today. **What does not:** the claim that it also beats the hand-tuned arm. It does not,
-and it gives up 0.20 of gamma availability to it -- on every single recording.
+What subtraction does buy is fidelity: correlation and change RMS improve in 77 of 84. It
+disturbs the retained signal about 12% less and avoids notching's worst-case comb blowups.
+That is a real benefit, and it is the honest case for the design -- but it is not the case
+the first version of this file made.
 
-That gap is the declared damage zone, not lost signal. The tuned arm notches narrowly and
-declares only its stopbands; the derived arm subtracts and declares +/- 2 bins per target,
-with a mean of 106.5 targets per recording. Whether 0.20 of declared gamma is worth the
-simpler, evidence-bound authorization is a design call, not a measurement -- but it should
-be made knowing the tuned arm is genuinely ahead here, not behind.
+## The tuned arm is the best all-rounder
 
-## Residual peaks: the 2 dB threshold is not a measurement
+Paired, `tuned` minus `notching`: gamma +0.0413 (better in 71/84), correlation better in
+76/84, change RMS better in 76/84, and \|comb_db\| mean 0.22 with a worst case of **1.11 dB
+across all 90 recordings**. Nothing else comes close on comb consistency.
 
-Reported for the derived arm across all 90 recordings:
+Against the shipped arm on the same declared basis, `tuned` still wins gamma by 0.052
+(better in 81 of 84) -- not the 0.20 the first version reported, but a real gap. It gets
+there by subtracting *more* frequencies (146.5 vs 106.5) through a *narrower* damage zone
+(20 s fit, +/- 0.1 Hz, against 10 s and +/- 0.2 Hz). The fit window, not the target count,
+is what dominates declared availability.
 
-| statistic | value |
-|---|---:|
-| raw 2 dB count, mean | 16.1 |
-| per-recording null p99 count, mean | **11.2** |
-| null p99, mean / min / max | 3.49 / 1.18 / 20.56 dB |
-| recordings whose null p99 exceeds 2 dB | **70 of 90** |
-| pure-noise bins above 2 dB, mean share | 4.5% |
+## The decoupled window: biggest gain, and a catch
 
-In 70 of 90 recordings the 2 dB floor sits **below** the noise of its own statistic, so
-roughly a third of the raw count is chance. Calibrating each recording against its own p99
-drops the mean from 16.1 to 11.2.
+`derived_w20fit` fits the subtraction on 20 s windows while leaving detection at 10 s. It
+takes the best availability of any arm (gamma 0.809, beta 0.937), the best fidelity
+(correlation 0.9931, change RMS 0.0583), and beats `derived` on gamma in **84 of 84** and
+`notching` in 82 of 84.
 
-Two further reasons not to lean on this metric:
+**But it under-removes the comb.** Its signed `comb_db` median is **+0.46** and **94% of
+recordings are positive** -- against 46% for `derived`. It beats `derived` on \|comb_db\| in
+only 21 of 84. It declares less damage partly because it removes less artifact.
 
-1. **It is circular against the tuned arm**, which explicitly notched every cluster whose
-   prominence exceeded 2 dB -- the same threshold the metric counts.
-2. **It is not a paired statistic.** Each arm evaluates prominence at its own detected-line
-   set union the comb teeth (`fixed_config.py:157`, `derived_shipped.py`), so the arms are
-   scored on different check sets. A difference in count is partly a difference in where
-   each arm looked.
+This is a milder version of the failure the 20 s full-window test showed (`comb_db` +1.55,
+detection collapsing sevenfold). Keeping detection at 10 s avoids the collapse -- target
+counts are identical at 106.5 -- but the wider fit still leaves teeth standing.
 
-Weight `comb_db`, `correlation` and `change_rms`, which are computed on the full spectrum
-and which no arm targeted directly.
+So it is a genuine trade, not a free win: **+0.078 gamma for a systematic +0.5 dB of
+residual comb.** Whether that is worth taking is a judgement about which failure the study
+can better tolerate. It should not be adopted on the availability number alone.
+
+## What is and is not comparable across arms
+
+**Comparable:** availability (same interval arithmetic), `comb_db` (fixed 1.2 Hz tooth grid,
+independent of what the arm detected), correlation, change RMS.
+
+**Not comparable:** the residual peak counts, at any threshold. Each arm evaluates prominence
+at its own `subtracted ∪ teeth` set, so `notching` is scored at ~62 tooth frequencies while
+`derived` is scored at ~106 targets plus teeth. Differences in count are partly differences
+in where each arm looked. The columns are in `arms_declared.tsv` for within-arm use only.
+The 2 dB threshold is separately unusable: it sits below the noise of its own statistic in
+70 of 90 recordings.
 
 ## sub-0008, reported separately
 
-sub-0008 has a bad ECG recording. That is a known data-quality fact, not a pipeline defect,
-and it is excluded from every cohort figure above.
+sub-0008 has a bad ECG recording -- a known data-quality fact, not a pipeline defect. Mean
+over its 6 runs, excluded from everything above:
 
-| run | targets | peaks 2 dB | peaks null-cal | comb_db | correlation | change RMS | gamma |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| run-1 | 124 | 17 | 16 | -1.26 | 0.9866 | 0.0881 | 0.668 |
-| run-2 | 139 | 19 | 17 | -5.86 | 0.9851 | 0.0791 | 0.651 |
-| run-3 | 132 | 41 | 3 | -1.08 | 0.9849 | 0.0662 | 0.620 |
-| run-4 | 146 | 33 | 16 | -4.90 | 0.9363 | 0.1342 | 0.626 |
-| run-5 | 131 | 35 | 13 | -1.32 | 0.9823 | 0.0476 | 0.656 |
-| run-6 | 137 | 30 | 11 | -0.41 | 0.9817 | 0.0457 | 0.641 |
+| arm | gamma | comb_db | correlation | change RMS |
+|---|---:|---:|---:|---:|
+| notching | 0.669 | -4.65 | 0.9731 | 0.0797 |
+| tuned | 0.723 | -0.27 | 0.9704 | 0.0815 |
+| derived | 0.640 | -2.47 | 0.9762 | 0.0768 |
+| derived_w20fit | 0.727 | +1.06 | 0.9847 | 0.0636 |
 
-run-3 is the clearest argument for null calibration in the cohort: 41 raw peaks against 3
-once calibrated, because its own null p99 is 18.09 dB. The raw count was measuring noise.
+It is the one participant no arm cleans well, and the ordering is the same as the cohort.
 
-## Keep `estimation_window_s` at 10 s
+## What the earlier version got wrong
 
-The damage zone is `2 / estimation_window_s`, so widening the window looks like free
-bandwidth. It is not. Measured on six recordings (`derived_probe_w20.tsv`):
+1. **Mixed accounting.** It compared the tuned arm's FIR-only availability (0.928) against
+   the shipped arm's fully-declared 0.728 and reported a 0.20 deficit "on every recording."
+   On one basis the gap is 0.052.
+2. **A stale baseline.** It used `notching` gamma 0.592 from `final_config.tsv`, generated
+   before the scanner-harmonic authorization fix, when every harmonic in range was notched
+   rather than only the supported ones. Fresh, current notching is **0.741**. Every claim of
+   the form "subtraction beats notching" was measured against a worse-than-current baseline,
+   and the availability half of that claim does not survive.
+3. **Inverted comb_db direction.** `derived_vs_tuned.py` scored `comb_db` as
+   "higher is better," so it reported subtraction flattening the comb better in 70 of 84.
+   Scored correctly on \|comb_db\|, it is 30 of 84.
 
-| | 10 s | 20 s |
-|---|---:|---:|
-| ordinary lines detected | 108.2 | **15.3** |
-| scanner harmonics | 6.2 | 6.2 |
-| residual peaks | **18.7** | 28.7 |
-| comb_db | **-1.14** | **+1.55** |
-| gamma_kept | 0.716 | 0.923 |
+A fourth, smaller error: `derived_shipped.py` measured FIR damage from raw stopbands instead
+of `unavailable_edges()`, omitting the transition band and overstating availability by about
+0.7 points. `arms_declared.py` uses `unavailable_edges()` throughout. `derived_shipped.tsv`
+is superseded by `arms_declared.tsv`.
 
-Ordinary-line detection collapses sevenfold at 20 s because a longer window demands the
-line hold still across twice as long, and the comb drifts. `comb_db` goes positive -- the
-teeth are left standing. The apparent gamma gain is bandwidth preserved by failing to
-remove the artifact. This was tested; do not re-litigate it without re-running the comparison.
+## Keep detection at 10 s
 
-## Known limitation: subtraction leaves shoulders
-
-Single-frequency subtraction removes the stationary component at the fitted bin. The comb
-drifts, so what remains sits beside the target. Twelve of 26 real residual peaks lie within
-0.2 Hz of a subtracted frequency (`residual_peaks.tsv`). This is the same physics as the
-injection sweep, where drifting components retained 0.28 against 0.035 for stationary ones.
-Fitting a narrow basis around each target rather than one exact frequency would absorb the
-drift; that is a design change, not a bug, and it is out of scope here. It is also the most
-likely route to closing the gap against the tuned arm.
-
-Every one of the 84 recordings runs FIR rounds after subtraction (mean 2.18 rounds, none at
-zero), which is why `verify` replays subtraction *and* the cascade on top of it rather than
-comparing the subtraction stage against the final derivative.
+Widening the whole `estimation_window_s` to 20 s remains rejected: ordinary-line detection
+collapses from 108.2 to 15.3 lines, and `comb_db` goes to +1.55 -- the teeth are left
+standing and the apparent gamma gain is bandwidth preserved by failing to remove the
+artifact (`derived_probe_w20.tsv`). The `derived_w20fit` arm above is a different proposal --
+it widens only the fit -- and carries its own milder version of the same cost.
