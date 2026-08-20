@@ -3,8 +3,8 @@
 Measured on the difference signal, source minus derivative, which is exactly what was
 removed. Comparing two spectra instead would confound the removal with the spectral
 estimator: at 0.1 Hz bins a Welch estimate smears a narrow removal across neighbours, and
-a control on a known stationary line shows that spread vanishing entirely by 30 s
-segments. Bins here are 30 s, fine enough to resolve the removal.
+a control on a known stationary line shows that spread vanishing entirely once the
+segment is long enough. Segments here match what `verify` uses.
 """
 import os, sys
 for v in ("OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","VECLIB_MAXIMUM_THREADS"):
@@ -13,7 +13,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np, pandas as pd
 
 CONFIG = "/Users/joduq24/Desktop/decomb/decomb.yaml"
-SEGMENT_S = 30.0
+# same rule as notch.measure_removal_confinement: twice the subtraction fit window,
+# which puts eight bins across a declared interval
+SEGMENT_MULTIPLE = 2.0
 
 
 def _merge(iv):
@@ -27,7 +29,7 @@ def _merge(iv):
 
 
 def _one(payload):
-    name, intervals = payload
+    name, fir_intervals, subtracted_hz = payload
     import mne
     from decomb import recordings
     from decomb.config import load_config
@@ -39,18 +41,26 @@ def _one(payload):
     picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
     sfreq = float(raw.info["sfreq"])
     removed = raw.get_data(picks=picks) - cln.get_data(picks=picks)
-    n_fft = int(SEGMENT_S * sfreq)
+    from decomb import notch, subtraction
+    settings = notch.HarmonicNotchSettings.from_config(config)
+    n_fft = int(SEGMENT_MULTIPLE * subtraction.fit_window_s(settings) * sfreq)
     power, freqs = mne.time_frequency.psd_array_welch(
         removed, sfreq, fmin=1.0, fmax=min(100.0, np.nextafter(sfreq / 2, 0.0)),
         n_fft=n_fft, n_per_seg=n_fft, n_overlap=n_fft // 2, average="mean",
         window="hamming", remove_dc=True, verbose="ERROR")
     power = power.mean(axis=0)
     total = power.sum()
-    row = {"recording": name, "bin_hz": sfreq / n_fft}
-    for margin, key in ((0.0, "inside_declared_pct"), (0.05, "inside_plus_50mhz_pct")):
+    row = {"recording": name, "bin_hz": sfreq / n_fft,
+           "n_subtracted": len(subtracted_hz)}
+    # confinement against the width declared today, and against a halved width
+    for half, key in ((2.0 / subtraction.fit_window_s(settings), "inside_pm0p10_pct"),
+                      (1.0 / subtraction.fit_window_s(settings), "inside_pm0p05_pct")):
+        intervals = _merge(
+            list(fir_intervals) + [(f - half, f + half) for f in subtracted_hz]
+        )
         inside = np.zeros(freqs.size, bool)
         for lo, hi in intervals:
-            inside |= (freqs >= lo - margin) & (freqs <= hi + margin)
+            inside |= (freqs >= lo) & (freqs <= hi)
         row[key] = 100.0 * power[inside].sum() / total
     return row
 
@@ -59,10 +69,16 @@ def main():
     manifest = pd.read_csv(sys.argv[1], sep="\t", keep_default_na=False)
     jobs = []
     for rec, block in manifest.groupby("recording"):
-        iv = [(float(a), float(b)) for a, b in
-              zip(block.unavailable_low_hz, block.unavailable_high_hz)
-              if str(a) != "" and str(b) != ""]
-        jobs.append((rec, _merge(iv)))
+        fir = [(float(a), float(b)) for a, b, kind in
+               zip(block.unavailable_low_hz, block.unavailable_high_hz, block.kind)
+               if str(a) != "" and str(b) != "" and str(kind) != "subtracted"]
+        subtracted = [
+            float(value)
+            for row in block.loc[block.kind == "subtracted", "subtracted_frequencies_hz"]
+            for value in str(row).split(";")
+            if value
+        ]
+        jobs.append((rec, _merge(fir), sorted(set(subtracted))))
     rows = []
     with ProcessPoolExecutor(max_workers=3) as pool:
         futs = {pool.submit(_one, j): j[0] for j in jobs}

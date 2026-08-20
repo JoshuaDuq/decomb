@@ -389,8 +389,9 @@ what was removed, over all 90 recordings:
 
 | | mean | median | worst recording |
 | --- | ---: | ---: | ---: |
-| Removed energy inside the declared intervals | 99.889% | 99.911% | 99.439% |
-| Removed energy within the declared intervals plus 0.05 Hz | 99.986% | 99.986% | 99.977% |
+| Removed energy inside the declared intervals | 99.975% | 99.976% | 99.954% |
+| Power taken from a bin declared available, worst in the cohort | -- | -- | 0.670 dB |
+| Bins declared available that lose more than 0.5 dB | -- | -- | 3 of 287,000 |
 
 | Analytic bound, every filter the pipeline built | Value |
 | --- | ---: |
@@ -399,17 +400,24 @@ what was removed, over all 90 recordings:
 
 The passband figure is a design-time property recorded for each filter in the manifest, not
 an estimate: outside its stopband and transitions, an FIR built here cannot alter a frequency
-by more than 0.027 dB. The subtraction stage is bounded empirically instead, and it is
-narrower than declared -- on a known stationary line the removed energy is entirely inside
-+/- 0.05 Hz, against a declared +/- 0.1 Hz, so the manifest errs about twofold toward
-overstating the damage.
+by more than 0.027 dB. The subtraction stage is bounded empirically instead, and the two
+bins it declares on each side are not spare padding. Halving them to one bin would raise
+gamma availability from 77.8 to 82.8 percent, and 99.7 percent of the removed energy would
+still fall inside the narrower declaration -- but the energy that escapes is concentrated
+rather than spread. At one bin, 539 frequencies across the cohort lose more than 0.5 dB while
+being declared available, and five recordings contain frequencies emptied almost entirely
+under a declaration that calls them usable. At two bins that count is three, and the worst
+is 0.670 dB. `studies/2026-08-19-arm-comparison/declared_width_safety.py` records the
+comparison.
 
 Spectral resolution decides this measurement and it is easy to get wrong. Differencing two
 0.1 Hz-resolution spectra makes removal appear to leak, because a Welch estimate at that
 resolution smears a narrow removal across neighbouring bins; the same removal is 73 percent
-contained at 10 s segments and 100 percent contained at 30 s and finer. The figures above use
-30 s segments and the difference signal, so they measure the removal rather than the
-estimator. `studies/2026-08-19-arm-comparison/confinement.py` records the method.
+contained at 10 s segments and 100 percent contained once the segment is long enough to
+resolve it. The figures above use the difference signal and segments twice the subtraction
+fit window, which puts eight bins across a declared interval, so they measure the removal
+rather than the estimator. `verify` reports the same quantity per recording in
+`removed_energy_inside_declared_share`.
 
 The cost of this choice is that the comb is left at its background rather than driven
 below it: notching on the corrected 1.2 Hz grid reaches -6.80 dB where subtraction reaches
