@@ -367,3 +367,60 @@ def test_every_row_declares_the_recording_wide_availability_of_all_three_stages(
     expected = notch.band_availability_from_intervals(intervals, BANDS)
 
     assert declared.pop() == pytest.approx(expected["gamma_retained_share"])
+
+
+def test_apply_publishes_an_advisory_comb_mask_that_never_adds_availability(tmp_path):
+    import argparse
+
+    source_root, _ = _synthetic_bids_recording(tmp_path)
+    args = argparse.Namespace(
+        config=None,
+        bids_root=source_root,
+        output_root=tmp_path / "derivative",
+        report_dir=tmp_path / "reports",
+        n_jobs=1,
+    )
+
+    notch.run(args)
+
+    mask = notch._read_manifest(args.report_dir / notch.COMB_MASK_NAME)
+    availability = notch._read_manifest(args.report_dir / notch.ANALYSIS_AVAILABILITY_NAME)
+
+    assert set(mask.columns) == {"harmonic", "centre_hz", "low_hz", "high_hz"}
+    assert (mask.low_hz >= residual.TOOTH_LOWEST_HZ - 0.11).all()
+    assert (mask.high_hz <= residual.TOOTH_HIGHEST_HZ + 0.11).all()
+
+    declared = availability.retained_declared.astype(float)
+    masked = availability.retained_with_comb_mask.astype(float)
+    assert (masked <= declared + 1e-9).all(), "a mask can only remove availability"
+    assert (masked >= 0.0).all()
+    # bands entirely below the measured comb band must be untouched by the mask
+    low_bands = availability[availability.high_hz.astype(float) <= residual.TOOTH_LOWEST_HZ]
+    assert not low_bands.empty
+    assert (
+        low_bands.retained_with_comb_mask.astype(float)
+        == low_bands.retained_declared.astype(float)
+    ).all()
+
+
+def test_the_manifest_does_not_carry_the_advisory_mask(tmp_path):
+    import argparse
+
+    source_root, _ = _synthetic_bids_recording(tmp_path)
+    args = argparse.Namespace(
+        config=None,
+        bids_root=source_root,
+        output_root=tmp_path / "derivative",
+        report_dir=tmp_path / "reports",
+        n_jobs=1,
+    )
+
+    notch.run(args)
+
+    manifest = notch._read_manifest(args.output_root / notch.MANIFEST_NAME)
+    availability = notch._read_manifest(args.report_dir / notch.ANALYSIS_AVAILABILITY_NAME)
+    gamma = availability[availability.band == "gamma"].iloc[0]
+
+    assert float(manifest.gamma_retained_share.iloc[0]) == pytest.approx(
+        float(gamma.retained_declared)
+    ), "the manifest must keep describing only what was destroyed"

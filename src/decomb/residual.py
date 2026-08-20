@@ -237,3 +237,18 @@ def recorded_stopbands(rows: Sequence[dict]) -> tuple[tuple[float, float], ...]:
             for row in rows
         )
     )
+
+
+def comb_analysis_mask(settings, sampling_frequency_hz: float):
+    """Every comb tooth's damage interval, whether or not this recording removed it.
+
+    A conservative mask for downstream analysis: it covers the band where the comb was
+    measured, at the width a subtracted tooth already declares. It removes nothing and is
+    not part of the derivative's provenance -- see the manifest for what was destroyed.
+    """
+    from decomb import subtraction
+
+    return subtraction.damage_intervals(
+        comb_teeth(settings, sampling_frequency_hz),
+        subtraction.fit_window_s(settings),
+    )

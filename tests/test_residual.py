@@ -148,3 +148,29 @@ def test_overlapping_intervals_do_not_double_count_availability():
     shares = notch.band_availability_from_intervals(((40.0, 41.0), (40.5, 42.0)), bands)
 
     assert shares["gamma_unavailable_share"] == pytest.approx(2.0 / 50.0)
+
+
+def test_the_comb_analysis_mask_is_the_damage_a_subtracted_tooth_declares():
+    from decomb import subtraction
+
+    settings = _settings(comb_fundamental_hz=1.2)
+    teeth = residual.comb_teeth(settings, sampling_frequency_hz=1000.0)
+
+    mask = residual.comb_analysis_mask(settings, sampling_frequency_hz=1000.0)
+
+    assert mask == subtraction.damage_intervals(
+        teeth, subtraction.fit_window_s(settings)
+    )
+    half = 2.0 / subtraction.fit_window_s(settings)
+    assert half == pytest.approx(0.1)
+    assert mask[0] == pytest.approx((teeth[0] - half, teeth[0] + half))
+
+
+def test_the_mask_covers_only_where_the_comb_was_measured():
+    settings = _settings(comb_fundamental_hz=1.2)
+
+    mask = residual.comb_analysis_mask(settings, sampling_frequency_hz=1000.0)
+
+    assert min(low for low, _ in mask) >= residual.TOOTH_LOWEST_HZ - 0.11
+    assert max(high for _, high in mask) <= residual.TOOTH_HIGHEST_HZ + 0.11
+    assert not any(low < 13.0 for low, _ in mask), "alpha and theta must be untouched"
