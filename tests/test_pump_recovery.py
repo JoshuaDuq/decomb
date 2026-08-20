@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from decomb import pump_recovery
+from decomb import pump_recovery, pump_recovery_experiment
 
 
 def test_high_harmonics_are_consecutive_teeth_between_20_and_95_hz():
@@ -225,3 +225,132 @@ def test_injection_preservation_rejects_zero_energy_reference():
             100.0,
             1.2,
         )
+
+
+def test_leave_one_participant_out_never_trains_on_the_test_participant():
+    rng = np.random.default_rng(14)
+    mapping = np.array([[1.2 + 0.3j], [-0.4 + 0.8j]])
+    recordings = []
+    expected = {}
+    for participant in ("sub-01", "sub-02", "sub-03"):
+        for run in (1, 2):
+            features = rng.normal(size=(12, 2)) + 1j * rng.normal(size=(12, 2))
+            targets = features @ mapping
+            recording = f"{participant}_run-{run}"
+            expected[recording] = targets
+            recordings.append(
+                pump_recovery.RecoveryRecording(
+                    recording,
+                    participant,
+                    ("Cz",),
+                    features,
+                    targets,
+                )
+            )
+
+    predictions = pump_recovery.leave_one_participant_out(
+        recordings,
+        ranks=(2,),
+        penalties=(1e-8,),
+    )
+
+    assert {result.test_participant for result in predictions} == {
+        "sub-01",
+        "sub-02",
+        "sub-03",
+    }
+    for result in predictions:
+        assert result.test_participant not in result.training_participants
+        np.testing.assert_allclose(
+            result.predicted_coefficients,
+            expected[result.recording],
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+
+def test_joint_extraction_keeps_target_out_of_predictors():
+    sampling_frequency_hz = 1000.0
+    times_s = np.arange(20_000) / sampling_frequency_hz
+    data = np.vstack(
+        [
+            np.sin(2.0 * np.pi * 20.4 * times_s)
+            + np.sin(2.0 * np.pi * 21.6 * times_s),
+            np.cos(2.0 * np.pi * 20.4 * times_s)
+            + np.cos(2.0 * np.pi * 21.6 * times_s),
+        ]
+    )
+    injection = np.sin(2.0 * np.pi * 1.2 * times_s)
+
+    original = pump_recovery.extract_recovery_coefficients(
+        data,
+        sampling_frequency_hz,
+        ((0, 20_000),),
+        (0, 1),
+        fundamental_hz=1.2,
+    )
+    injected = pump_recovery.extract_recovery_coefficients(
+        data + injection,
+        sampling_frequency_hz,
+        ((0, 20_000),),
+        (0, 1),
+        fundamental_hz=1.2,
+    )
+
+    np.testing.assert_allclose(injected.features, original.features, atol=1e-12)
+    assert not np.allclose(
+        injected.target_coefficients,
+        original.target_coefficients,
+    )
+
+
+def test_pump_clock_reference_recovers_common_high_harmonic_phase():
+    phase = np.linspace(0.0, 3.0 * np.pi, 80)
+    clock = np.exp(1j * phase)
+    pair_weights = np.array([0.3 + 0.2j, -0.6 + 0.5j, 1.1 - 0.4j])
+    features = clock[:, None] * pair_weights
+
+    recovered = pump_recovery.pump_clock_reference(features)
+    coherence = np.abs(np.vdot(clock, recovered)) ** 2 / (
+        np.vdot(clock, clock).real * np.vdot(recovered, recovered).real
+    )
+
+    assert coherence == pytest.approx(1.0)
+
+
+def test_prediction_evaluation_uses_high_only_clock_for_presence_and_residual():
+    window_count = 80
+    clock = np.exp(1j * np.linspace(0.0, 4.0 * np.pi, window_count))
+    features = clock[:, None] * np.array([0.5 + 0.2j, -0.3 + 0.8j])
+    artifact = clock[:, None] * np.array([1.0 + 0.4j, -0.6 + 0.2j])
+    balanced = np.exp(2j * np.pi * np.arange(window_count) / window_count)
+    neural = 0.1 * artifact * balanced[:, None]
+    prediction = pump_recovery.HeldOutPrediction(
+        "sub-01_run-1",
+        "sub-01",
+        ("sub-02", "sub-03"),
+        artifact + neural,
+        artifact,
+        2,
+        1e-6,
+        0.01,
+    )
+
+    result = pump_recovery_experiment.evaluate_prediction(
+        prediction,
+        features,
+        surrogate_count=999,
+    )
+
+    assert result.source_p_value <= 0.01
+    assert result.residual_p_value > 0.01
+    assert result.normalized_prediction_error < 0.02
+
+
+def test_experiment_seed_is_stable_and_recording_specific():
+    first = pump_recovery_experiment.stable_seed("sub-01_run-1", "source")
+    repeated = pump_recovery_experiment.stable_seed("sub-01_run-1", "source")
+    other = pump_recovery_experiment.stable_seed("sub-01_run-2", "source")
+
+    assert first == repeated
+    assert first != other

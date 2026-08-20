@@ -96,6 +96,71 @@ def extract_adjacent_features(
 
 
 @dataclass(frozen=True)
+class RecoveryCoefficients:
+    """High-only predictors and separately retained target-bin coefficients."""
+
+    features: NDArray[np.complex128]
+    target_coefficients: NDArray[np.complex128]
+
+
+def extract_recovery_coefficients(
+    data: NDArray[np.floating],
+    sampling_frequency_hz: float,
+    bounds: Sequence[tuple[int, int]],
+    good_channel_indices: Sequence[int],
+    *,
+    fundamental_hz: float,
+) -> RecoveryCoefficients:
+    """Extract target and predictors with one Fourier transform per window."""
+    values = _validated_data(data)
+    good_indices = np.asarray(tuple(good_channel_indices), dtype=int)
+    if good_indices.ndim != 1 or good_indices.size == 0:
+        raise ValueError("at least one good channel index is required")
+    if len(set(good_indices)) != good_indices.size:
+        raise ValueError("good channel indices must be unique")
+    if good_indices.min() < 0 or good_indices.max() >= values.shape[0]:
+        raise ValueError("good channel indices must lie inside data")
+
+    harmonics = high_harmonic_numbers(
+        fundamental_hz,
+        sampling_frequency_hz / 2.0,
+    )
+    frequencies = np.concatenate(
+        ([fundamental_hz], np.asarray(harmonics) * fundamental_hz)
+    )
+    coefficients = harmonic_coefficients(
+        values,
+        sampling_frequency_hz,
+        bounds,
+        frequencies,
+    )
+    target_coefficients = coefficients[:, :, 0]
+    high_coefficients = coefficients[:, good_indices, 1:]
+    products = high_coefficients[:, :, 1:] * np.conj(
+        high_coefficients[:, :, :-1]
+    )
+    return RecoveryCoefficients(
+        products.mean(axis=1),
+        target_coefficients,
+    )
+
+
+def pump_clock_reference(
+    features: NDArray[np.complexfloating],
+) -> NDArray[np.complex128]:
+    """Return the leading high-only fundamental phasor across windows."""
+    values = np.asarray(features, dtype=np.complex128)
+    if values.ndim != 2 or min(values.shape) < 2:
+        raise ValueError("pump clock features require at least two rows and columns")
+    if not np.isfinite(values).all():
+        raise ValueError("pump clock features must be finite")
+    left, singular_values, _ = np.linalg.svd(values, full_matrices=False)
+    if singular_values[0] <= np.finfo(float).eps * max(values.shape):
+        raise ValueError("pump clock features have no numerical rank")
+    return left[:, 0] * singular_values[0]
+
+
+@dataclass(frozen=True)
 class CrossHarmonicModel:
     """Frozen reduced-rank map from high-harmonic features to EEG coefficients."""
 
@@ -436,3 +501,124 @@ def measure_injection_preservation(
         phase_error_degrees,
         passes,
     )
+
+
+@dataclass(frozen=True)
+class RecoveryRecording:
+    """Pre-extracted high-only predictors and target coefficients for one run."""
+
+    recording: str
+    participant: str
+    channel_names: tuple[str, ...]
+    features: NDArray[np.complex128]
+    target_coefficients: NDArray[np.complex128]
+
+    def __post_init__(self) -> None:
+        recording = str(self.recording)
+        participant = str(self.participant)
+        channel_names = tuple(str(name) for name in self.channel_names)
+        features = np.asarray(self.features, dtype=np.complex128)
+        targets = np.asarray(self.target_coefficients, dtype=np.complex128)
+        if not recording or not participant:
+            raise ValueError("recording and participant must not be empty")
+        if not channel_names or len(set(channel_names)) != len(channel_names):
+            raise ValueError("channel names must be non-empty and unique")
+        if features.ndim != 2 or targets.shape != (
+            features.shape[0],
+            len(channel_names),
+        ):
+            raise ValueError("recording features and targets have incompatible shapes")
+        if not np.isfinite(features).all() or not np.isfinite(targets).all():
+            raise ValueError("recording coefficients must be finite")
+        object.__setattr__(self, "recording", recording)
+        object.__setattr__(self, "participant", participant)
+        object.__setattr__(self, "channel_names", channel_names)
+        object.__setattr__(self, "features", features)
+        object.__setattr__(self, "target_coefficients", targets)
+
+
+@dataclass(frozen=True)
+class HeldOutPrediction:
+    """Prediction and provenance for one recording in an outer participant fold."""
+
+    recording: str
+    test_participant: str
+    training_participants: tuple[str, ...]
+    target_coefficients: NDArray[np.complex128]
+    predicted_coefficients: NDArray[np.complex128]
+    rank: int
+    penalty: float
+    validation_error: float
+
+
+def leave_one_participant_out(
+    recordings: Sequence[RecoveryRecording],
+    *,
+    ranks: Sequence[int],
+    penalties: Sequence[float],
+) -> tuple[HeldOutPrediction, ...]:
+    """Predict every recording with a model that never saw its participant."""
+    values = tuple(recordings)
+    if not values:
+        raise ValueError("at least one recovery recording is required")
+    channel_names = values[0].channel_names
+    feature_count = values[0].features.shape[1]
+    if any(record.channel_names != channel_names for record in values):
+        raise ValueError("all recovery recordings must share channel names")
+    if any(record.features.shape[1] != feature_count for record in values):
+        raise ValueError("all recovery recordings must share feature geometry")
+    participants = tuple(sorted({record.participant for record in values}))
+    if len(participants) < 3:
+        raise ValueError("outer validation requires at least three participants")
+
+    predictions = []
+    for test_participant in participants:
+        training_records = tuple(
+            record for record in values if record.participant != test_participant
+        )
+        test_records = tuple(
+            record for record in values if record.participant == test_participant
+        )
+        training_participants = tuple(
+            participant
+            for participant in participants
+            if participant != test_participant
+        )
+        training_features = np.concatenate(
+            [record.features for record in training_records]
+        )
+        training_targets = np.concatenate(
+            [record.target_coefficients for record in training_records]
+        )
+        training_groups = np.concatenate(
+            [
+                np.repeat(record.participant, record.features.shape[0])
+                for record in training_records
+            ]
+        )
+        selected = select_model(
+            training_features,
+            training_targets,
+            training_groups,
+            channel_names,
+            ranks=ranks,
+            penalties=penalties,
+        )
+        for record in test_records:
+            predicted = selected.model.predict(
+                record.features,
+                channel_names,
+            )
+            predictions.append(
+                HeldOutPrediction(
+                    record.recording,
+                    test_participant,
+                    training_participants,
+                    record.target_coefficients,
+                    predicted,
+                    selected.rank,
+                    selected.penalty,
+                    selected.validation_error,
+                )
+            )
+    return tuple(sorted(predictions, key=lambda result: result.recording))
