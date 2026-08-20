@@ -108,6 +108,83 @@ but it is not a recording to pool naively into an alpha contrast.
 Its comb is the strongest in the cohort and is removed as completely as anywhere else. The
 bad ECG shows up in fidelity and in delta availability (0.222 on run-4), not in comb removal.
 
+## Confirming the comb is gone, against a control
+
+`comb_db` is a median over teeth, so it could in principle read zero while a third of the
+comb stood at 0.5-2 dB. It does not. Binning every tooth's prominence on the derivative
+showed 21.7 of 63 teeth (34.5%) in that window -- which looks alarming until the same
+measurement is made at the **midpoints between teeth**, the same band and estimator with no
+comb there by construction:
+
+| | mean |
+|---|---:|
+| median prominence at teeth | +0.10 dB |
+| median prominence at midpoints | **+0.42 dB** |
+| excess at teeth | **-0.32 dB** |
+| recordings where teeth are significantly higher (one-sided, p<0.05) | **0 / 84** |
+
+Teeth sit *below* the gaps between them. The 0.5-2 dB population is the ordinary roughness
+of the 20-95 Hz band, and the non-tooth frequencies carry more of it. The same test on the
+**source** data finds the comb in **84 / 84** recordings at +2.57 dB excess, so this is a
+null from a method with demonstrated power, not a weak test.
+
+Below 20 Hz there is no comb to begin with: teeth versus midpoints on the source gives
+-0.07 dB excess, significant in 0 of 84. Extending removal into theta and alpha would delete
+signal at 9.6 and 10.8 Hz -- the centre of the alpha rhythm -- to chase an artifact that is
+measurably absent.
+
+## A narrow basis around each target makes it worse
+
+`subtract_multitaper_sinusoids` fits one exact frequency (`notch_widths=0.0`). Widening that
+to a +/- w/2 basis, with the declared damage widened to `w/2 + 2/window_s` to match, was
+tested to see whether it would absorb comb drift (7-8 recordings per arm):
+
+| `notch_widths` | comb_db median | \|comb\| mean | teeth >2 dB | gamma |
+|---:|---:|---:|---:|---:|
+| 0.0 (shipped) | -0.15 | **0.19** | **1.25** | **0.795** |
+| 0.1 | -0.30 | 0.30 | 1.13 | 0.737 |
+| 0.2 | -1.69 | 1.64 | 1.43 | 0.676 |
+| 0.4 | -8.06 | 6.43 | 8.71 | 0.502 |
+
+Strictly worse: `comb_db` goes hard negative, which is excavation below the local floor, and
+gamma availability collapses. There was nothing to absorb -- `docs/artifact_survey.md` had
+already measured frequency drift at SD 0.00 Hz in 62 of 90 recordings, maximum SD 0.048 Hz.
+The lines are amplitude-modulated, not drifting.
+
+## The advisory comb mask
+
+`apply` also publishes `comb_analysis_mask.tsv` and `analysis_availability.tsv` in the report
+directory. The mask covers all 63 teeth in 20-95 Hz at +/- 0.1 Hz -- the width a subtracted
+tooth already declares -- whether or not a given recording removed that tooth. It removes
+nothing and is deliberately **not** part of the manifest, which records only what was
+destroyed.
+
+| band | declared | with mask |
+|---|---:|---:|
+| delta / theta / alpha | 0.996 / 1.000 / 0.994 | unchanged |
+| beta | 0.928 | 0.869 |
+| gamma | 0.782 | 0.731 |
+
+## Where the constants come from
+
+The four constants in `residual.py` are not tuned here. They are the operating point derived
+in `docs/removal_operating_point.md` from measurements on this cohort:
+
+| constant | evidence |
+|---|---|
+| 20 s subtraction fit | window sweep 10/20/30/54 s; 20 s best on residual, correlation and change RMS |
+| 2.0 dB residual floor | floor sweep 1/2/3/4 dB; chosen after subtraction, because pre-subtraction prominence does not transfer between recordings |
+| 0.30 Hz cluster gap | one line spans several bins; a worked failure at 57.20 Hz left a neighbour 17 dB louder |
+| `comb_fundamental_hz: 1.2` | `docs/artifact_survey.md`: the comb is at 1.200 Hz in all 90 recordings; the 1/TR grid carries nothing (0/90, -0.65 dB) |
+
+That document's recommended configuration is the one shipped here, arrived at independently
+by the arm comparison. Its availability figures count FIR stopbands only and do not declare
+subtraction damage, so they are not comparable to the declared numbers above.
+
+It also records the alternative this pipeline does **not** take: notching on the corrected
+1.2 Hz grid drives the comb to -6.80 dB instead of about -0.3 dB, at alpha 0.744 and gamma
+0.556. That is a study-level choice between artifact floor and available bandwidth.
+
 ## What this does not claim
 
 No statistically supported line remains anywhere — that is a hard postcondition, checked on

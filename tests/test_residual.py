@@ -174,3 +174,20 @@ def test_the_mask_covers_only_where_the_comb_was_measured():
     assert min(low for low, _ in mask) >= residual.TOOTH_LOWEST_HZ - 0.11
     assert max(high for _, high in mask) <= residual.TOOTH_HIGHEST_HZ + 0.11
     assert not any(low < 13.0 for low, _ in mask), "alpha and theta must be untouched"
+
+
+def test_every_emitted_stopband_contains_a_candidate_over_the_floor():
+    """The invariant fit_threshold_stage's nanmax depends on."""
+    settings = _settings()
+    rng = np.random.default_rng(3)
+    freqs = np.arange(1.0, 100.0, 0.1)
+    db = rng.normal(scale=1.5, size=freqs.size)
+    candidates = tuple(np.arange(20.0, 95.0, 1.2))
+
+    for low_hz, high_hz in residual.threshold_stopbands(db, freqs, candidates, settings):
+        proud = [
+            residual.prominence_db(db, freqs, c)
+            for c in candidates
+            if low_hz <= c <= high_hz
+        ]
+        assert np.nanmax(proud) > residual.RESIDUAL_FLOOR_DB

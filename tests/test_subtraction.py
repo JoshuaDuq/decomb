@@ -22,37 +22,6 @@ def test_band_availability_counts_bare_intervals():
     assert shares["gamma_unavailable_share"] == 0.0
 
 
-def test_authorized_frequencies_are_the_supported_scanner_harmonics():
-    evidence = notch.ScannerHarmonicEvidence(
-        fundamental_hz=10.0,
-        corrected_p_value=1e-12,
-        supporting_harmonics=(2, 4),
-    )
-    round_evidence = SimpleNamespace(
-        model=lines.LineModel((), 1, 2, 5),
-        scanner_harmonics=evidence,
-    )
-
-    assert subtraction.authorized_frequencies(round_evidence, _settings()) == (20.0, 40.0)
-
-
-def test_authorized_frequencies_match_what_the_planner_would_notch():
-    evidence = notch.ScannerHarmonicEvidence(
-        fundamental_hz=10.0,
-        corrected_p_value=1e-12,
-        supporting_harmonics=(2, 4),
-    )
-    plan = notch.plan_scanner_harmonic_notches(evidence, _settings(), maximum_hz=49.0)
-    planned = tuple(
-        harmonic * evidence.fundamental_hz
-        for stopband in plan.stopbands
-        for harmonic in stopband.harmonics
-    )
-    round_evidence = SimpleNamespace(
-        model=lines.LineModel((), 1, 2, 5), scanner_harmonics=evidence
-    )
-
-    assert subtraction.authorized_frequencies(round_evidence, _settings()) == planned
 
 
 def test_the_fit_window_is_twice_the_detection_window():

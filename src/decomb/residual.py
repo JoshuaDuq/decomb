@@ -209,6 +209,9 @@ def fit_threshold_stage(raw, targets, settings) -> ThresholdRecord:
     teeth = comb_teeth(settings, float(raw.info["sfreq"]))
     candidates = np.unique(np.concatenate([np.asarray(targets, dtype=float), teeth]))
     stopbands = threshold_stopbands(decibels, frequencies, candidates, settings)
+    # Every emitted stopband spans at least one cluster whose proudest candidate cleared
+    # the floor, so the nanmax below always sees a finite value. `test_residual.py` pins
+    # that invariant; np.nanmax raises on an all-NaN input if it is ever broken.
     prominences = tuple(
         float(
             np.nanmax(

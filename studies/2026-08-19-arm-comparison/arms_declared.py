@@ -52,6 +52,26 @@ def _clusters(frequencies, gap=CLUSTER_GAP_HZ):
     return groups
 
 
+def _authorized_frequencies(evidence) -> tuple[float, ...]:
+    """The superseded `derived` arm's target set: supported lines plus scanner harmonics.
+
+    Kept here rather than in `decomb.subtraction` because the shipped pipeline no longer
+    selects targets this way; only this arm does.
+    """
+    frequencies = [
+        line.position_hz
+        for channel in evidence.model.channels
+        for line in channel.lines
+    ]
+    scanner = getattr(evidence, "scanner_harmonics", None)
+    if scanner is not None:
+        frequencies.extend(
+            harmonic * scanner.fundamental_hz
+            for harmonic in scanner.supporting_harmonics
+        )
+    return tuple(sorted(set(frequencies)))
+
+
 def _damage(frequencies, fit_window_s):
     """The +/- 2-bin interval a fit at this window destroys, merged."""
     half = 2.0 / float(fit_window_s)
@@ -156,7 +176,7 @@ def _measure(name):
                 prepared = notch.apply_harmonic_notches(prepared, plan, n_jobs=1)
         else:
             fit_window_s = TUNED_WINDOW_S if arm == "derived_w20fit" else base.estimation_window_s
-            subtracted = subtraction.authorized_frequencies(ev, base)
+            subtracted = _authorized_frequencies(ev)
             if subtracted:
                 res = recovery.subtract_multitaper_sinusoids(
                     original, sfreq, subtracted, window_s=fit_window_s, n_jobs=1)
