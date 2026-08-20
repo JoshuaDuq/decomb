@@ -100,6 +100,54 @@ So it is a genuine trade, not a free win: **+0.078 gamma for a systematic +0.5 d
 residual comb.** Whether that is worth taking is a judgement about which failure the study
 can better tolerate. It should not be adopted on the availability number alone.
 
+## How much of the comb each arm actually removes
+
+The tables above report residual `comb_db` with no baseline, which makes a residual of
++0.46 dB impossible to judge. Measured on the same recordings before any cleaning
+(`raw_comb.py`, `raw_comb.tsv`), the comb stands at a median of **+2.75 dB**.
+
+| arm | residual comb_db | removed | % of comb removed | \|comb_db\| max | share positive |
+|---|---:|---:|---:|---:|---:|
+| *(uncleaned)* | +2.75 | -- | 0% | -- | -- |
+| notching | -0.07 | 2.91 | 102% | 23.90 | 0.37 |
+| tuned | -0.04 | 2.79 | 102% | **1.11** | 0.35 |
+| derived | -0.06 | 2.93 | 102% | 6.58 | 0.46 |
+| derived_w20fit | +0.46 | 2.34 | **82%** | 2.35 | **0.94** |
+
+So `derived_w20fit` removes about 82% of the comb and leaves roughly a sixth of it standing
+-- not "the comb survives", but clearly less complete than the other three, which zero it out
+(slightly past zero, hence 102%).
+
+Two things make that 0.46 dB worse than its size suggests: it is **systematic** (positive in
+94% of recordings, against 35-46% for the others), and a scanner-locked residual is
+correlated with the fMRI paradigm, so it is a structured confound rather than added noise.
+
+Against that, its worst case is 2.35 dB where `notching` reaches 23.90 dB and `derived` 6.58
+dB. The trade is "a consistent small residual everywhere" against "usually perfect, sometimes
+badly wrong."
+
+**`tuned` is the only arm that does both**: complete comb removal *and* a worst case of 1.11
+dB across all 90 recordings, with the second-best availability (0.782) and essentially tied
+best fidelity. On this evidence it is the strongest configuration measured.
+
+## The strongest configuration is not implemented anywhere
+
+`tuned` exists only as `fixed_config.py`, a benchmark script. No branch contains it as
+production code -- `feat/apply-subtraction` is the only branch with `src/decomb/subtraction.py`,
+and it implements `derived`.
+
+The reason it was not shipped is a real constraint, not an oversight. `tuned` depends on six
+hand-tuned constants: `WINDOW_S=20.0`, `FLOOR_DB=2.0`, `TOOTH_SUBTRACT_DB=1.0`,
+`CLUSTER_GAP_HZ=0.30`, `MARGIN_HZ=0.125`, `COMB_HZ=1.200`. The design brief for this feature
+required that every constant derive from `estimation_window_s`, `frequency_bin_width_hz`, or
+the statistical evidence, and that no new threshold enter the packaged defaults --
+`tests/test_everything_is_configurable.py` enforces it.
+
+So the choice is not "which arm performs best" but **"is the measured gain worth six magic
+numbers and the thresholds they imply?"** That is a project decision, and this file does not
+make it. What the evidence says is that the gain is real: complete comb removal with a 1.11 dB
+worst case, against 6.58 dB for what is currently on the branch.
+
 ## What is and is not comparable across arms
 
 **Comparable:** availability (same interval arithmetic), `comb_db` (fixed 1.2 Hz tooth grid,
