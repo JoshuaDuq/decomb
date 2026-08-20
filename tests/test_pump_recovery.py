@@ -125,3 +125,103 @@ def test_pump_lock_test_separates_phase_locked_and_balanced_null_coefficients():
 
     assert locked_result.p_value <= 0.01
     assert null_result.p_value > 0.01
+
+
+def test_overlap_add_reconstructs_one_fundamental_without_boundary_holes():
+    sampling_frequency_hz = 1000.0
+    bounds = ((0, 20_000), (10_000, 30_000), (20_000, 40_000))
+    coefficient = 2.0 * np.exp(1j * 0.3)
+    coefficients = np.full((3, 2), coefficient)
+
+    artifact = pump_recovery.reconstruct_artifact(
+        40_000,
+        bounds,
+        coefficients,
+        sampling_frequency_hz,
+        1.2,
+    )
+    times_s = np.arange(40_000) / sampling_frequency_hz
+    expected = np.real(coefficient * np.exp(2j * np.pi * 1.2 * times_s))
+
+    np.testing.assert_allclose(artifact[0], expected, rtol=0.0, atol=1e-10)
+
+
+def test_target_blind_cleaner_preserves_an_exact_frequency_injection():
+    sampling_frequency_hz = 1000.0
+    times_s = np.arange(40_000) / sampling_frequency_hz
+    bounds = ((0, 20_000), (10_000, 30_000), (20_000, 40_000))
+    background = np.vstack(
+        [
+            np.sin(2.0 * np.pi * 20.4 * times_s),
+            np.cos(2.0 * np.pi * 21.6 * times_s),
+        ]
+    )
+    injection = np.vstack(
+        [
+            0.2 * np.sin(2.0 * np.pi * 1.2 * times_s),
+            0.3 * np.cos(2.0 * np.pi * 1.2 * times_s),
+        ]
+    )
+    predicted = np.full((len(bounds), 2), 0.4 + 0.2j)
+
+    clean_background = pump_recovery.subtract_predicted_artifact(
+        background,
+        bounds,
+        predicted,
+        sampling_frequency_hz,
+        1.2,
+    )
+    clean_injected = pump_recovery.subtract_predicted_artifact(
+        background + injection,
+        bounds,
+        predicted,
+        sampling_frequency_hz,
+        1.2,
+    )
+
+    np.testing.assert_allclose(
+        clean_injected - clean_background,
+        injection,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_injection_preservation_requires_waveform_amplitude_and_phase_fidelity():
+    sampling_frequency_hz = 1000.0
+    times_s = np.arange(20_000) / sampling_frequency_hz
+    injection = np.vstack(
+        [
+            np.sin(2.0 * np.pi * 1.2 * times_s),
+            np.cos(2.0 * np.pi * 1.2 * times_s),
+        ]
+    )
+
+    exact = pump_recovery.measure_injection_preservation(
+        injection,
+        injection,
+        sampling_frequency_hz,
+        1.2,
+    )
+    attenuated = pump_recovery.measure_injection_preservation(
+        injection,
+        0.98 * injection,
+        sampling_frequency_hz,
+        1.2,
+    )
+
+    assert exact.passes
+    assert exact.relative_waveform_error == pytest.approx(0.0)
+    assert exact.amplitude_retention == pytest.approx(1.0)
+    assert exact.phase_error_degrees == pytest.approx(0.0)
+    assert not attenuated.passes
+
+
+def test_injection_preservation_rejects_zero_energy_reference():
+    with pytest.raises(ValueError, match="positive energy"):
+        pump_recovery.measure_injection_preservation(
+            np.zeros((2, 100)),
+            np.zeros((2, 100)),
+            100.0,
+            1.2,
+        )

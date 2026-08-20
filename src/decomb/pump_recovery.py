@@ -313,3 +313,126 @@ def pump_lock_test(
     exceedances = int(np.sum(surrogate_maxima >= observed_maximum))
     p_value = (exceedances + 1.0) / (surrogate_count + 1.0)
     return PumpLockTest(observed_maximum, p_value, surrogate_count)
+
+
+def reconstruct_artifact(
+    n_times: int,
+    bounds: Sequence[tuple[int, int]],
+    coefficients: NDArray[np.complexfloating],
+    sampling_frequency_hz: float,
+    frequency_hz: float,
+) -> NDArray[np.float64]:
+    """Overlap-add local complex coefficients into a real artifact waveform."""
+    if not isinstance(n_times, int) or isinstance(n_times, bool) or n_times < 1:
+        raise ValueError("n_times must be a positive integer")
+    if not np.isfinite(sampling_frequency_hz) or sampling_frequency_hz <= 0.0:
+        raise ValueError("sampling_frequency_hz must be finite and positive")
+    if not np.isfinite(frequency_hz) or not (
+        0.0 < frequency_hz < sampling_frequency_hz / 2.0
+    ):
+        raise ValueError("frequency_hz must lie strictly between DC and Nyquist")
+
+    windows = tuple((int(start), int(stop)) for start, stop in bounds)
+    values = np.asarray(coefficients, dtype=np.complex128)
+    if values.ndim != 2 or values.shape[0] != len(windows):
+        raise ValueError("one coefficient row is required per window")
+    if not np.isfinite(values).all():
+        raise ValueError("predicted coefficients must be finite")
+
+    artifact = np.zeros((values.shape[1], n_times), dtype=float)
+    weights = np.zeros(n_times, dtype=float)
+    for row, (start, stop) in enumerate(windows):
+        if start < 0 or stop > n_times or stop <= start:
+            raise ValueError("window bounds must lie inside the output")
+        sample_times_s = np.arange(start, stop) / sampling_frequency_hz
+        carrier = np.exp(2j * np.pi * frequency_hz * sample_times_s)
+        window = np.hamming(stop - start)
+        artifact[:, start:stop] += (
+            np.real(values[row, :, None] * carrier) * window
+        )
+        weights[start:stop] += window
+    covered = weights > 0.0
+    artifact[:, covered] /= weights[covered]
+    return artifact
+
+
+def subtract_predicted_artifact(
+    data: NDArray[np.floating],
+    bounds: Sequence[tuple[int, int]],
+    predicted_coefficients: NDArray[np.complexfloating],
+    sampling_frequency_hz: float,
+    frequency_hz: float,
+) -> NDArray[np.float64]:
+    """Subtract one independently predicted local sinusoid from every channel."""
+    values = _validated_data(data)
+    artifact = reconstruct_artifact(
+        values.shape[1],
+        bounds,
+        predicted_coefficients,
+        sampling_frequency_hz,
+        frequency_hz,
+    )
+    if artifact.shape != values.shape:
+        raise ValueError("predicted coefficients must cover every data channel")
+    return values - artifact
+
+
+@dataclass(frozen=True)
+class InjectionPreservation:
+    """Strict paired recovery metrics for one known exact-frequency component."""
+
+    relative_waveform_error: float
+    amplitude_retention: float
+    phase_error_degrees: float
+    passes: bool
+
+
+def measure_injection_preservation(
+    injection: NDArray[np.floating],
+    recovered: NDArray[np.floating],
+    sampling_frequency_hz: float,
+    frequency_hz: float,
+) -> InjectionPreservation:
+    """Measure waveform and complex-gain fidelity of a recovered injection."""
+    reference = _validated_data(injection)
+    candidate = _validated_data(recovered)
+    if candidate.shape != reference.shape:
+        raise ValueError("injection and recovered arrays must have the same shape")
+    if not np.isfinite(sampling_frequency_hz) or sampling_frequency_hz <= 0.0:
+        raise ValueError("sampling_frequency_hz must be finite and positive")
+    if not np.isfinite(frequency_hz) or not (
+        0.0 < frequency_hz < sampling_frequency_hz / 2.0
+    ):
+        raise ValueError("frequency_hz must lie strictly between DC and Nyquist")
+
+    reference_energy = float(np.sum(reference**2))
+    if reference_energy <= 0.0:
+        raise ValueError("injection must have positive energy")
+    waveform_error = float(
+        np.sqrt(np.sum((candidate - reference) ** 2) / reference_energy)
+    )
+
+    times_s = np.arange(reference.shape[1]) / sampling_frequency_hz
+    carrier = np.exp(-2j * np.pi * frequency_hz * times_s)
+    reference_coefficients = reference @ carrier
+    candidate_coefficients = candidate @ carrier
+    coefficient_energy = float(np.vdot(reference_coefficients, reference_coefficients).real)
+    if coefficient_energy <= 0.0:
+        raise ValueError("injection has no energy at frequency_hz")
+    gain = (
+        np.vdot(reference_coefficients, candidate_coefficients)
+        / coefficient_energy
+    )
+    amplitude_retention = float(np.abs(gain))
+    phase_error_degrees = float(np.abs(np.angle(gain, deg=True)))
+    passes = (
+        waveform_error <= 0.01
+        and 0.99 <= amplitude_retention <= 1.01
+        and phase_error_degrees <= 1.0
+    )
+    return InjectionPreservation(
+        waveform_error,
+        amplitude_retention,
+        phase_error_degrees,
+        passes,
+    )
