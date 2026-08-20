@@ -40,7 +40,7 @@ for lo, hi in sorted(filtered):
     else:
         merged.append([lo, hi])
 
-fig, ax = plt.subplots(figsize=(165 * MM, 80 * MM))
+fig, ax = plt.subplots(figsize=(165 * MM, 76 * MM))
 ymin, ymax = -12.5, 6.0
 
 for lo, hi in merged:
@@ -48,7 +48,7 @@ for lo, hi in merged:
         ax.axvspan(max(lo, LO), min(hi, HI), ymin=0, ymax=1, color=LOST, lw=0, zorder=1)
 ax.fill_between(f, final, raw, where=raw >= final, color=REMOVED, lw=0,
                 interpolate=True, zorder=2)
-ax.plot(f, raw, color=SOURCE, lw=1.1, zorder=3, solid_capstyle="round")
+ax.plot(f, raw, color=SOURCE, lw=1.2, zorder=3, solid_capstyle="round")
 ax.plot(f, final, color=DERIV, lw=1.3, zorder=4, solid_capstyle="round")
 
 ax.set_xlim(LO, HI); ax.set_ylim(ymin, ymax)
@@ -65,8 +65,9 @@ handles = [
 ]
 ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.16), ncol=4,
           frameon=False, handlelength=1.6, columnspacing=1.6, borderaxespad=0)
-ax.text(0.5, 0.045, "filter stopbands continue below the axis", transform=ax.transAxes,
-        ha="center", fontsize=8, color="#8A8A8A")
+ax.text(0.985, 0.955, "stopbands continue below the axis", transform=ax.transAxes,
+        ha="right", va="top", fontsize=8, color="#8A8A8A")
+
 fig.tight_layout(pad=0.5)
 fig.savefig(sys.argv[2], bbox_inches="tight", pad_inches=0.03)
 print(f"wrote {sys.argv[2]}")

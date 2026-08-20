@@ -211,13 +211,13 @@ scanner-comb fits are both null.
 
 ![Power spectral density before and after removal](docs/decomb_psd.png)
 
-**What the pipeline does.** Channel-mean power spectral density of one recording over a 15 Hz
-window, 0.1 Hz Welch bins from 10 s segments. Blue shading is the power removed. Pink bands
-are the frequencies the manifest declares unavailable for inference; their 1.2 Hz spacing is
-the comb. A narrow band is a subtracted line, which costs two Fourier bins of the fit window
-on each side; a wide band is a filter stopband and its transitions, where the spectrum is
-emptied and the trace leaves the axis. Removal is evidence-bounded, so untouched frequencies
-between the bands are bit-identical to the source.
+**What the pipeline does.** Channel-mean power spectral density of sub-0010 run 1, shown over
+37 to 52 Hz of the 1 to 100 Hz analysed range, in 0.1 Hz Welch bins from 10 s segments. Blue
+shading is the power removed. Pink bands are the frequencies the manifest declares unavailable
+for inference, and their regular 1.2 Hz spacing is the comb. A narrow band is a subtracted
+line, costing two Fourier bins of the fit window on each side; a wide band is a filter
+stopband with its transitions, where the spectrum is emptied and the trace leaves the axis.
+Removal is bounded by the evidence, so the frequencies between the bands are unchanged.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
