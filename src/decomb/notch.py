@@ -1204,14 +1204,28 @@ def harmonic_exclusion_rows(
     return rows
 
 
+def merged_intervals(
+    intervals: Sequence[tuple[float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """Sorted non-overlapping cover, so overlapping intervals cannot be counted twice."""
+    merged: list[list[float]] = []
+    for low_hz, high_hz in sorted(tuple(interval) for interval in intervals):
+        if merged and low_hz <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], high_hz)
+        else:
+            merged.append([low_hz, high_hz])
+    return tuple((low_hz, high_hz) for low_hz, high_hz in merged)
+
+
 def band_availability_from_intervals(
     intervals: Sequence[tuple[float, float]],
     analysed_bands: tuple[tuple[str, float, float], ...],
 ) -> dict[str, float]:
-    """Unavailable and retained shares per study band, from bare intervals."""
+    """Recording-wide unavailable and retained shares per study band, from bare intervals."""
+    merged = merged_intervals(intervals)
     shares = {
         name: sum(
-            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in intervals
+            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in merged
         )
         / (high_hz - low_hz)
         for name, low_hz, high_hz in analysed_bands
@@ -1874,7 +1888,22 @@ def clean_harmonic_run(
             settings,
         )
     )
+    unavailable = list(
+        subtraction.damage_intervals(record.frequencies_hz, record.window_s)
+    )
+    if threshold_plan is not None:
+        unavailable.extend(threshold_plan.unavailable_edges())
+    unavailable.extend(
+        edge
+        for removal_round in result.rounds
+        for edge in removal_round.filter_plan.unavailable_edges()
+    )
+    recording_availability = band_availability_from_intervals(
+        unavailable,
+        analysed_bands,
+    )
     for row in rows:
+        row.update(recording_availability)
         row["roundtrip_deviation_v"] = deviation_v
     return rows
 

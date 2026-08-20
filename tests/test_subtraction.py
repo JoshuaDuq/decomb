@@ -348,3 +348,22 @@ def test_a_manifest_without_residual_rows_still_verifies():
 
     assert residual.threshold_rows(rows) == []
     assert subtraction.cascade_rows(rows) == rows
+
+
+def test_every_row_declares_the_recording_wide_availability_of_all_three_stages(tmp_path):
+    _, _, rows = _apply_to_synthetic_recording(tmp_path)
+
+    assert subtraction.subtraction_rows(rows)
+    assert residual.threshold_rows(rows)
+
+    declared = {float(row["gamma_retained_share"]) for row in rows}
+    assert len(declared) == 1, "every row must declare the same recording-wide share"
+
+    intervals = [
+        (float(row["unavailable_low_hz"]), float(row["unavailable_high_hz"]))
+        for row in rows
+        if row.get("unavailable_low_hz", "") != ""
+    ]
+    expected = notch.band_availability_from_intervals(intervals, BANDS)
+
+    assert declared.pop() == pytest.approx(expected["gamma_retained_share"])

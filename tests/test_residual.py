@@ -140,3 +140,11 @@ def test_threshold_manifest_rows_declare_their_unavailable_bandwidth():
     assert row["unavailable_low_hz"] < 40.0
     assert row["gamma_unavailable_share"] > 0.0
     assert notch.MANIFEST_REQUIRED_COLUMNS <= set(row)
+
+
+def test_overlapping_intervals_do_not_double_count_availability():
+    bands = (("gamma", 30.0, 80.0),)
+
+    shares = notch.band_availability_from_intervals(((40.0, 41.0), (40.5, 42.0)), bands)
+
+    assert shares["gamma_unavailable_share"] == pytest.approx(2.0 / 50.0)
