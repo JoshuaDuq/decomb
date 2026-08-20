@@ -8,22 +8,6 @@ from dataclasses import dataclass
 from decomb import notch, recovery
 
 
-def authorized_frequencies(evidence, settings) -> tuple[float, ...]:
-    """Every frequency this round's evidence authorizes removing."""
-    frequencies = [
-        line.position_hz
-        for channel in evidence.model.channels
-        for line in channel.lines
-    ]
-    scanner = getattr(evidence, "scanner_harmonics", None)
-    if scanner is not None:
-        frequencies.extend(
-            harmonic * scanner.fundamental_hz
-            for harmonic in scanner.supporting_harmonics
-        )
-    return tuple(sorted(set(frequencies)))
-
-
 def fit_window_s(settings) -> float:
     """Subtraction fits on twice the detection window, halving the damage it declares."""
     return 2.0 * float(settings.estimation_window_s)
