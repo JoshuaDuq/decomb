@@ -29,6 +29,42 @@ MULTIPLE_TESTING_METHOD = (
 )
 SCANNER_HARMONIC_ESTIMATION_WINDOW_S = 4.0
 VERIFICATION_NAME = "line_notch_verification.tsv"
+COMB_MASK_NAME = "comb_analysis_mask.tsv"
+ANALYSIS_AVAILABILITY_NAME = "analysis_availability.tsv"
+MANIFEST_REQUIRED_COLUMNS = frozenset(
+    {
+        "recording",
+        "removal_round",
+        "outcome",
+        "channel",
+        "kind",
+        "harmonics",
+        "fundamental_hz",
+        "scanner_family_corrected_p_value",
+        "scanner_supporting_harmonics",
+        "scanner_repetition_time_s",
+        "scanner_trigger_event_name",
+        "detected_line_frequencies_hz",
+        "detected_line_input_p_values",
+        "detected_line_corrected_p_values",
+        "detected_line_window_indices",
+        "multiple_testing_method",
+        "multiple_testing_scope",
+        "familywise_error_rate",
+        "round_familywise_error_rate",
+        "estimation_window_count",
+        "tested_eeg_channel_count",
+        "detection_test_count_per_channel",
+        "total_detection_test_count",
+        "stopband_low_hz",
+        "stopband_high_hz",
+        "transition_bandwidth_hz",
+        "fir_filter_length_samples",
+        "fir_filter_length_s",
+        "fir_minimum_stopband_attenuation_db",
+        "fir_maximum_passband_deviation_db",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1170,27 +1206,48 @@ def harmonic_exclusion_rows(
     return rows
 
 
-def _band_availability_fields(
-    plan: HarmonicNotchPlan,
+def merged_intervals(
+    intervals: Sequence[tuple[float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """Sorted non-overlapping cover, so overlapping intervals cannot be counted twice."""
+    merged: list[list[float]] = []
+    for low_hz, high_hz in sorted(tuple(interval) for interval in intervals):
+        if merged and low_hz <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], high_hz)
+        else:
+            merged.append([low_hz, high_hz])
+    return tuple((low_hz, high_hz) for low_hz, high_hz in merged)
+
+
+def band_availability_from_intervals(
+    intervals: Sequence[tuple[float, float]],
     analysed_bands: tuple[tuple[str, float, float], ...],
 ) -> dict[str, float]:
-    """Return recording-wide unavailable and retained shares for each study band."""
-    unavailable_edges = plan.unavailable_edges()
-    unavailable_shares = {
+    """Recording-wide unavailable and retained shares per study band, from bare intervals."""
+    merged = merged_intervals(intervals)
+    shares = {
         name: sum(
-            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in unavailable_edges
+            _interval_overlap_hz(interval, (low_hz, high_hz)) for interval in merged
         )
         / (high_hz - low_hz)
         for name, low_hz, high_hz in analysed_bands
     }
     return {
         field: value
-        for name, share in unavailable_shares.items()
+        for name, share in shares.items()
         for field, value in (
             (f"{name}_unavailable_share", share),
             (f"{name}_retained_share", 1.0 - share),
         )
     }
+
+
+def _band_availability_fields(
+    plan: HarmonicNotchPlan,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+) -> dict[str, float]:
+    """Recording-wide unavailable and retained shares for each study band."""
+    return band_availability_from_intervals(plan.unavailable_edges(), analysed_bands)
 
 
 def line_manifest_rows(
@@ -1773,8 +1830,21 @@ def clean_harmonic_run(
     n_jobs: int = -1,
 ) -> list[dict[str, float | str]]:
     """Fit supported residual rounds, write, and require a terminal null."""
+    from decomb import residual, subtraction
+
     raw = recordings.read_bids_raw(vhdr)
-    result = clean_until_no_supported_lines(raw, settings, n_jobs=n_jobs)
+    evidence = fit_harmonic_round(raw, settings, round_index=1)
+    recovered, record = subtraction.subtract_authorized(
+        raw,
+        evidence,
+        settings,
+        n_jobs=n_jobs,
+    )
+    threshold = residual.fit_threshold_stage(recovered, record.frequencies_hz, settings)
+    threshold_plan = threshold.plan(settings)
+    if threshold_plan is not None:
+        recovered = apply_harmonic_notches(recovered, threshold_plan, n_jobs=n_jobs)
+    result = clean_until_no_supported_lines(recovered, settings, n_jobs=n_jobs)
     filtered = result.cleaned
 
     destination_vhdr = recordings.derivative_vhdr_path(
@@ -1810,13 +1880,32 @@ def clean_harmonic_run(
         round_index=len(result.rounds) + 1,
     )
 
-    rows = cleaning_manifest_rows(
-        vhdr.stem,
-        result,
+    rows = record.manifest_rows(vhdr.stem, analysed_bands, settings)
+    rows.extend(threshold.manifest_rows(vhdr.stem, analysed_bands, settings))
+    rows.extend(
+        cleaning_manifest_rows(
+            vhdr.stem,
+            result,
+            analysed_bands,
+            settings,
+        )
+    )
+    unavailable = list(
+        subtraction.damage_intervals(record.frequencies_hz, record.window_s)
+    )
+    if threshold_plan is not None:
+        unavailable.extend(threshold_plan.unavailable_edges())
+    unavailable.extend(
+        edge
+        for removal_round in result.rounds
+        for edge in removal_round.filter_plan.unavailable_edges()
+    )
+    recording_availability = band_availability_from_intervals(
+        unavailable,
         analysed_bands,
-        settings,
     )
     for row in rows:
+        row.update(recording_availability)
         row["roundtrip_deviation_v"] = deviation_v
     return rows
 
@@ -2070,7 +2159,7 @@ def run(args: argparse.Namespace) -> None:
 
     import mne
 
-    from decomb import effective
+    from decomb import effective, subtraction
     from decomb.config import load_config
 
     mne.set_log_level("ERROR")
@@ -2112,17 +2201,22 @@ def run(args: argparse.Namespace) -> None:
             n_jobs=n_jobs,
         )
         rows.extend(measured)
+        notched = subtraction.cascade_rows(measured)
         detected_rows = [
-            row for row in measured if row["outcome"] != "no_line_detected"
+            row for row in notched if row["outcome"] != "no_line_detected"
         ]
         if not detected_rows:
+            outcome = (
+                "no residual line after subtraction"
+                if subtraction.subtraction_rows(measured)
+                else "no authorized line or scanner comb; copied unchanged"
+            )
             print(
                 f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
-                f"no authorized line or scanner comb; copied unchanged "
-                f"({time.time() - started:.0f}s)"
+                f"{outcome} ({time.time() - started:.0f}s)"
             )
             continue
-        filter_plans = removal_rounds_from_rows(measured)
+        filter_plans = removal_rounds_from_rows(notched)
         filter_stopband_count = sum(
             len(plan.stopbands) for plan in filter_plans
         )
@@ -2155,6 +2249,17 @@ def run(args: argparse.Namespace) -> None:
 
     report_dir.mkdir(parents=True, exist_ok=True)
     recordings.write_tsv_atomic(frame, report_dir / MANIFEST_NAME)
+    mask_path, availability_path = write_comb_analysis_mask(
+        report_dir,
+        frame,
+        analysed_bands,
+        settings,
+        float(
+            mne.io.read_raw_brainvision(runs[0], preload=False, verbose="ERROR").info[
+                "sfreq"
+            ]
+        ),
+    )
     effective_path = effective.write(
         config,
         settings,
@@ -2162,6 +2267,8 @@ def run(args: argparse.Namespace) -> None:
         stage="apply",
     )
     print(f"  declared {output_root / described.name} a derivative of {source_root}")
+    print(f"  wrote {mask_path}")
+    print(f"  wrote {availability_path}")
     print(f"  wrote {report_dir / MANIFEST_NAME}")
     print(f"  wrote {effective_path}")
 
@@ -2591,26 +2698,92 @@ def _validate_exact_derivative(
     )
 
 
+def _replay_removal_stages(original, subtracted_rows, threshold_rows, settings):
+    """Reproduce apply's subtraction and residual stages, re-deriving both decisions."""
+    from decomb import residual, subtraction
+
+    if not subtracted_rows and not threshold_rows:
+        return original
+    evidence = fit_harmonic_round(original, settings, round_index=1)
+    targets = residual.subtraction_targets(original, evidence, settings)
+    recovered = original
+    if subtracted_rows:
+        if subtraction.recorded_frequencies(subtracted_rows) != targets:
+            raise ValueError(
+                "Manifest subtracted frequencies do not equal the frequencies the "
+                "source's round-one evidence authorizes subtracting."
+            )
+        recovered, _ = subtraction.subtract_authorized(original, evidence, settings)
+    if threshold_rows:
+        refit = residual.fit_threshold_stage(recovered, targets, settings)
+        if residual.recorded_stopbands(threshold_rows) != refit.stopbands:
+            raise ValueError(
+                "Manifest residual stopbands do not equal the stopbands the "
+                "post-subtraction spectrum authorizes notching."
+            )
+        plan = refit.plan(settings)
+        if plan is not None:
+            recovered = apply_harmonic_notches(recovered, plan)
+    return recovered
+
+
+def _stage_verification_rows(
+    recording: str,
+    stage_rows: Sequence[Mapping[str, object]],
+    outcome: str,
+    kind: str,
+) -> list[dict[str, float | str]]:
+    """Declare each replayed pre-cascade interval alongside the verified stopbands."""
+    return [
+        {
+            "recording": recording,
+            "removal_round": "",
+            "outcome": outcome,
+            "channel": "",
+            "kind": kind,
+            "harmonics": "",
+            "stopband_low_hz": row.get("stopband_low_hz", ""),
+            "stopband_high_hz": row.get("stopband_high_hz", ""),
+            "unavailable_low_hz": row["unavailable_low_hz"],
+            "unavailable_high_hz": row["unavailable_high_hz"],
+            "verified_stopband_change_db": "",
+        }
+        for row in stage_rows
+    ]
+
+
 def verify_harmonic_run(
     source_vhdr: Path,
     cleaned_vhdr: Path,
     manifest_rows: Sequence[Mapping[str, object]],
     settings,
 ) -> list[dict[str, float | str]]:
-    """Refit and replay every removal round, including the terminal null."""
+    """Refit and replay every removal stage and round, including the terminal null."""
+    from decomb import residual, subtraction
+
     original = recordings.read_bids_raw(source_vhdr)
     cleaned = recordings.read_bids_raw(cleaned_vhdr)
     _validate_matching_recordings(original, cleaned)
-    _validate_manifest_evidence(manifest_rows, settings)
+    subtracted_rows = subtraction.subtraction_rows(manifest_rows)
+    threshold_rows = residual.threshold_rows(manifest_rows)
+    cascade_rows = subtraction.cascade_rows(manifest_rows)
+    _validate_manifest_evidence(cascade_rows, settings)
 
+    source = _replay_removal_stages(
+        original, subtracted_rows, threshold_rows, settings
+    )
     indexed_rows = tuple(
         (int(row["removal_round"]), row)
-        for row in manifest_rows
+        for row in cascade_rows
     )
     round_indices = tuple(sorted({index for index, _ in indexed_rows}))
-    current = original
+    current = source
     plan_rounds = []
-    verification_rows = []
+    verification_rows = _stage_verification_rows(
+        source_vhdr.stem, subtracted_rows, "line_subtracted", "subtracted"
+    ) + _stage_verification_rows(
+        source_vhdr.stem, threshold_rows, "residual_notched", "threshold_notched"
+    )
     sampling_frequency_hz = float(original.info["sfreq"])
     for round_index in round_indices:
         block = tuple(row for index, row in indexed_rows if index == round_index)
@@ -2754,7 +2927,7 @@ def verify_harmonic_run(
         current = filtered
 
     maximum_sample_deviation_v = _validate_exact_derivative(
-        original,
+        source,
         cleaned,
         cleaned_vhdr,
         plan_rounds,
@@ -2767,6 +2940,70 @@ def verify_harmonic_run(
     for row in verification_rows:
         row["maximum_sample_deviation_v"] = maximum_sample_deviation_v
     return verification_rows
+
+
+def write_comb_analysis_mask(
+    report_dir: Path,
+    manifest: pd.DataFrame,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+    settings,
+    sampling_frequency_hz: float,
+) -> tuple[Path, Path]:
+    """Publish a conservative comb mask and the availability it leaves for analysis.
+
+    The mask is advisory. It covers every comb tooth in the band where the comb was
+    measured, at the width a subtracted tooth declares, whether or not this recording
+    removed that tooth. Nothing is removed from the derivative and the manifest is
+    unchanged: the manifest records what was destroyed, this records what an analyst may
+    additionally choose to distrust.
+    """
+    from decomb import residual
+
+    mask = residual.comb_analysis_mask(settings, sampling_frequency_hz)
+    fundamental_hz = float(settings.comb_fundamental)
+    mask_frame = pd.DataFrame(
+        [
+            {
+                "harmonic": int(round((low_hz + high_hz) / 2.0 / fundamental_hz)),
+                "centre_hz": (low_hz + high_hz) / 2.0,
+                "low_hz": low_hz,
+                "high_hz": high_hz,
+            }
+            for low_hz, high_hz in mask
+        ]
+    )
+    rows: list[dict[str, float | str]] = []
+    for recording, block in manifest.groupby("recording", sort=True):
+        declared = [
+            (float(low_hz), float(high_hz))
+            for low_hz, high_hz in zip(
+                block["unavailable_low_hz"],
+                block["unavailable_high_hz"],
+                strict=True,
+            )
+            if str(low_hz) != "" and str(high_hz) != ""
+        ]
+        without = band_availability_from_intervals(declared, analysed_bands)
+        with_mask = band_availability_from_intervals(
+            [*declared, *mask],
+            analysed_bands,
+        )
+        rows.extend(
+            {
+                "recording": recording,
+                "band": name,
+                "low_hz": low_hz,
+                "high_hz": high_hz,
+                "retained_declared": without[f"{name}_retained_share"],
+                "retained_with_comb_mask": with_mask[f"{name}_retained_share"],
+            }
+            for name, low_hz, high_hz in analysed_bands
+        )
+    mask_path = report_dir / COMB_MASK_NAME
+    availability_path = report_dir / ANALYSIS_AVAILABILITY_NAME
+    recordings.write_tsv_atomic(mask_frame, mask_path)
+    recordings.write_tsv_atomic(pd.DataFrame(rows), availability_path)
+    return mask_path, availability_path
 
 
 def _read_manifest(path: Path) -> pd.DataFrame:
@@ -2797,39 +3034,7 @@ def run_verify(args: argparse.Namespace) -> None:
             f"No line-notch manifest at {manifest_path}. Run `decomb apply` first."
         )
     manifest = _read_manifest(manifest_path)
-    required = {
-        "recording",
-        "removal_round",
-        "outcome",
-        "channel",
-        "kind",
-        "harmonics",
-        "fundamental_hz",
-        "scanner_family_corrected_p_value",
-        "scanner_supporting_harmonics",
-        "scanner_repetition_time_s",
-        "scanner_trigger_event_name",
-        "detected_line_frequencies_hz",
-        "detected_line_input_p_values",
-        "detected_line_corrected_p_values",
-        "detected_line_window_indices",
-        "multiple_testing_method",
-        "multiple_testing_scope",
-        "familywise_error_rate",
-        "round_familywise_error_rate",
-        "estimation_window_count",
-        "tested_eeg_channel_count",
-        "detection_test_count_per_channel",
-        "total_detection_test_count",
-        "stopband_low_hz",
-        "stopband_high_hz",
-        "transition_bandwidth_hz",
-        "fir_filter_length_samples",
-        "fir_filter_length_s",
-        "fir_minimum_stopband_attenuation_db",
-        "fir_maximum_passband_deviation_db",
-    }
-    missing = required - set(manifest.columns)
+    missing = MANIFEST_REQUIRED_COLUMNS - set(manifest.columns)
     if missing:
         raise ValueError(f"Line-notch manifest is missing columns: {sorted(missing)}")
     recording_names = {vhdr.stem for vhdr in runs}
