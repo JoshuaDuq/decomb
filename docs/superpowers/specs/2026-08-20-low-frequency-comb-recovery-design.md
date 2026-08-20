@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-20
 **Branch:** `feat/apply-subtraction`
-**Status:** approved for specification; implementation awaits written-spec review
+**Status:** approved for implementation 2026-08-20
 
 ## Question
 
