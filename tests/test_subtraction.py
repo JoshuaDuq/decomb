@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from decomb import lines, notch, subtraction
+from decomb import lines, notch, residual, subtraction
 
 BANDS = (("beta", 13.0, 30.0), ("gamma", 30.1, 80.0))
 
@@ -55,28 +55,40 @@ def test_authorized_frequencies_match_what_the_planner_would_notch():
     assert subtraction.authorized_frequencies(round_evidence, _settings()) == planned
 
 
-def test_damage_interval_spans_two_frequency_bins_each_side():
+def test_the_fit_window_is_twice_the_detection_window():
     settings = _settings()
-    half = 2.0 * settings.frequency_bin_width_hz
 
-    assert subtraction.damage_intervals((40.0,), settings) == ((40.0 - half, 40.0 + half),)
+    assert subtraction.fit_window_s(settings) == 2.0 * settings.estimation_window_s
+
+
+def test_damage_halves_because_the_fit_window_doubles():
+    settings = _settings()
+    narrow = subtraction.damage_intervals((40.0,), subtraction.fit_window_s(settings))
+    wide = subtraction.damage_intervals((40.0,), settings.estimation_window_s)
+
+    assert narrow == ((40.0 - 0.1, 40.0 + 0.1),)
+    assert wide == ((40.0 - 0.2, 40.0 + 0.2),)
+
+
+def test_damage_interval_spans_two_frequency_bins_each_side():
+    half = 2.0 / 20.0
+
+    assert subtraction.damage_intervals((40.0,), 20.0) == ((40.0 - half, 40.0 + half),)
 
 
 def test_overlapping_damage_intervals_merge():
-    settings = _settings()
-    half = 2.0 * settings.frequency_bin_width_hz
+    half = 2.0 / 20.0
     close = 40.0 + half
 
-    merged = subtraction.damage_intervals((40.0, close), settings)
+    merged = subtraction.damage_intervals((40.0, close), 20.0)
 
     assert merged == ((40.0 - half, close + half),)
 
 
 def test_separated_damage_intervals_do_not_merge():
-    settings = _settings()
-    half = 2.0 * settings.frequency_bin_width_hz
+    half = 2.0 / 20.0
 
-    intervals = subtraction.damage_intervals((40.0, 40.0 + 5.0 * half), settings)
+    intervals = subtraction.damage_intervals((40.0, 40.0 + 5.0 * half), 20.0)
 
     assert len(intervals) == 2
 
@@ -88,22 +100,28 @@ def test_subtraction_removes_the_authorized_frequency_from_the_data():
     sfreq = 200.0
     times = np.arange(0, 60.0, 1.0 / sfreq)
     data = np.vstack([np.sin(2 * np.pi * 40.0 * times)] * 2) * 1e-6
+    data += np.random.default_rng(0).normal(scale=1e-8, size=data.shape)
     raw = mne.io.RawArray(
         data, mne.create_info(["C3", "C4"], sfreq, "eeg"), verbose="ERROR"
     )
     round_evidence = SimpleNamespace(
         model=lines.LineModel((), 1, 2, 5),
-        scanner_harmonics=notch.ScannerHarmonicEvidence(
-            fundamental_hz=40.0, corrected_p_value=1e-12, supporting_harmonics=(1,)
+        plans=(
+            SimpleNamespace(
+                geometry=notch.HarmonicNotchPlan(
+                    (notch.HarmonicStopband((), 39.5, 40.5, "isolated"),), 0.061
+                )
+            ),
         ),
+        scanner_harmonics=None,
     )
 
     cleaned, record = subtraction.subtract_authorized(
         raw, round_evidence, settings, n_jobs=1
     )
 
-    assert record.frequencies_hz == (40.0,)
-    assert record.window_s == settings.estimation_window_s
+    assert 40.0 in record.frequencies_hz
+    assert record.window_s == 2.0 * settings.estimation_window_s
     assert np.abs(cleaned.get_data()).max() < 0.2 * np.abs(raw.get_data()).max()
 
 
@@ -180,7 +198,7 @@ def _synthetic_bids_recording(tmp_path, make_line=_drifting_line):
 def _fir_round_indices(rows) -> set[int]:
     return {
         int(row["removal_round"])
-        for row in subtraction.notch_rows(rows)
+        for row in subtraction.cascade_rows(rows)
         if str(row["outcome"]) != "no_line_detected"
     }
 
@@ -243,11 +261,13 @@ def test_verify_replays_subtraction_and_the_fir_cascade(tmp_path):
     vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
 
     assert subtraction.subtraction_rows(rows)
+    assert residual.threshold_rows(rows), "fixture must exercise the residual stage"
     assert _fir_round_indices(rows), "fixture must leave a residual line for the FIR"
 
     verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
 
     assert verified
+    assert any(row["kind"] == "threshold_notched" for row in verified)
 
 
 def test_verify_replays_a_subtraction_that_leaves_no_residual_line(tmp_path):
@@ -309,3 +329,22 @@ def test_apply_then_verify_round_trips_subtraction_through_the_manifest(tmp_path
 
     verification = notch._read_manifest(args.report_dir / notch.VERIFICATION_NAME)
     assert (verification["kind"] == "subtracted").any()
+
+
+def test_verify_rejects_a_manifest_whose_residual_notches_are_unauthorized(tmp_path):
+    vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
+    tampered = [dict(row) for row in rows]
+    for row in tampered:
+        if row["kind"] == "threshold_notched":
+            row["stopband_low_hz"] = 17.0
+            row["stopband_high_hz"] = 17.5
+
+    with pytest.raises(ValueError, match="residual stopbands"):
+        notch.verify_harmonic_run(vhdr, cleaned_vhdr, tampered, _settings())
+
+
+def test_a_manifest_without_residual_rows_still_verifies():
+    rows = [{"recording": "sub-0001_run-1_eeg", "kind": "isolated", "harmonics": "2"}]
+
+    assert residual.threshold_rows(rows) == []
+    assert subtraction.cascade_rows(rows) == rows

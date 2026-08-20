@@ -24,12 +24,17 @@ def authorized_frequencies(evidence, settings) -> tuple[float, ...]:
     return tuple(sorted(set(frequencies)))
 
 
+def fit_window_s(settings) -> float:
+    """Subtraction fits on twice the detection window, halving the damage it declares."""
+    return 2.0 * float(settings.estimation_window_s)
+
+
 def damage_intervals(
     frequencies: Sequence[float],
-    settings,
+    window_s: float,
 ) -> tuple[tuple[float, float], ...]:
-    """Merged intervals a multitaper subtraction destroys, two bins each side."""
-    half_width_hz = 2.0 * settings.frequency_bin_width_hz
+    """Merged intervals a multitaper fit at this window destroys, two bins each side."""
+    half_width_hz = 2.0 / float(window_s)
     merged: list[list[float]] = []
     for centre_hz in sorted(float(value) for value in frequencies):
         low_hz, high_hz = centre_hz - half_width_hz, centre_hz + half_width_hz
@@ -54,7 +59,7 @@ class SubtractionRecord:
         settings,
     ) -> list[dict[str, float | str]]:
         """One row per merged interval, in the same contract as a stopband."""
-        intervals = damage_intervals(self.frequencies_hz, settings)
+        intervals = damage_intervals(self.frequencies_hz, self.window_s)
         shares = notch.band_availability_from_intervals(intervals, analysed_bands)
         rows = []
         for low_hz, high_hz in intervals:
@@ -84,8 +89,10 @@ def subtract_authorized(raw, evidence, settings, *, n_jobs: int = -1):
     """Fit and remove every authorized frequency, returning the record."""
     import mne
 
-    frequencies = authorized_frequencies(evidence, settings)
-    record = SubtractionRecord(frequencies, float(settings.estimation_window_s))
+    from decomb import residual
+
+    frequencies = residual.subtraction_targets(raw, evidence, settings)
+    record = SubtractionRecord(frequencies, fit_window_s(settings))
     if not frequencies:
         return raw.copy(), record
     picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
@@ -117,9 +124,12 @@ def subtraction_rows(rows: Sequence[dict]) -> list[dict]:
     return [row for row in rows if str(row.get("kind", "")) == "subtracted"]
 
 
-def notch_rows(rows: Sequence[dict]) -> list[dict]:
-    """The FIR-cascade rows of a manifest, which alone declare removal rounds."""
-    return [row for row in rows if str(row.get("kind", "")) != "subtracted"]
+STAGE_KINDS = frozenset({"subtracted", "threshold_notched"})
+
+
+def cascade_rows(rows: Sequence[dict]) -> list[dict]:
+    """The converged-round rows of a manifest, which alone declare removal rounds."""
+    return [row for row in rows if str(row.get("kind", "")) not in STAGE_KINDS]
 
 
 def recorded_frequencies(rows: Sequence[dict]) -> tuple[float, ...]:

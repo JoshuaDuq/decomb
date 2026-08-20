@@ -1814,7 +1814,7 @@ def clean_harmonic_run(
     n_jobs: int = -1,
 ) -> list[dict[str, float | str]]:
     """Fit supported residual rounds, write, and require a terminal null."""
-    from decomb import subtraction
+    from decomb import residual, subtraction
 
     raw = recordings.read_bids_raw(vhdr)
     evidence = fit_harmonic_round(raw, settings, round_index=1)
@@ -1824,6 +1824,10 @@ def clean_harmonic_run(
         settings,
         n_jobs=n_jobs,
     )
+    threshold = residual.fit_threshold_stage(recovered, record.frequencies_hz, settings)
+    threshold_plan = threshold.plan(settings)
+    if threshold_plan is not None:
+        recovered = apply_harmonic_notches(recovered, threshold_plan, n_jobs=n_jobs)
     result = clean_until_no_supported_lines(recovered, settings, n_jobs=n_jobs)
     filtered = result.cleaned
 
@@ -1861,6 +1865,7 @@ def clean_harmonic_run(
     )
 
     rows = record.manifest_rows(vhdr.stem, analysed_bands, settings)
+    rows.extend(threshold.manifest_rows(vhdr.stem, analysed_bands, settings))
     rows.extend(
         cleaning_manifest_rows(
             vhdr.stem,
@@ -2165,7 +2170,7 @@ def run(args: argparse.Namespace) -> None:
             n_jobs=n_jobs,
         )
         rows.extend(measured)
-        notched = subtraction.notch_rows(measured)
+        notched = subtraction.cascade_rows(measured)
         detected_rows = [
             row for row in notched if row["outcome"] != "no_line_detected"
         ]
@@ -2649,43 +2654,57 @@ def _validate_exact_derivative(
     )
 
 
-def _replay_recorded_subtraction(original, subtracted_rows, settings):
-    """Reproduce apply's subtraction, requiring the source to authorize exactly it."""
-    from decomb import subtraction
+def _replay_removal_stages(original, subtracted_rows, threshold_rows, settings):
+    """Reproduce apply's subtraction and residual stages, re-deriving both decisions."""
+    from decomb import residual, subtraction
 
-    if not subtracted_rows:
+    if not subtracted_rows and not threshold_rows:
         return original
-    recorded = subtraction.recorded_frequencies(subtracted_rows)
     evidence = fit_harmonic_round(original, settings, round_index=1)
-    if recorded != subtraction.authorized_frequencies(evidence, settings):
-        raise ValueError(
-            "Manifest subtracted frequencies do not equal the frequencies the "
-            "source's round-one evidence authorizes subtracting."
-        )
-    recovered, _ = subtraction.subtract_authorized(original, evidence, settings)
+    targets = residual.subtraction_targets(original, evidence, settings)
+    recovered = original
+    if subtracted_rows:
+        if subtraction.recorded_frequencies(subtracted_rows) != targets:
+            raise ValueError(
+                "Manifest subtracted frequencies do not equal the frequencies the "
+                "source's round-one evidence authorizes subtracting."
+            )
+        recovered, _ = subtraction.subtract_authorized(original, evidence, settings)
+    if threshold_rows:
+        refit = residual.fit_threshold_stage(recovered, targets, settings)
+        if residual.recorded_stopbands(threshold_rows) != refit.stopbands:
+            raise ValueError(
+                "Manifest residual stopbands do not equal the stopbands the "
+                "post-subtraction spectrum authorizes notching."
+            )
+        plan = refit.plan(settings)
+        if plan is not None:
+            recovered = apply_harmonic_notches(recovered, plan)
     return recovered
 
 
-def _subtraction_verification_rows(
+def _stage_verification_rows(
     recording: str,
-    subtracted_rows: Sequence[Mapping[str, object]],
+    stage_rows: Sequence[Mapping[str, object]],
+    outcome: str,
+    kind: str,
 ) -> list[dict[str, float | str]]:
-    """Declare each replayed subtraction interval alongside the verified stopbands."""
+    """Declare each replayed pre-cascade interval alongside the verified stopbands."""
     return [
         {
             "recording": recording,
             "removal_round": "",
-            "outcome": "line_subtracted",
+            "outcome": outcome,
             "channel": "",
-            "kind": "subtracted",
+            "kind": kind,
             "harmonics": "",
-            "stopband_low_hz": "",
-            "stopband_high_hz": "",
+            "stopband_low_hz": row.get("stopband_low_hz", ""),
+            "stopband_high_hz": row.get("stopband_high_hz", ""),
             "unavailable_low_hz": row["unavailable_low_hz"],
             "unavailable_high_hz": row["unavailable_high_hz"],
             "verified_stopband_change_db": "",
         }
-        for row in subtracted_rows
+        for row in stage_rows
     ]
 
 
@@ -2695,17 +2714,20 @@ def verify_harmonic_run(
     manifest_rows: Sequence[Mapping[str, object]],
     settings,
 ) -> list[dict[str, float | str]]:
-    """Refit and replay the subtraction and every removal round, including the null."""
-    from decomb import subtraction
+    """Refit and replay every removal stage and round, including the terminal null."""
+    from decomb import residual, subtraction
 
     original = recordings.read_bids_raw(source_vhdr)
     cleaned = recordings.read_bids_raw(cleaned_vhdr)
     _validate_matching_recordings(original, cleaned)
     subtracted_rows = subtraction.subtraction_rows(manifest_rows)
-    cascade_rows = subtraction.notch_rows(manifest_rows)
+    threshold_rows = residual.threshold_rows(manifest_rows)
+    cascade_rows = subtraction.cascade_rows(manifest_rows)
     _validate_manifest_evidence(cascade_rows, settings)
 
-    source = _replay_recorded_subtraction(original, subtracted_rows, settings)
+    source = _replay_removal_stages(
+        original, subtracted_rows, threshold_rows, settings
+    )
     indexed_rows = tuple(
         (int(row["removal_round"]), row)
         for row in cascade_rows
@@ -2713,7 +2735,11 @@ def verify_harmonic_run(
     round_indices = tuple(sorted({index for index, _ in indexed_rows}))
     current = source
     plan_rounds = []
-    verification_rows = _subtraction_verification_rows(source_vhdr.stem, subtracted_rows)
+    verification_rows = _stage_verification_rows(
+        source_vhdr.stem, subtracted_rows, "line_subtracted", "subtracted"
+    ) + _stage_verification_rows(
+        source_vhdr.stem, threshold_rows, "residual_notched", "threshold_notched"
+    )
     sampling_frequency_hz = float(original.info["sfreq"])
     for round_index in round_indices:
         block = tuple(row for index, row in indexed_rows if index == round_index)

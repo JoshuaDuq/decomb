@@ -108,7 +108,7 @@ def _measure(name):
     nulls = np.array(nulls)
     null_p99 = float(np.percentile(nulls, 99)) if nulls.size else np.nan
 
-    damage = list(subtraction.damage_intervals(targets, settings))
+    damage = list(subtraction.damage_intervals(targets, settings.estimation_window_s))
     fir = [(sb.low_hz, sb.high_hz) for r in result.rounds for sb in r.filter_plan.stopbands]
     merged_all = _merge(damage + fir)
     merged_fir = _merge(fir)
