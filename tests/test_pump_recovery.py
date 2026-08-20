@@ -101,3 +101,27 @@ def test_model_selection_holds_out_every_training_participant():
     assert selected.rank == repeated.rank
     assert selected.penalty == repeated.penalty
     assert selected.validation_error == repeated.validation_error
+
+
+def test_pump_lock_test_separates_phase_locked_and_balanced_null_coefficients():
+    rng = np.random.default_rng(8)
+    phases = rng.uniform(-np.pi, np.pi, size=(80, 4))
+    prediction = np.exp(1j * phases)
+    balanced_phases = np.exp(2j * np.pi * np.arange(80) / 80.0)
+    null = prediction * balanced_phases[:, None]
+
+    locked_result = pump_recovery.pump_lock_test(
+        prediction,
+        prediction,
+        surrogate_count=999,
+        seed=10,
+    )
+    null_result = pump_recovery.pump_lock_test(
+        null,
+        prediction,
+        surrogate_count=999,
+        seed=10,
+    )
+
+    assert locked_result.p_value <= 0.01
+    assert null_result.p_value > 0.01

@@ -255,3 +255,61 @@ def select_model(
         validation_error,
         validation_participants,
     )
+
+
+@dataclass(frozen=True)
+class PumpLockTest:
+    """Recording-level maximum-coherence phase-randomization result."""
+
+    maximum_coherence: float
+    p_value: float
+    surrogate_count: int
+
+
+def _channel_coherence(
+    observed: NDArray[np.complex128],
+    predicted: NDArray[np.complex128],
+) -> NDArray[np.float64]:
+    numerator = np.abs(np.sum(observed * np.conj(predicted), axis=0)) ** 2
+    denominator = np.sum(np.abs(observed) ** 2, axis=0) * np.sum(
+        np.abs(predicted) ** 2,
+        axis=0,
+    )
+    if np.any(denominator <= 0.0):
+        raise ValueError("pump-lock coherence requires non-zero channel energy")
+    return numerator / denominator
+
+
+def pump_lock_test(
+    observed: NDArray[np.complexfloating],
+    predicted: NDArray[np.complexfloating],
+    *,
+    surrogate_count: int,
+    seed: int,
+) -> PumpLockTest:
+    """Test maximum channel coherence against shared phase randomization."""
+    values = np.asarray(observed, dtype=np.complex128)
+    reference = np.asarray(predicted, dtype=np.complex128)
+    if values.shape != reference.shape or values.ndim != 2:
+        raise ValueError("observed and predicted coefficients must share a 2D shape")
+    if not np.isfinite(values).all() or not np.isfinite(reference).all():
+        raise ValueError("pump-lock coefficients must be finite")
+    if not isinstance(surrogate_count, int) or isinstance(surrogate_count, bool):
+        raise ValueError("surrogate_count must be an integer")
+    if surrogate_count < 99:
+        raise ValueError("at least 99 surrogates are required")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer")
+
+    observed_maximum = float(_channel_coherence(values, reference).max())
+    rng = np.random.default_rng(seed)
+    surrogate_maxima = np.empty(surrogate_count)
+    for index in range(surrogate_count):
+        phases = np.exp(
+            2j * np.pi * rng.random(reference.shape[0])
+        )
+        randomized = reference * phases[:, None]
+        surrogate_maxima[index] = _channel_coherence(values, randomized).max()
+    exceedances = int(np.sum(surrogate_maxima >= observed_maximum))
+    p_value = (exceedances + 1.0) / (surrogate_count + 1.0)
+    return PumpLockTest(observed_maximum, p_value, surrogate_count)
