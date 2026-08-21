@@ -1,8 +1,7 @@
 """Subtract a fitted sinusoid at each authorized frequency.
 
-Only the multitaper line fit ships. The spatial-subspace, trigger-locked and
-trajectory-PCA candidates evaluated alongside it live on `archive/full-tree`;
-`docs/rspca_validation.md` records why trajectory PCA is not a decomb.
+Only the multitaper line fit ships. Spatial-subspace, trigger-locked, and trajectory-PCA
+methods are outside this package's removal method.
 """
 
 from __future__ import annotations

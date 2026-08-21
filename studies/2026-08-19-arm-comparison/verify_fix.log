@@ -1,8 +1,0 @@
-[ 106.4s] [1/7] sub-0006_task-thermalactive_run-2_eeg: notching_declared: comb +0.00 gamma 0.718 peaks 14  comb_subtracted: comb +0.14 gamma 0.988 peaks 2  combined: comb +0.11 gamma 0.988 peaks 11
-[ 125.7s] [2/7] sub-0006_task-thermalactive_run-1_eeg: notching_declared: comb +0.24 gamma 0.692 peaks 18  comb_subtracted: comb +0.02 gamma 0.929 peaks 8  combined: comb +0.11 gamma 0.925 peaks 6
-[ 156.6s] [3/7] sub-0003_task-thermalactive_run-1_eeg: notching_declared: comb +0.00 gamma 0.662 peaks 47  comb_subtracted: comb +0.15 gamma 0.929 peaks 2  combined: comb +0.11 gamma 0.905 peaks 13
-[ 228.4s] [4/7] sub-0013_task-thermalactive_run-1_eeg: notching_declared: comb +0.19 gamma 0.806 peaks 14  comb_subtracted: comb +0.33 gamma 0.981 peaks 0  combined: comb +0.32 gamma 0.935 peaks 14
-[ 248.9s] [5/7] sub-0014_task-thermalactive_run-6_eeg: notching_declared: comb +0.13 gamma 0.639 peaks 21  comb_subtracted: comb +0.44 gamma 0.941 peaks 1  combined: comb +0.44 gamma 0.941 peaks 4
-[ 274.6s] [6/7] sub-0013_task-thermalactive_run-3_eeg: notching_declared: comb +0.46 gamma 0.890 peaks 8  comb_subtracted: comb +0.07 gamma 0.984 peaks 4  combined: comb +0.17 gamma 0.984 peaks 0
-[ 366.3s] [7/7] sub-0015_task-thermalactive_run-1_eeg: notching_declared: comb -0.04 gamma 0.679 peaks 25  comb_subtracted: comb -0.07 gamma 0.945 peaks 4  combined: comb -0.10 gamma 0.919 peaks 5
-[ 366.6s] done -> /private/tmp/claude-501/-Users-joduq24-Desktop-decomb/036c66a8-9a0f-4ae7-af80-1420cfc69bd3/scratchpad/verify_fix.tsv

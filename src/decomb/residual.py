@@ -1,8 +1,8 @@
 """Threshold and notch narrow residuals that survive authorized subtraction.
 
 This heuristic stage evaluates predeclared candidates once, records the bandwidth it
-removes, and then stops. The rationale and measurements behind its constants are in
-``docs/removal_operating_point.md``.
+removes, and then stops. Its constants are part of the shipped method and are covered by
+the residual-stage tests.
 """
 
 from __future__ import annotations
