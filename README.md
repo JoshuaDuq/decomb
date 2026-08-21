@@ -328,8 +328,6 @@ from the verified 90-recording threshold-stop derivative. Each recording has equ
 in the cohort summary. Sensor plots exclude channels marked bad in BIDS; the declared
 profile is the share of recordings whose manifest marks each frequency unavailable.
 
-![Recording-level source and threshold-stop derivative spectra with declared intervals](docs/decomb_psd.png)
-
 ![Sensor-level source spectra](docs/psd_before.png)
 
 ![Sensor-level threshold-stop derivative spectra](docs/psd_after.png)
