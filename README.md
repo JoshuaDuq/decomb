@@ -166,11 +166,15 @@ account for the cumulative manifest geometry.
 
 The threshold-stop method retained more gamma bandwidth than the retired terminal
 cascade without a measurable cohort-level comb penalty. Availability is the share of
-gamma-frequency bins not declared unavailable; it is not retained signal power.
+frequency bins not declared unavailable; it is not retained signal power. The
+100%-common mask retains only frequencies available in every recording.
 
-| Recording coverage | Terminal cascade | Threshold stop |
+| Common-mask availability | Delta | Theta | Alpha | Beta | Gamma |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100% of recordings | 45.6% | 94.9% | 100.0% | 65.8% | 58.7% |
+
+| Gamma recording coverage | Terminal cascade | Threshold stop |
 | --- | ---: | ---: |
-| 100% common | 29.2% | 58.7% |
 | At least 95% | 57.8% | 65.6% |
 | At least 90% | 62.8% | 68.5% |
 | Mean per recording | 77.8% | 80.7% |
