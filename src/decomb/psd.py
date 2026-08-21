@@ -32,6 +32,8 @@ from decomb import recordings  # noqa: E402
 
 BEFORE_NAME = "psd_before.png"
 AFTER_NAME = "psd_after.png"
+DECLARED_BEFORE_NAME = "psd_before_declared.png"
+DECLARED_AFTER_NAME = "psd_after_declared.png"
 
 
 @dataclass(frozen=True)
@@ -337,6 +339,103 @@ def figure_spectrum(spectrum, path: Path, *, title: str, ylim=None, dpi: int = 2
     return path
 
 
+def declared_unavailable_fraction(manifest, frequencies_hz, recording_names):
+    """Share of recordings whose manifest declares each frequency unavailable.
+
+    Counted per recording, not per row: a recording that names one frequency in fifty
+    rows has still given it up once.
+    """
+    from decomb import notch
+
+    required = {"recording", "unavailable_low_hz", "unavailable_high_hz"}
+    missing = required - set(manifest.columns)
+    if missing:
+        raise ValueError(
+            f"Declared bandwidth needs manifest columns: {sorted(missing)}"
+        )
+    frequencies = np.asarray(frequencies_hz, dtype=float)
+    wanted = set(recording_names)
+    count = np.zeros(frequencies.size)
+    for recording, rows in manifest.groupby("recording", sort=False):
+        if recording not in wanted:
+            continue
+        intervals = notch.merged_intervals(
+            (float(low_hz), float(high_hz))
+            for low_hz, high_hz in zip(
+                rows["unavailable_low_hz"], rows["unavailable_high_hz"], strict=True
+            )
+            if str(low_hz).strip() != "" and str(high_hz).strip() != ""
+        )
+        declared = np.zeros(frequencies.size, dtype=bool)
+        for low_hz, high_hz in intervals:
+            declared |= (frequencies >= low_hz) & (frequencies <= high_hz)
+        count += declared
+    return count / max(len(wanted), 1)
+
+
+def figure_spectrum_with_declared(
+    spectrum,
+    fraction,
+    path: Path,
+    *,
+    title: str,
+    ylim=None,
+    dpi: int = 300,
+):
+    """Cohort spectrum above the share of recordings that gave up each frequency.
+
+    The sensor mean and range replace one line per channel: with 63 channels overplotted
+    the comb is lost in its own traces. The declaration goes in its own panel rather than
+    as shading, so neither layer competes with the other.
+    """
+    frequencies = spectrum.freqs
+    decibels = 10.0 * np.log10(spectrum.get_data() * 1e12)
+    figure, (upper, lower) = plt.subplots(
+        2,
+        1,
+        figsize=(6.3, 3.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [5.2, 1.0], "hspace": 0.10},
+    )
+    upper.fill_between(
+        frequencies,
+        decibels.min(axis=0),
+        decibels.max(axis=0),
+        color="#C9D4DE",
+        lw=0,
+    )
+    upper.plot(frequencies, decibels.mean(axis=0), color="#1B1B1B", lw=1.1)
+    if ylim is not None:
+        upper.set_ylim(ylim)
+    upper.set_ylabel("Power spectral density\n(dB/Hz re 1 µV²)", fontsize=9)
+    upper.set_title(title, fontsize=10, fontweight="bold", loc="right")
+    upper.legend(
+        handles=[
+            plt.Line2D([], [], color="#1B1B1B", lw=1.1, label="sensor mean"),
+            plt.Rectangle((0, 0), 1, 1, color="#C9D4DE", label="sensor range"),
+        ],
+        loc="lower left",
+        frameon=False,
+        fontsize=8,
+        handlelength=1.5,
+        labelspacing=0.25,
+    )
+    lower.fill_between(frequencies, 0.0, 100.0 * np.asarray(fraction),
+                       color="#B04A57", lw=0)
+    lower.set_ylim(0, 100)
+    lower.set_yticks([0, 100])
+    lower.set_ylabel("declared\nunavailable (%)", fontsize=8, labelpad=2)
+    lower.set_xlabel("Frequency (Hz)", fontsize=9)
+    lower.set_xlim(frequencies[0], frequencies[-1])
+    for axis in (upper, lower):
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.tick_params(labelsize=8)
+    figure.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return path
+
+
 def shared_decibel_limits(*spectra) -> tuple[float, float]:
     """One decibel scale for every figure in the pair.
 
@@ -383,6 +482,8 @@ def _read_recording_pairs(runs, source_root: Path, derivative_root: Path):
 
 def run(args: argparse.Namespace) -> None:
     """Draw equal-recording cohort spectra before and after the correction."""
+    import pandas as pd
+
     from decomb import notch
     from decomb.config import load_config
 
@@ -430,11 +531,35 @@ def run(args: argparse.Namespace) -> None:
         title=f"After correction — {extent}",
         ylim=limits,
     )
+    recording_names = tuple(run.stem for run in runs)
+    manifest_path = derivative_root / notch.MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Line-notch manifest missing at {manifest_path}")
+    manifest = pd.read_csv(
+        manifest_path, sep="\t", float_precision="round_trip", keep_default_na=False
+    )
+    fraction = declared_unavailable_fraction(
+        manifest, cohort.before.freqs, recording_names
+    )
+    figure_spectrum_with_declared(
+        cohort.before,
+        fraction,
+        report_dir / DECLARED_BEFORE_NAME,
+        title=f"Source — {extent}",
+        ylim=limits,
+    )
+    figure_spectrum_with_declared(
+        cohort.after,
+        fraction,
+        report_dir / DECLARED_AFTER_NAME,
+        title=f"Derivative — {extent}",
+        ylim=limits,
+    )
     print("  BIDS-bad channels excluded within each recording before averaging")
     band_names = tuple(name for name, _, _ in notch.analysed_bands_from_config(config))
     availability = _cohort_band_availability_percent(
-        derivative_root / notch.MANIFEST_NAME,
-        recording_names=tuple(run.stem for run in runs),
+        manifest_path,
+        recording_names=recording_names,
         band_names=band_names,
     )
     for band_name, retained_percent in availability.items():
@@ -443,3 +568,9 @@ def run(args: argparse.Namespace) -> None:
     print(f"  shared scale {limits[0]:.1f} to {limits[1]:.1f} dB/Hz re 1 µV²")
     print(f"  wrote {report_dir / BEFORE_NAME}")
     print(f"  wrote {report_dir / AFTER_NAME}")
+    print(f"  wrote {report_dir / DECLARED_BEFORE_NAME}")
+    print(f"  wrote {report_dir / DECLARED_AFTER_NAME}")
+    print(
+        f"  {100 * (fraction == 0).mean():.1f}% of frequencies declared by no recording, "
+        f"{100 * (fraction == 1).mean():.1f}% by all {len(recording_names)}"
+    )

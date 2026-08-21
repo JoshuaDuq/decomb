@@ -535,8 +535,8 @@ def test_the_stage_summarises_every_discovered_recording(tmp_path, monkeypatch, 
         psd,
         "cohort_spectrum_pair",
         lambda pairs, settings: SimpleNamespace(
-            before=SimpleNamespace(info={"bads": []}),
-            after=SimpleNamespace(info={"bads": []}),
+            before=SimpleNamespace(info={"bads": []}, freqs=np.array([10.0, 40.0])),
+            after=SimpleNamespace(info={"bads": []}, freqs=np.array([10.0, 40.0])),
             recording_count=len(tuple(pairs)),
             analysed_hours=2.0,
         ),
@@ -547,12 +547,20 @@ def test_the_stage_summarises_every_discovered_recording(tmp_path, monkeypatch, 
         "figure_spectrum",
         lambda spectrum, path, *, title, ylim: titles.append(title),
     )
+    declared_titles = []
+    monkeypatch.setattr(
+        psd,
+        "figure_spectrum_with_declared",
+        lambda spectrum, fraction, path, *, title, ylim: declared_titles.append(title),
+    )
     pd.DataFrame(
         [
             {
                 "recording": run.stem,
                 "removal_round": 1,
                 "delta_retained_share": 0.99,
+                "unavailable_low_hz": 39.9,
+                "unavailable_high_hz": 40.1,
             }
             for run in runs
         ]
@@ -568,8 +576,50 @@ def test_the_stage_summarises_every_discovered_recording(tmp_path, monkeypatch, 
         )
     )
 
+    assert declared_titles == [
+        "Source — 2 recordings · 2.00 h",
+        "Derivative — 2 recordings · 2.00 h",
+    ]
     assert titles == [
         "Before correction — 2 recordings · 2.00 h",
         "After correction — 2 recordings · 2.00 h",
     ]
     assert "delta availability 99.000%" in capsys.readouterr().out
+
+
+def test_declared_fraction_counts_recordings_not_manifest_rows():
+    import numpy as np
+    import pandas as pd
+
+    manifest = pd.DataFrame(
+        [
+            # one recording declares 40 Hz twice; it must still count once
+            {"recording": "a", "unavailable_low_hz": 39.9, "unavailable_high_hz": 40.1},
+            {"recording": "a", "unavailable_low_hz": 39.95, "unavailable_high_hz": 40.05},
+            {"recording": "a", "unavailable_low_hz": 59.9, "unavailable_high_hz": 60.1},
+            {"recording": "b", "unavailable_low_hz": 59.9, "unavailable_high_hz": 60.1},
+        ]
+    )
+    frequencies = np.array([30.0, 40.0, 60.0])
+
+    fraction = psd.declared_unavailable_fraction(manifest, frequencies, ("a", "b"))
+
+    assert list(fraction) == [0.0, 0.5, 1.0]
+
+
+def test_declared_fraction_ignores_rows_without_an_interval():
+    import numpy as np
+    import pandas as pd
+
+    manifest = pd.DataFrame(
+        [
+            {"recording": "a", "unavailable_low_hz": "", "unavailable_high_hz": ""},
+            {"recording": "a", "unavailable_low_hz": 39.9, "unavailable_high_hz": 40.1},
+        ]
+    )
+
+    fraction = psd.declared_unavailable_fraction(
+        manifest, np.array([40.0, 50.0]), ("a",)
+    )
+
+    assert list(fraction) == [1.0, 0.0]
