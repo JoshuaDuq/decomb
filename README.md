@@ -167,17 +167,18 @@ account for the cumulative manifest geometry.
 The threshold-stop method retained more gamma bandwidth than the retired terminal
 cascade without a measurable cohort-level comb penalty. Availability is the share of
 frequency bins not declared unavailable; it is not retained signal power. The
-100%-common mask retains only frequencies available in every recording.
+100%-common mask retains only frequencies available in every recording, so one
+recording can exclude a frequency from the whole cohort.
 
-| Common-mask availability | Delta | Theta | Alpha | Beta | Gamma |
+| Recording availability | Delta | Theta | Alpha | Beta | Gamma |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 100% of recordings | 45.6% | 94.9% | 100.0% | 65.8% | 58.7% |
+| 100% common | 45.6% | 94.9% | 100.0% | 65.8% | 58.7% |
+| At least 95% | 100.0% | 100.0% | 100.0% | 77.9% | 65.6% |
+| At least 90% | 100.0% | 100.0% | 100.0% | 81.1% | 68.5% |
+| Mean per recording | 99.2% | 99.9% | 100.0% | 93.3% | 80.7% |
 
-| Gamma recording coverage | Terminal cascade | Threshold stop |
-| --- | ---: | ---: |
-| At least 95% | 57.8% | 65.6% |
-| At least 90% | 62.8% | 68.5% |
-| Mean per recording | 77.8% | 80.7% |
+For gamma, the retired terminal cascade retained 29.2% in the 100%-common mask and
+77.8% per recording on average, compared with 58.7% and 80.7% after threshold stopping.
 
 Six recordings were used for method development and 84 for the held-out comparison.
 The paired comb difference had a median of 0.000 dB and a participant-level bootstrap
