@@ -1017,7 +1017,7 @@ def test_manifest_records_one_authorized_scanner_harmonic_without_a_comb():
     notch._validate_round_manifest_evidence(rows, settings)
 
 
-def test_verification_refits_and_replays_scanner_harmonics_evidence(
+def test_verification_rejects_retired_terminal_cascade_rows(
     tmp_path,
     monkeypatch,
 ):
@@ -1070,47 +1070,15 @@ def test_verification_refits_and_replays_scanner_harmonics_evidence(
         (),
         settings,
     )
-    scanner_passes = 0
-
-    def p_values(raw, pass_settings):
-        nonlocal scanner_passes
-        frequencies_hz = np.arange(1.0, 6.0)
-        probabilities = np.ones((1, 2, frequencies_hz.size))
-        if pass_settings.estimation_window_s == 4.0:
-            scanner_passes += 1
-            if scanner_passes == 1:
-                probabilities[0, 0, 1] = 1e-12
-                probabilities[0, 1, 3] = 1e-12
-        return frequencies_hz, probabilities
-
-    def apply(raw, plan, *, n_jobs=-1):
-        filtered = raw.copy()
-        filtered._data[:, 0] += 1.0
-        return filtered
-
     monkeypatch.setattr(recordings, "read_bids_raw", lambda path: raw.copy())
-    monkeypatch.setattr(notch, "_line_test_p_values", p_values)
-    monkeypatch.setattr(notch, "_thomson_f_p_values", p_values)
-    monkeypatch.setattr(notch, "apply_harmonic_notches", apply)
-    monkeypatch.setattr(
-        notch,
-        "_measure_scanner_stopband_changes",
-        lambda *args: (0.0,) * len(scanner_plan.stopbands),
-    )
-    monkeypatch.setattr(notch, "_validate_exact_derivative", lambda *args: 0.0)
 
-    rows = notch.verify_harmonic_run(
-        tmp_path / "recording.vhdr",
-        tmp_path / "cleaned.vhdr",
-        manifest_rows,
-        settings,
-    )
-
-    assert {row["outcome"] for row in rows} == {
-        "scanner_harmonics_detected",
-        "no_line_detected",
-    }
-    assert scanner_passes == 3
+    with pytest.raises(ValueError, match="no longer accepts terminal cascade"):
+        notch.verify_harmonic_run(
+            tmp_path / "recording.vhdr",
+            tmp_path / "cleaned.vhdr",
+            manifest_rows,
+            settings,
+        )
 
 
 def test_residual_postcondition_rejects_a_statistically_dirty_derivative(
@@ -1465,23 +1433,29 @@ def test_derivative_description_records_computed_source_and_derived_method(tmp_p
     written = json.loads(description.read_text(encoding="utf-8"))
     assert written["SourceDatasets"] == [{"URL": "../source"}]
     generated_description = written["GeneratedBy"][-1]["Description"]
-    assert "pre-allocated" in generated_description
-    assert "controlled adaptive removal rounds" not in generated_description
+    assert "2 dB" in generated_description
+    assert "terminal null" not in generated_description
     parameters = written["GeneratedBy"][-1]["Parameters"]
     assert parameters["multiple_testing_method"] == notch.MULTIPLE_TESTING_METHOD
     assert parameters["familywise_error_unit"] == (
-        "as_recorded_non_bad_eeg_recording_removal_sequence"
+        "as_recorded_non_bad_eeg_recording_initial_authorization"
     )
     assert parameters["detection_reference"] == (
         "as_recorded_non_bad_eeg_channels"
     )
+    assert parameters["subtraction_scope"] == "as_recorded_non_bad_eeg_channels"
     assert parameters["filter_scope"] == "all_eeg_channels"
+    assert parameters["spatial_invariance"] == (
+        "identical_residual_fir_plan_for_every_eeg_channel"
+    )
     assert parameters["convergence_rule"] == (
-        "fresh_joint_line_and_scanner_harmonics_null"
+        "stop_after_single_2_db_residual_threshold_fir"
     )
     assert parameters["multiple_testing_scope"] == (
-        "recording_wide_alpha_spending_split_equally_between_test_families"
+        "initial_recording_wide_split_between_line_and_scanner_families"
     )
+    assert parameters["residual_prominence_threshold_db"] == 2.0
+    assert parameters["residual_threshold_candidate_band_hz"] == [20.0, 95.0]
     assert parameters["alpha_spending_rule"] == "alpha / (round * (round + 1))"
     assert parameters["estimation_window_s"] == 10.0
     assert parameters["scanner_harmonics_estimation_window_s"] == 4.0

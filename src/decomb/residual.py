@@ -1,9 +1,8 @@
-"""Notch comb residue that survives subtraction but that no test authorizes.
+"""Threshold and notch narrow residuals that survive authorized subtraction.
 
-This stage is deliberately heuristic: it removes material the converged statistical rounds
-would not remove, which is where its comb advantage comes from. The bandwidth it costs is
-declared like any other, so the departure is from minimality, not from honesty. Rationale
-and the measurements behind every constant are in the 2026-08-19 tuned-removal spec.
+This heuristic stage evaluates predeclared candidates once, records the bandwidth it
+removes, and then stops. The rationale and measurements behind its constants are in
+``docs/removal_operating_point.md``.
 """
 
 from __future__ import annotations

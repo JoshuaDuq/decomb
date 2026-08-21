@@ -194,6 +194,41 @@ def test_clean_harmonic_run_emits_subtracted_rows(monkeypatch, tmp_path):
     assert any(row["kind"] == "subtracted" for row in rows)
 
 
+def test_clean_recording_has_an_explicit_unchanged_manifest_row(monkeypatch, tmp_path):
+    def fake_subtract(raw, evidence, settings, *, n_jobs=-1):
+        return raw.copy(), subtraction.SubtractionRecord(
+            (), settings.estimation_window_s
+        )
+
+    monkeypatch.setattr(subtraction, "subtract_authorized", fake_subtract)
+    monkeypatch.setattr(
+        residual,
+        "fit_threshold_stage",
+        lambda *args: residual.ThresholdRecord((), ()),
+    )
+    monkeypatch.setattr(residual, "subtraction_targets", lambda *args: ())
+    from decomb import recordings
+
+    source_root, vhdr = _synthetic_bids_recording(tmp_path)
+    output_root = tmp_path / "out"
+    recordings.mirror_sidecars(source_root, output_root)
+
+    rows = notch.clean_harmonic_run(
+        vhdr, output_root, source_root, _settings(), BANDS, n_jobs=1
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "unchanged"
+    assert rows[0]["beta_retained_share"] == 1.0
+    assert rows[0]["gamma_retained_share"] == 1.0
+
+    cleaned_vhdr = recordings.derivative_vhdr_path(vhdr, source_root, output_root)
+    verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
+
+    assert len(verified) == 1
+    assert verified[0]["kind"] == "unchanged"
+
+
 def test_manifest_without_subtracted_rows_still_verifies():
     rows = [
         {"recording": "sub-0001_run-1_eeg", "kind": "isolated", "harmonics": "2"},
@@ -226,12 +261,12 @@ def _apply_to_synthetic_recording(tmp_path, make_line=_drifting_line):
     return vhdr, cleaned_vhdr, rows
 
 
-def test_verify_replays_subtraction_and_the_fir_cascade(tmp_path):
+def test_apply_stops_after_the_residual_threshold_stage(tmp_path):
     vhdr, cleaned_vhdr, rows = _apply_to_synthetic_recording(tmp_path)
 
     assert subtraction.subtraction_rows(rows)
     assert residual.threshold_rows(rows), "fixture must exercise the residual stage"
-    assert _fir_round_indices(rows), "fixture must leave a residual line for the FIR"
+    assert not _fir_round_indices(rows)
 
     verified = notch.verify_harmonic_run(vhdr, cleaned_vhdr, rows, _settings())
 
@@ -274,7 +309,36 @@ def test_verify_rejects_a_manifest_whose_subtraction_is_unauthorized(tmp_path):
         notch.verify_harmonic_run(vhdr, cleaned_vhdr, tampered, _settings())
 
 
-def test_apply_then_verify_round_trips_subtraction_through_the_manifest(tmp_path):
+def test_verify_rejects_an_omitted_authorized_subtraction(tmp_path):
+    vhdr, _, _ = _apply_to_synthetic_recording(tmp_path)
+    settings = _settings()
+    unchanged = subtraction.unchanged_manifest_row(vhdr.stem, BANDS, settings)
+
+    with pytest.raises(ValueError, match="subtracted frequencies"):
+        notch.verify_harmonic_run(vhdr, vhdr, [unchanged], settings)
+
+
+def test_replay_rejects_an_omitted_residual_threshold_stage(monkeypatch):
+    import mne
+
+    raw = mne.io.RawArray(
+        np.zeros((2, 1_000)),
+        mne.create_info(["C3", "C4"], 200.0, "eeg"),
+        verbose="ERROR",
+    )
+    monkeypatch.setattr(notch, "fit_harmonic_round", lambda *args, **kwargs: object())
+    monkeypatch.setattr(residual, "subtraction_targets", lambda *args: ())
+    monkeypatch.setattr(
+        residual,
+        "fit_threshold_stage",
+        lambda *args: residual.ThresholdRecord(((39.9, 40.1),), (3.0,)),
+    )
+
+    with pytest.raises(ValueError, match="residual stopbands"):
+        notch._replay_removal_stages(raw, (), (), _settings())
+
+
+def test_apply_then_verify_round_trips_the_two_stage_pipeline(tmp_path, capsys):
     import argparse
 
     source_root, _ = _synthetic_bids_recording(tmp_path)
@@ -292,12 +356,16 @@ def test_apply_then_verify_round_trips_subtraction_through_the_manifest(tmp_path
     assert notch.MANIFEST_REQUIRED_COLUMNS <= set(manifest.columns)
     rows = manifest.to_dict("records")
     assert subtraction.subtraction_rows(rows)
-    assert _fir_round_indices(rows)
+    assert residual.threshold_rows(rows)
+    assert not _fir_round_indices(rows)
 
     notch.run_verify(args)
+    verify_output = capsys.readouterr().out
 
     verification = notch._read_manifest(args.report_dir / notch.VERIFICATION_NAME)
     assert (verification["kind"] == "subtracted").any()
+    assert "provenance intervals reproduced" in verify_output
+    assert "no removal was authorized" not in verify_output
 
 
 def test_verify_rejects_a_manifest_whose_residual_notches_are_unauthorized(tmp_path):

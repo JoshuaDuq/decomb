@@ -35,12 +35,10 @@ removal:
   # a user control.
   estimation_window_s: 10.0
 
-  # Target sequence-wide error budget. Each round receives alpha / (round * (round + 1));
-  # that round is split equally between the recording-wide Holm line family and the
-  # trigger-anchored scanner-harmonic family. Because later rounds operate
-  # on adaptively filtered data, complete-sequence calibration is an empirical validation
-  # result, not a consequence of alpha spending alone. Supported intervals form one plan
-  # applied to every EEG channel.
+  # Target error budget. The initial authorization uses alpha / (1 * 2), split equally
+  # between the recording-wide Holm line family and the trigger-anchored scanner-harmonic
+  # family. Supported frequencies are subsequently fitted by subtraction; this statistical
+  # authorization is not repeated after filtering.
   familywise_error_rate: 0.05
 
   # Study span eligible for detection and removal. Each recording clips the upper edge

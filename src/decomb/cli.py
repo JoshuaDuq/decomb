@@ -15,10 +15,10 @@ from decomb import __version__
 STAGES = ("diagnose", "apply", "verify", "psd")
 
 STAGE_HELP = {
-    "diagnose": "test which narrow spectral lines exist and write the proposed filter plan",
-    "apply": "detect supported lines, then write the FIR-notched BIDS derivative",
-    "verify": "reproduce every derivative sample from its declared FIR provenance",
-    "psd": "before-and-after spectra of whatever exists",
+    "diagnose": "test narrow spectral lines and write the diagnostic model",
+    "apply": "subtract authorized lines, threshold residuals, and write the derivative",
+    "verify": "reproduce every derivative sample from the declared two-stage provenance",
+    "psd": "write corresponding source and derivative spectra",
 }
 
 EPILOG = """\

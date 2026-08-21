@@ -291,24 +291,24 @@ def test_analysed_duration_excludes_segments_shorter_than_one_welch_window():
     ) == pytest.approx(20.0 / 3_600.0)
 
 
-def test_band_availability_uses_one_terminal_plan_per_recording():
+def test_band_availability_uses_the_cumulative_two_stage_plan_per_recording():
     manifest = pd.DataFrame(
         [
             {
                 "recording": "run-1",
-                "removal_round": 1,
-                "delta_retained_share": 0.95,
-                "theta_retained_share": 0.90,
+                "kind": "subtracted",
+                "delta_retained_share": 0.90,
+                "theta_retained_share": 0.80,
             },
             {
                 "recording": "run-1",
-                "removal_round": 2,
+                "kind": "threshold_notched",
                 "delta_retained_share": 0.90,
                 "theta_retained_share": 0.80,
             },
             {
                 "recording": "run-2",
-                "removal_round": 1,
+                "kind": "subtracted",
                 "delta_retained_share": 1.00,
                 "theta_retained_share": 0.90,
             },

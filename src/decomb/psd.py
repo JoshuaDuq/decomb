@@ -240,31 +240,32 @@ def mean_band_availability_percent(
     *,
     band_names: tuple[str, ...],
 ) -> dict[str, float]:
-    """Mean retained share from each recording's terminal cumulative plan."""
+    """Mean the cumulative retained share once per recording."""
     if manifest.empty:
         raise ValueError("Band availability requires manifest rows.")
     required = {
         "recording",
-        "removal_round",
         *(f"{band_name}_retained_share" for band_name in band_names),
     }
     missing = required - set(manifest.columns)
     if missing:
         raise ValueError(f"Band availability columns are missing: {sorted(missing)}")
 
-    terminal_rows = []
+    recording_rows = []
     for recording, rows in manifest.groupby("recording", sort=False):
-        terminal = rows.loc[rows["removal_round"] == rows["removal_round"].max()]
-        if len(terminal) != 1:
-            raise ValueError(f"{recording}: expected one terminal manifest row.")
-        terminal_rows.append(terminal.iloc[0])
+        retained = rows[
+            [f"{band_name}_retained_share" for band_name in band_names]
+        ].to_numpy(dtype=float)
+        if not np.all(retained == retained[0]):
+            raise ValueError(
+                f"{recording}: manifest rows disagree on cumulative band availability."
+            )
+        recording_rows.append(retained[0])
 
     availability = {}
-    for band_name in band_names:
-        values = np.array(
-            [row[f"{band_name}_retained_share"] for row in terminal_rows],
-            dtype=float,
-        )
+    values_by_recording = np.asarray(recording_rows)
+    for band_index, band_name in enumerate(band_names):
+        values = values_by_recording[:, band_index]
         if not np.all(np.isfinite(values)) or np.any((values < 0.0) | (values > 1.0)):
             raise ValueError(f"{band_name}: retained shares must lie in [0, 1].")
         availability[band_name] = float(100.0 * values.mean())

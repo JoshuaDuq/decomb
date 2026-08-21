@@ -108,7 +108,27 @@ def subtraction_rows(rows: Sequence[dict]) -> list[dict]:
     return [row for row in rows if str(row.get("kind", "")) == "subtracted"]
 
 
-STAGE_KINDS = frozenset({"subtracted", "threshold_notched"})
+def unchanged_rows(rows: Sequence[dict]) -> list[dict]:
+    """The explicit unchanged result from a two-stage manifest, if present."""
+    return [row for row in rows if str(row.get("kind", "")) == "unchanged"]
+
+
+STAGE_KINDS = frozenset({"subtracted", "threshold_notched", "unchanged"})
+
+
+def unchanged_manifest_row(
+    recording: str,
+    analysed_bands: tuple[tuple[str, float, float], ...],
+    settings,
+) -> dict[str, float | str]:
+    """Record a valid two-stage result that changed no samples."""
+    return {
+        **_inapplicable_manifest_fields(settings),
+        "recording": recording,
+        "outcome": "unchanged",
+        "kind": "unchanged",
+        **notch.band_availability_from_intervals((), analysed_bands),
+    }
 
 
 def cascade_rows(rows: Sequence[dict]) -> list[dict]:

@@ -1829,7 +1829,7 @@ def clean_harmonic_run(
     *,
     n_jobs: int = -1,
 ) -> list[dict[str, float | str]]:
-    """Fit supported residual rounds, write, and require a terminal null."""
+    """Subtract authorized lines, notch proud residuals once, and write."""
     from decomb import residual, subtraction
 
     raw = recordings.read_bids_raw(vhdr)
@@ -1844,8 +1844,6 @@ def clean_harmonic_run(
     threshold_plan = threshold.plan(settings)
     if threshold_plan is not None:
         recovered = apply_harmonic_notches(recovered, threshold_plan, n_jobs=n_jobs)
-    result = clean_until_no_supported_lines(recovered, settings, n_jobs=n_jobs)
-    filtered = result.cleaned
 
     destination_vhdr = recordings.derivative_vhdr_path(
         vhdr,
@@ -1856,16 +1854,16 @@ def clean_harmonic_run(
     recordings.write_eeg_binary(
         destination_vhdr,
         destination_vhdr.with_suffix(".eeg"),
-        filtered.get_data(),
-        filtered.ch_names,
+        recovered.get_data(),
+        recovered.ch_names,
     )
 
     written = recordings.read_bids_raw(destination_vhdr)
-    expected = filtered.get_data()
+    expected = recovered.get_data()
     representable = recordings.quantized_eeg_data(
         destination_vhdr,
         expected,
-        filtered.ch_names,
+        recovered.ch_names,
     )
     if not np.array_equal(written.get_data(), representable):
         deviation_v = float(np.max(np.abs(written.get_data() - representable)))
@@ -1874,32 +1872,18 @@ def clean_harmonic_run(
             f"quantization by as much as {deviation_v:.3e} V."
         )
     deviation_v = 0.0
-    validate_residual_postcondition(
-        written,
-        settings,
-        round_index=len(result.rounds) + 1,
-    )
 
     rows = record.manifest_rows(vhdr.stem, analysed_bands, settings)
     rows.extend(threshold.manifest_rows(vhdr.stem, analysed_bands, settings))
-    rows.extend(
-        cleaning_manifest_rows(
-            vhdr.stem,
-            result,
-            analysed_bands,
-            settings,
+    if not rows:
+        rows.append(
+            subtraction.unchanged_manifest_row(vhdr.stem, analysed_bands, settings)
         )
-    )
     unavailable = list(
         subtraction.damage_intervals(record.frequencies_hz, record.window_s)
     )
     if threshold_plan is not None:
         unavailable.extend(threshold_plan.unavailable_edges())
-    unavailable.extend(
-        edge
-        for removal_round in result.rounds
-        for edge in removal_round.filter_plan.unavailable_edges()
-    )
     recording_availability = band_availability_from_intervals(
         unavailable,
         analysed_bands,
@@ -1921,11 +1905,13 @@ def write_harmonic_derivative_description(
     source_dataset_url: str,
     settings,
 ) -> Path:
-    """Declare the automatic harmonic-notch output and its inference boundary."""
+    """Declare the threshold-stop output and its inference boundary."""
     import json
 
     import mne
     import scipy
+
+    from decomb import residual
 
     path = output_root / "dataset_description.json"
     if not path.is_file():
@@ -1937,7 +1923,7 @@ def write_harmonic_derivative_description(
     described["DatasetType"] = "derivative"
     if "BIDSVersion" not in described:
         raise ValueError("BIDS dataset_description.json must declare BIDSVersion.")
-    described["Name"] = "decomb line-notched EEG"
+    described["Name"] = "decomb narrow-line EEG derivative"
     existing = described.get("GeneratedBy", [])
     if not isinstance(existing, list) or not all(isinstance(entry, dict) for entry in existing):
         raise ValueError("BIDS GeneratedBy must be a list of objects.")
@@ -1948,40 +1934,63 @@ def write_harmonic_derivative_description(
             "Version": __version__,
             "Description": (
                 "Complementary Thomson sinusoid and persistent narrowband-power tests "
-                "identified source components in the as-recorded non-bad EEG channels. "
+                "identified initial source components in the as-recorded non-bad EEG "
+                "channels. "
                 "Their p-values were Bonferroni-combined before recording-family Holm "
-                "correction; residual rounds used Thomson tests because prior notches "
-                "shape local power. Each pre-allocated "
-                "round split its error rate equally between (1) Holm correction across "
+                "correction. The initial error rate was split equally between (1) Holm "
+                "correction across "
                 "every channel, continuous estimation window, and tested frequency and "
                 "(2) a trigger-anchored scanner-harmonic test. The scanner test used the "
                 "configured TR and exact event name, Bonferroni-corrected each expected "
                 "harmonic across windows, channels, and the prespecified harmonic grid. "
-                "Each supported harmonic authorized its own local-background "
-                "envelope; no unsupported tooth on the prespecified grid was "
-                "notched. A "
-                "summable alpha-spending sequence pre-allocated error rates across "
-                "adaptive removal rounds. Supported components were "
-                "merged into one recording plan and removed from every EEG channel with "
-                "zero-phase MNE FIR notches, then the "
-                "complete residual families were tested again at their pre-allocated "
-                "rates. Filtering continued until both fresh tests were null. "
-                "Every removal round, stopband, transition, and terminal null is listed "
-                f"with its channel evidence in {MANIFEST_NAME}."
+                "Initial line targets and comb teeth above 1 dB local prominence were "
+                "subtracted from non-bad EEG channels with MNE multitaper spectrum "
+                "fitting. One channel-mean "
+                "residual spectrum then tested the subtracted targets and every comb "
+                "tooth from 20 to 95 Hz. Candidate clusters above 2 dB local prominence "
+                "were removed once from every EEG channel with zero-phase MNE FIR "
+                "notches. Processing stopped "
+                "after that threshold stage. The subtracted frequencies, residual "
+                f"stopbands, transitions, and unavailable intervals are listed in "
+                f"{MANIFEST_NAME}."
             ),
             "Parameters": {
                 "multiple_testing_method": MULTIPLE_TESTING_METHOD,
                 "familywise_error_unit": (
-                    "as_recorded_non_bad_eeg_recording_removal_sequence"
+                    "as_recorded_non_bad_eeg_recording_initial_authorization"
                 ),
                 "detection_reference": "as_recorded_non_bad_eeg_channels",
+                "subtraction_scope": "as_recorded_non_bad_eeg_channels",
                 "filter_scope": "all_eeg_channels",
-                "spatial_invariance": "identical_recording_plan_for_every_eeg_channel",
-                "convergence_rule": "fresh_joint_line_and_scanner_harmonics_null",
+                "spatial_invariance": (
+                    "identical_residual_fir_plan_for_every_eeg_channel"
+                ),
+                "convergence_rule": (
+                    "stop_after_single_2_db_residual_threshold_fir"
+                ),
                 "multiple_testing_scope": (
-                    "recording_wide_alpha_spending_split_equally_between_test_families"
+                    "initial_recording_wide_split_between_line_and_scanner_families"
                 ),
                 "alpha_spending_rule": settings.alpha_spending_rule,
+                "residual_prominence_threshold_db": residual.RESIDUAL_FLOOR_DB,
+                "residual_threshold_candidate_band_hz": [
+                    residual.TOOTH_LOWEST_HZ,
+                    residual.TOOTH_HIGHEST_HZ,
+                ],
+                "subtraction_comb_candidate_threshold_db": (
+                    residual.TOOTH_CANDIDATE_DB
+                ),
+                "residual_threshold_peak_half_width_hz": (
+                    residual.PEAK_HALF_WIDTH_HZ
+                ),
+                "residual_threshold_reference_offsets_hz": [
+                    residual.REFERENCE_LOW_HZ,
+                    residual.REFERENCE_HIGH_HZ,
+                ],
+                "residual_threshold_cluster_gap_bins": residual.CLUSTER_GAP_BINS,
+                "residual_threshold_stopband_margin_bins": (
+                    residual.STOPBAND_MARGIN_BINS
+                ),
                 "scanner_harmonics_estimation_window_s": (
                     SCANNER_HARMONIC_ESTIMATION_WINDOW_S
                 ),
@@ -2044,6 +2053,8 @@ def settings_for_verification(
     import mne
     import scipy
 
+    from decomb import residual
+
     path = derivative_root / "dataset_description.json"
     if not path.is_file():
         raise FileNotFoundError(f"No derivative description at {path}.")
@@ -2087,15 +2098,31 @@ def settings_for_verification(
 
     expected_provenance = {
         "multiple_testing_method": MULTIPLE_TESTING_METHOD,
-        "familywise_error_unit": "as_recorded_non_bad_eeg_recording_removal_sequence",
+        "familywise_error_unit": (
+            "as_recorded_non_bad_eeg_recording_initial_authorization"
+        ),
         "detection_reference": "as_recorded_non_bad_eeg_channels",
+        "subtraction_scope": "as_recorded_non_bad_eeg_channels",
         "filter_scope": "all_eeg_channels",
-        "spatial_invariance": "identical_recording_plan_for_every_eeg_channel",
-        "convergence_rule": "fresh_joint_line_and_scanner_harmonics_null",
+        "spatial_invariance": "identical_residual_fir_plan_for_every_eeg_channel",
+        "convergence_rule": "stop_after_single_2_db_residual_threshold_fir",
         "multiple_testing_scope": (
-            "recording_wide_alpha_spending_split_equally_between_test_families"
+            "initial_recording_wide_split_between_line_and_scanner_families"
         ),
         "alpha_spending_rule": applied_settings.alpha_spending_rule,
+        "residual_prominence_threshold_db": residual.RESIDUAL_FLOOR_DB,
+        "residual_threshold_candidate_band_hz": [
+            residual.TOOTH_LOWEST_HZ,
+            residual.TOOTH_HIGHEST_HZ,
+        ],
+        "subtraction_comb_candidate_threshold_db": residual.TOOTH_CANDIDATE_DB,
+        "residual_threshold_peak_half_width_hz": residual.PEAK_HALF_WIDTH_HZ,
+        "residual_threshold_reference_offsets_hz": [
+            residual.REFERENCE_LOW_HZ,
+            residual.REFERENCE_HIGH_HZ,
+        ],
+        "residual_threshold_cluster_gap_bins": residual.CLUSTER_GAP_BINS,
+        "residual_threshold_stopband_margin_bins": residual.STOPBAND_MARGIN_BINS,
         "scanner_harmonics_estimation_window_s": SCANNER_HARMONIC_ESTIMATION_WINDOW_S,
         "scanner_harmonics_local_supporting_harmonics": 1,
         "scanner_harmonics_complete_comb_supporting_harmonics": 2,
@@ -2159,7 +2186,7 @@ def run(args: argparse.Namespace) -> None:
 
     import mne
 
-    from decomb import effective, subtraction
+    from decomb import effective, residual, subtraction
     from decomb.config import load_config
 
     mne.set_log_level("ERROR")
@@ -2186,7 +2213,10 @@ def run(args: argparse.Namespace) -> None:
             f"Incomplete staging output exists at {staging}; inspect it before retrying."
         )
     staging.mkdir(parents=True)
-    print(f"Applying automatic line and scanner-comb notches to {len(runs)} recordings")
+    print(
+        "Applying authorized subtraction and one residual-threshold FIR stage "
+        f"to {len(runs)} recordings"
+    )
     print(f"  copied {recordings.mirror_sidecars(source_root, staging)} sidecars")
 
     rows: list[dict[str, float | str]] = []
@@ -2201,40 +2231,34 @@ def run(args: argparse.Namespace) -> None:
             n_jobs=n_jobs,
         )
         rows.extend(measured)
-        notched = subtraction.cascade_rows(measured)
-        detected_rows = [
-            row for row in notched if row["outcome"] != "no_line_detected"
-        ]
-        if not detected_rows:
+        threshold_rows = residual.threshold_rows(measured)
+        if not threshold_rows:
             outcome = (
-                "no residual line after subtraction"
+                "no residual above 2 dB after subtraction"
                 if subtraction.subtraction_rows(measured)
-                else "no authorized line or scanner comb; copied unchanged"
+                else "no subtraction target or residual above 2 dB; copied unchanged"
             )
             print(
                 f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
                 f"{outcome} ({time.time() - started:.0f}s)"
             )
             continue
-        filter_plans = removal_rounds_from_rows(notched)
-        filter_stopband_count = sum(
-            len(plan.stopbands) for plan in filter_plans
-        )
+        filter_stopband_count = len(threshold_rows)
         stopband_width_hz = sum(
-            stopband.width_hz
-            for plan in filter_plans
-            for stopband in plan.stopbands
+            float(row["stopband_high_hz"]) - float(row["stopband_low_hz"])
+            for row in threshold_rows
         )
-        median_change_db = float(
+        median_prominence_db = float(
             np.median(
-                [float(row["in_stopband_change_db"]) for row in detected_rows]
+                [float(row["authorizing_prominence_db"]) for row in threshold_rows]
             )
         )
         print(
             f"[{index}/{len(runs)}] {vhdr.stem[:44]:44s} "
-            f"{filter_stopband_count} recording stopbands, "
+            f"{filter_stopband_count} residual stopbands, "
             f"{stopband_width_hz:.3f} Hz, "
-            f"median {median_change_db:+.1f} dB ({time.time() - started:.0f}s)"
+            f"median prominence {median_prominence_db:+.1f} dB "
+            f"({time.time() - started:.0f}s)"
         )
 
     frame = pd.DataFrame(rows)
@@ -2752,25 +2776,24 @@ def _replay_removal_stages(original, subtracted_rows, threshold_rows, settings):
     """Reproduce apply's subtraction and residual stages, re-deriving both decisions."""
     from decomb import residual, subtraction
 
-    if not subtracted_rows and not threshold_rows:
-        return original
     evidence = fit_harmonic_round(original, settings, round_index=1)
     targets = residual.subtraction_targets(original, evidence, settings)
+    recorded_targets = subtraction.recorded_frequencies(subtracted_rows)
+    if recorded_targets != targets:
+        raise ValueError(
+            "Manifest subtracted frequencies do not equal the frequencies the "
+            "source's initial evidence authorizes subtracting."
+        )
     recovered = original
-    if subtracted_rows:
-        if subtraction.recorded_frequencies(subtracted_rows) != targets:
-            raise ValueError(
-                "Manifest subtracted frequencies do not equal the frequencies the "
-                "source's round-one evidence authorizes subtracting."
-            )
+    if targets:
         recovered, _ = subtraction.subtract_authorized(original, evidence, settings)
-    if threshold_rows:
-        refit = residual.fit_threshold_stage(recovered, targets, settings)
-        if residual.recorded_stopbands(threshold_rows) != refit.stopbands:
-            raise ValueError(
-                "Manifest residual stopbands do not equal the stopbands the "
-                "post-subtraction spectrum authorizes notching."
-            )
+    refit = residual.fit_threshold_stage(recovered, targets, settings)
+    if residual.recorded_stopbands(threshold_rows) != refit.stopbands:
+        raise ValueError(
+            "Manifest residual stopbands do not equal the stopbands the "
+            "post-subtraction spectrum authorizes notching."
+        )
+    if refit.stopbands:
         plan = refit.plan(settings)
         if plan is not None:
             recovered = apply_harmonic_notches(recovered, plan)
@@ -2802,13 +2825,30 @@ def _stage_verification_rows(
     ]
 
 
+def _unchanged_verification_row(recording: str) -> dict[str, float | str]:
+    """Record successful replay of a derivative with no authorized removal."""
+    return {
+        "recording": recording,
+        "removal_round": "",
+        "outcome": "unchanged",
+        "channel": "",
+        "kind": "unchanged",
+        "harmonics": "",
+        "stopband_low_hz": "",
+        "stopband_high_hz": "",
+        "unavailable_low_hz": "",
+        "unavailable_high_hz": "",
+        "verified_stopband_change_db": "",
+    }
+
+
 def verify_harmonic_run(
     source_vhdr: Path,
     cleaned_vhdr: Path,
     manifest_rows: Sequence[Mapping[str, object]],
     settings,
 ) -> list[dict[str, float | str]]:
-    """Refit and replay every removal stage and round, including the terminal null."""
+    """Refit and replay subtraction and the single residual-threshold stage."""
     from decomb import residual, subtraction
 
     original = recordings.read_bids_raw(source_vhdr)
@@ -2816,176 +2856,33 @@ def verify_harmonic_run(
     _validate_matching_recordings(original, cleaned)
     subtracted_rows = subtraction.subtraction_rows(manifest_rows)
     threshold_rows = residual.threshold_rows(manifest_rows)
+    unchanged_rows = subtraction.unchanged_rows(manifest_rows)
     cascade_rows = subtraction.cascade_rows(manifest_rows)
-    _validate_manifest_evidence(cascade_rows, settings)
+    if cascade_rows:
+        raise ValueError("The removal pipeline no longer accepts terminal cascade rows.")
+    if unchanged_rows and (
+        len(unchanged_rows) != 1 or subtracted_rows or threshold_rows
+    ):
+        raise ValueError("An unchanged manifest row cannot be mixed with removal stages.")
+    if not unchanged_rows and not subtracted_rows and not threshold_rows:
+        raise ValueError("The two-stage manifest does not describe a recording outcome.")
 
     source = _replay_removal_stages(
         original, subtracted_rows, threshold_rows, settings
     )
-    indexed_rows = tuple(
-        (int(row["removal_round"]), row)
-        for row in cascade_rows
-    )
-    round_indices = tuple(sorted({index for index, _ in indexed_rows}))
-    current = source
-    plan_rounds = []
     verification_rows = _stage_verification_rows(
         source_vhdr.stem, subtracted_rows, "line_subtracted", "subtracted"
     ) + _stage_verification_rows(
         source_vhdr.stem, threshold_rows, "residual_notched", "threshold_notched"
     )
-    sampling_frequency_hz = float(original.info["sfreq"])
-    for round_index in round_indices:
-        block = tuple(row for index, row in indexed_rows if index == round_index)
-        round_settings = settings.for_round(round_index)
-        evidence = fit_harmonic_round(
-            current,
-            settings,
-            round_index=round_index,
-        )
-        refitted_model = evidence.model
-        refitted_plans = evidence.plans
-        scanner_harmonics = evidence.scanner_harmonics
-        scanner_plan = evidence.scanner_plan
-
-        refitted_rows = []
-        if refitted_plans:
-            refitted_rows.extend(
-                line_manifest_rows(
-                    source_vhdr.stem,
-                    refitted_model,
-                    refitted_plans,
-                    (),
-                    settings,
-                    round_index=round_index,
-                )
-            )
-        if scanner_harmonics is not None:
-            refitted_rows.extend(
-                scanner_harmonic_manifest_rows(
-                    source_vhdr.stem,
-                    scanner_harmonics,
-                    scanner_plan,
-                    (),
-                    settings,
-                    round_index=round_index,
-                )
-            )
-        if not refitted_rows:
-            refitted_rows = line_manifest_rows(
-                source_vhdr.stem,
-                refitted_model,
-                (),
-                (),
-                settings,
-                round_index=round_index,
-            )
-        _validate_refitted_evidence(block, refitted_rows)
-
-        if not refitted_plans and scanner_plan is None:
-            verification_rows.append(
-                {
-                    "recording": source_vhdr.stem,
-                    "removal_round": round_index,
-                    "outcome": "no_line_detected",
-                    "channel": "",
-                    "kind": "",
-                    "harmonics": "",
-                    "stopband_low_hz": "",
-                    "stopband_high_hz": "",
-                    "unavailable_low_hz": "",
-                    "unavailable_high_hz": "",
-                    "verified_stopband_change_db": "",
-                }
-            )
-            continue
-
-        geometries = tuple(plan.geometry for plan in refitted_plans)
-        if scanner_plan is not None:
-            geometries = (*geometries, scanner_plan)
-        filter_plan = merge_recording_plans(geometries)
-        design = characterize_harmonic_filter(
-            sampling_frequency_hz,
-            filter_plan,
-        )
-        _validate_filter_design(block, design)
-
-        filtered = apply_harmonic_notches(current, filter_plan)
-        changes_db = _measure_channel_stopband_changes(
-            current,
-            filtered,
-            refitted_plans,
-            round_settings,
-        )
-        if scanner_plan is not None:
-            changes_db += _measure_scanner_stopband_changes(
-                current,
-                filtered,
-                scanner_plan,
-                round_settings,
-            )
-        change_index = 0
-        for channel_plan in refitted_plans:
-            for stopband, unavailable in zip(
-                channel_plan.geometry.stopbands,
-                channel_plan.geometry.unavailable_edges(),
-                strict=True,
-            ):
-                verification_rows.append(
-                    {
-                        "recording": source_vhdr.stem,
-                        "removal_round": round_index,
-                        "outcome": "line_detected",
-                        "channel": channel_plan.channel_name,
-                        "kind": stopband.kind,
-                        "harmonics": ";".join(
-                            str(value) for value in stopband.harmonics
-                        ),
-                        "stopband_low_hz": stopband.low_hz,
-                        "stopband_high_hz": stopband.high_hz,
-                        "unavailable_low_hz": unavailable[0],
-                        "unavailable_high_hz": unavailable[1],
-                        "verified_stopband_change_db": changes_db[change_index],
-                    }
-                )
-                change_index += 1
-        if scanner_plan is not None:
-            for stopband, unavailable in zip(
-                scanner_plan.stopbands,
-                scanner_plan.unavailable_edges(),
-                strict=True,
-            ):
-                verification_rows.append(
-                    {
-                        "recording": source_vhdr.stem,
-                        "removal_round": round_index,
-                        "outcome": "scanner_harmonics_detected",
-                        "channel": "",
-                        "kind": stopband.kind,
-                        "harmonics": ";".join(
-                            str(value) for value in stopband.harmonics
-                        ),
-                        "stopband_low_hz": stopband.low_hz,
-                        "stopband_high_hz": stopband.high_hz,
-                        "unavailable_low_hz": unavailable[0],
-                        "unavailable_high_hz": unavailable[1],
-                        "verified_stopband_change_db": changes_db[change_index],
-                    }
-                )
-                change_index += 1
-        plan_rounds.append(filter_plan)
-        current = filtered
+    if unchanged_rows:
+        verification_rows.append(_unchanged_verification_row(source_vhdr.stem))
 
     maximum_sample_deviation_v = _validate_exact_derivative(
         source,
         cleaned,
         cleaned_vhdr,
-        plan_rounds,
-    )
-    validate_residual_postcondition(
-        cleaned,
-        settings,
-        round_index=len(plan_rounds) + 1,
+        (),
     )
     declared = merged_intervals(
         (float(row["unavailable_low_hz"]), float(row["unavailable_high_hz"]))
@@ -3075,7 +2972,7 @@ def _read_manifest(path: Path) -> pd.DataFrame:
 
 
 def run_verify(args: argparse.Namespace) -> None:
-    """Refit and audit the written converged line-notch derivative."""
+    """Refit and audit the written threshold-stop derivative."""
     from decomb import effective
     from decomb.config import load_config
 
@@ -3120,14 +3017,13 @@ def run_verify(args: argparse.Namespace) -> None:
         report_dir / "effective_config_verify.txt",
         stage="verify",
     )
-    changes_db = pd.to_numeric(
-        frame["verified_stopband_change_db"],
-        errors="coerce",
-    ).dropna()
+    interval_count = int(
+        frame["kind"].isin({"subtracted", "threshold_notched"}).sum()
+    )
     summary = (
-        "no filter was authorized"
-        if changes_db.empty
-        else f"median stopband change {changes_db.median():+.1f} dB"
+        "no removal was authorized"
+        if interval_count == 0
+        else f"{interval_count} provenance intervals reproduced"
     )
     print(f"Verified {len(runs)} recordings: {summary}")
     print(f"  wrote {output_path}")

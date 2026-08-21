@@ -7,10 +7,11 @@
 `decomb` detects and suppresses statistically supported narrow spectral lines in
 continuous EEG. Each recording is fitted independently. All non-bad EEG channels are
 tested as one multiplicity-controlled recording family; their supported intervals are
-merged and the same filter is applied to every EEG channel. The result is written as a
+merged. Sinusoidal fits are subtracted from non-bad EEG channels, and the same residual
+FIR plan is applied to every EEG channel. The result is written as a
 BrainVision BIDS derivative with
-measured stopbands, transition bands, removal rounds, and verification results. A single
-recording is a complete valid input and no cohort catalogue is required.
+measured stopbands, transition bands, unavailable-frequency intervals, and verification
+results. A single recording is a valid input; no cohort catalogue is required.
 
 ## Problem statement
 
@@ -81,7 +82,7 @@ decomb psd --config decomb.yaml
 | --- | --- |
 | `diagnose` | Tests narrow spectral lines and writes the proposed filter plan |
 | `apply` | Fits each recording, filters EEG channels, and writes the complete derivative |
-| `verify` | Refits and replays every FIR round, then requires exact samples and a residual null |
+| `verify` | Refits and replays subtraction plus the threshold FIR, then requires exact samples |
 | `psd` | Writes equal-recording cohort spectra before and after correction |
 
 `apply` and `verify` require the complete discovered dataset. `diagnose` and `psd`
@@ -98,7 +99,7 @@ ordinary line test, and two recording-specific inputs pre-specify the scanner co
 | `removal.scanner_repetition_time_s` | 0.9 s | Scanner TR; fixes the comb fundamental at `1 / TR` |
 | `removal.scanner_trigger_event_name` | `Volume/V  1` | Exact annotation name used to validate that TR |
 | `removal.estimation_window_s` | 10.0 s | Ordinary-line stationarity interval and spectral resolution |
-| `removal.familywise_error_rate` | 0.05 | Target error budget allocated across one recording's adaptive removal sequence |
+| `removal.familywise_error_rate` | 0.05 | Target error budget for one recording's initial statistical authorization |
 | `removal.frequency_range_hz` | 0.0 to 100.0 Hz | Frequencies eligible for detection and filtering |
 | `removal.comb_fundamental_hz` | null | Comb fundamental; null derives it from the TR above |
 
@@ -107,18 +108,17 @@ duration changes its frequency spacing; ordinary-line stopbands remain at least 
 wide. Scanner-comb localization remains fixed at 4 seconds. A supported scanner tooth
 covers its fixed 1 Hz local-background neighborhood on each side, while prespecified
 weak teeth retain the 0.25 Hz localization width. FIR selectivity remains fixed at the
-54-second reference geometry. Thus scanner users need to provide only the TR and exact
-trigger name; no harmonic count, fundamental, search radius, or filter width is tuned.
+54-second reference geometry. The recording-specific inputs are the TR and exact trigger
+name. Harmonic count, search radius, and filter width are fixed by the method.
 
-A periodic source does not have to run at the volume rate. `removal.comb_fundamental_hz`
-declares its frequency directly when it does not: a cryogenic cold head at 72 cycles per
-minute is 1.2 Hz, while a 0.9 s TR gives 1.1111 Hz, and a grid built on the wrong one
-tests frequencies between the teeth. Left null the fundamental is derived from the TR, so
-existing configurations are unchanged. The declared value must come from what the
-hardware does rather than from a spectrum: fixing the grid before any spectrum is
-inspected is what keeps the comb from being fished out of the data, and the trigger check
-still validates the recording's timing either way. In this cohort the comb is at 1.200 Hz
-in 88 of 90 recordings and the trigger-derived grid carries nothing; see
+A periodic source need not run at the volume rate. `removal.comb_fundamental_hz`
+declares its frequency directly: a cryogenic cold head at 72 cycles per minute is 1.2 Hz,
+whereas a 0.9 s TR gives 1.1111 Hz. A grid based on the wrong fundamental tests frequencies
+between the comb teeth. When the setting is null, the fundamental is derived from the TR.
+Any explicit value must be specified from independent hardware information rather than
+estimated from the spectrum; the trigger check still validates recording timing. In this
+cohort the comb is at 1.200 Hz in 88 of 90 recordings, while the trigger-derived grid has
+no corresponding spectral support; see
 [`docs/artifact_survey.md`](docs/artifact_survey.md).
 
 `paths.bids_root` identifies the input dataset. Output and report locations have
@@ -153,16 +153,16 @@ local smooth-spectrum null, the target is uniquely largest with probability one 
 an exact one-sided binomial test measures its persistence. The two shape-test p-values
 are Bonferroni-combined at each window, channel, and frequency. DC is excluded.
 
-### Joint line and scanner-comb detection
+### Initial line and scanner-comb detection
 
-Removal round `r` receives error rate `alpha / (r * (r + 1))`; each round splits that
-rate equally between the ordinary-line and scanner-comb families. The ordinary family
+The initial authorization uses `alpha / (1 * 2)` and splits it equally between the
+ordinary-line and scanner-comb families. The ordinary family
 uses one Holm correction across every as-recorded non-bad EEG channel, continuous
 10-second
-estimation window, and tested Fourier frequency in the recording. A frequency is
+estimation window, and tested Fourier frequency in the recording
+[[23](#user-content-ref-23)]. A frequency is
 eligible only when its recording-family Holm-adjusted, shape-test-union p-value is below
-the ordinary family's allocated rate. After the source round, refits use the Thomson
-test alone because an earlier notch has deliberately changed the local peak geometry.
+the ordinary family's allocated rate.
 
 The scanner family is fixed before the spectrum is inspected. Its fundamental is exactly
 `1 / TR`, after the configured event sequence passes the timing check above. A separate
@@ -174,22 +174,13 @@ neighborhood on each side. Support at one tooth is never extrapolated to another
 that fails its own test is left in place, however many of its neighbors passed.
 No unconfigured or data-inferred fundamental can authorize the plan.
 
-The summable allocation bounds the nominal error budgets made available to the rounds.
-It does not by itself prove exact post-selection null behavior after earlier
-data-dependent filters. Complete-sequence calibration is therefore measured empirically
-with mixed true/null simulations.
-Supported intervals from all channels are merged into one recording plan and the
-identical FIR is applied to every EEG channel, including channels marked bad, so a later
-spatial transform cannot restore a component from an unfiltered channel. Recordings are
+The statistical result supplies ordinary-line subtraction targets. Independently, comb
+teeth above the predeclared 1 dB candidate floor are also fitted. Recordings are
 independent inferential families and channels are never pooled across the cohort.
-
-If neither family is significant, that joint null result is recorded explicitly and the
-recording is copied without filtering. A clean statistical outcome is valid and does not
-abort diagnosis, application, or verification.
 
 ### Removal: subtract, then notch what survives
 
-`apply` removes a line by fitting and subtracting it, and filters only the residue. Three
+`apply` removes a line by fitting and subtracting it, and filters only the residue. Two
 stages run before the derivative is written.
 
 **Subtract.** A round-one fit selects targets: the statistically supported ordinary lines,
@@ -206,18 +197,8 @@ plus 1.25 bins on each side [[6](#user-content-ref-6)]. Thresholding on the resi
 survives subtraction, rather than on prominence before it, is what makes the threshold
 transfer between recordings.
 
-**Converge.** The FIR rounds described below then run until fresh ordinary-line and
-scanner-comb fits are both null.
-
-![Power spectral density before and after removal](docs/decomb_psd.png)
-
-**What the pipeline does.** Channel-mean power spectral density of sub-0010 run 1, shown over
-37 to 52 Hz of the 1 to 100 Hz analysed range, in 0.1 Hz Welch bins from 10 s segments. Blue
-shading is the power removed. Pink bands are the frequencies the manifest declares unavailable
-for inference, and their regular 1.2 Hz spacing is the comb. A narrow band is a subtracted
-line, costing two Fourier bins of the fit window on each side; a wide band is a filter
-stopband with its transitions, where the spectrum is emptied and the trace leaves the axis.
-Removal is bounded by the evidence, so the frequencies between the bands are unchanged.
+**Stop.** The derivative is written immediately after this one 2 dB residual-threshold
+FIR. No terminal statistical-line cascade or terminal-null requirement is applied.
 
 Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
 included, so each subtracted frequency declares an unavailable interval of two Fourier bins
@@ -225,27 +206,26 @@ of the fit window on each side. Those intervals merge with the FIR stopbands and
 transitions, and every manifest row carries the single recording-wide share that results.
 `verify` re-derives both stages from the source before replaying them.
 
-The residual stage is deliberately heuristic: it removes material the converged statistical
-rounds would not, which is where its advantage on the comb comes from. Its constants are
-measured on this cohort rather than tuned here, in
+The residual stage is heuristic: it filters candidates that remain more than 2 dB above
+their local background after subtraction. Its constants were selected from this cohort;
+the supporting measurements are in
 [`docs/removal_operating_point.md`](docs/removal_operating_point.md) and
 [`docs/artifact_survey.md`](docs/artifact_survey.md).
 
 ### Stopbands and FIR filtering
 
-Each ordinary-line stopband covers its statistically supported Fourier-bin positions,
-expanded by 0.125 Hz on each side. Its minimum 0.25 Hz width removes the visible local
-structure represented by an authorized line; a coarser configured Fourier bin makes the
-minimum correspondingly wider. A statistically supported scanner harmonic uses the
-2.25 Hz envelope above so its visible skirts are not left beside a deep central notch.
-A prespecified tooth that carries no support of its own is not
-notched at all. Stopbands are merged only when their FIR transitions
-would overlap. Other unsupported frequencies stay in the passband.
+The residual stage evaluates the subtracted targets and every configured comb tooth from
+20 to 95 Hz. Candidates separated by no more than three Fourier bins form one cluster.
+A cluster is filtered only when its largest residual prominence exceeds 2 dB. Its
+stopband spans the cluster plus 1.25 Fourier bins at each edge. Stopbands are merged when
+they overlap; frequencies outside the resulting stopbands and transitions remain in the
+passband.
 
 The total transition bandwidth is fixed at `3.3 / 54 = 0.061111` Hz. MNE assigns half
 of this width to each stopband edge, producing the selective 108-second Hamming FIR while
 leaving the statistical estimation horizons independent. Merged stopbands are passed to
-MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel
+MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel, including
+channels marked bad
 [[10](#user-content-ref-10), [11](#user-content-ref-11)].
 
 | Parameter | Value |
@@ -262,11 +242,9 @@ MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel
 | `skip_by_annotation` | `edge`, `bad_acq_skip` |
 | `n_jobs` | `-1` |
 
-Each removal round is a zero-phase, noncausal FIR design with delay compensation. The
-manifest records every round's exact sample count and measured response. Filtering stops
-only when fresh ordinary-line and trigger-anchored scanner-harmonic fits are both null. A
-supported plan whose filter changes no samples raises an error instead of being hidden by
-an iteration limit.
+The residual filter is a zero-phase, noncausal FIR design with delay compensation. The
+manifest records its exact sample count and measured response. A filter plan that changes
+no samples raises an error.
 A transition reaching zero frequency or Nyquist, or a continuous span shorter than the
 FIR, raises an error
 [[6](#user-content-ref-6)].
@@ -280,13 +258,11 @@ the boundary policy. The reported change is descriptive and no attenuation thres
 decides whether verification passes.
 
 Verification confirms that scientific settings, library versions, and recording geometry
-match the apply stage. Starting from the source recording, it refits and replays every
-declared round and requires each Holm or scanner-comb authorization, supporting window,
-channel count, trigger-anchored harmonic set, recording-wide stopband geometry, and joint
-terminal null to reproduce the manifest. It then
-applies the destination BrainVision calibration and float32 quantization. Every sample
-must equal the written derivative exactly, and an independent fit of the written data must
-also be null. A recording that starts null is reproduced unchanged.
+match the apply stage. Starting from the source recording, it refits the initial targets,
+replays multitaper subtraction, re-derives the 2 dB residual stopbands, and reapplies that
+single FIR stage. It then applies the destination BrainVision calibration and float32
+quantization. Every sample must equal the written derivative exactly. A recording with no
+subtraction target or threshold stopband is reproduced unchanged.
 
 Quality-control spectra use MNE `psd_array_welch` with detrended Hamming windows, whose
 sidelobe behaviour bounds the spectral leakage between neighbouring bins
@@ -317,8 +293,8 @@ complete target set must lie below the lowest Nyquist frequency in the cohort; a
 incompatible cohort fails validation before calibration begins. Component amplitudes
 are scaled from the surrogate background alone. Decomb settings and detections from the
 real cohort do not define the benchmark. Persistent stationary and drifting injections
-also record whether the full adaptive sequence authorizes any frequency outside the
-known injected support.
+also record whether the two-stage pipeline removes any frequency outside the known
+injected support.
 
 ## Outputs and provenance
 
@@ -327,12 +303,9 @@ The output follows EEG-BIDS and BIDS derivative conventions
 [19](#user-content-ref-19)]. Corrected BrainVision triplets receive a `_desc-decomb`
 entity. The derivative includes a stopband manifest, `dataset_description.json`, apply
 and verification configurations, an independent verification table, and matched PSD
-products. The manifest records the affected channel, every detected frequency,
-Holm-input and Holm-adjusted p-values, supporting windows, per-channel
-and total test counts, removal round, the recording-wide FIR response, attenuation,
-the configured sequence-wide error rate, the allocated round error rate, terminal null,
-and cumulative unavailable bandwidth. Floating-point geometry is written with 17
-significant digits.
+products. The manifest records every subtracted frequency, each threshold-authorized
+residual stopband, its prominence and FIR geometry, and cumulative unavailable bandwidth.
+Floating-point geometry is written with 17 significant digits.
 
 `diagnose` writes `model.tsv`, `detected_lines.tsv`, and `stopbands.tsv`. `apply` writes
 `line_notch_manifest.tsv`, and `verify` writes `line_notch_verification.tsv`. `psd` writes
@@ -347,139 +320,46 @@ retained share with and without that mask. Both are for downstream analysis only
 describes the derivative: the manifest records what was destroyed, these record what an
 analyst may additionally choose to distrust.
 
-## Before and after
+## PSD quality-control outputs
 
-All 90 recordings, representing 12.09 hours of continuous acquisition after excluding
-`bad_acq_skip` spans, measured with the Welch settings above. Each coloured trace is one
-sensor's linear-power spectrum averaged equally across recordings in which that sensor
-is not marked bad. Both MNE figures use the same recordings, channels, samples, and
-decibel scale, so the only difference is the correction.
+The PSD stage writes sensor-level source and derivative spectra and a second pair that
+adds the recording-level declared-unavailable profile. The figures below were generated
+from the verified 90-recording threshold-stop derivative. Each recording has equal weight
+in the cohort summary. Sensor plots exclude channels marked bad in BIDS; the declared
+profile is the share of recordings whose manifest marks each frequency unavailable.
 
-![Cohort-average power spectra of every EEG sensor before correction](docs/psd_before.png)
+![Recording-level source and threshold-stop derivative spectra with declared intervals](docs/decomb_psd.png)
 
-![Cohort-average power spectra of every EEG sensor after correction](docs/psd_after.png)
+![Sensor-level source spectra](docs/psd_before.png)
 
-The terminal cumulative geometry in the 90-recording audit changes mean band availability
-as follows. These percentages describe retained frequency bandwidth, not retained signal
-power; each recording has equal weight.
+![Sensor-level threshold-stop derivative spectra](docs/psd_after.png)
 
-| Band | Before availability | After availability | Made unavailable |
-| --- | ---: | ---: | ---: |
-| Delta | 100.000% | 98.778% | 1.222 percentage points |
-| Theta | 100.000% | 99.943% | 0.057 percentage points |
-| Alpha | 100.000% | 99.476% | 0.524 percentage points |
-| Beta | 100.000% | 92.718% | 7.282 percentage points |
-| Gamma | 100.000% | 77.812% | 22.188 percentage points |
+![Cohort source spectrum and declared-unavailable profile](docs/cohort_spectrum_before.png)
 
-These declare all three removal stages -- subtraction damage, residual stopbands and the
-FIR cascade -- merged per recording. Gamma carries almost the whole cost, because that is
-where the comb and the isolated lines are. An earlier notching-only configuration of this
-pipeline retained 59.210% of gamma and 85.044% of alpha for the same cohort.
+![Cohort threshold-stop derivative spectrum and declared-unavailable profile](docs/cohort_spectrum_after.png)
 
-Two measurements set the current configuration.
-[`docs/artifact_survey.md`](docs/artifact_survey.md) reports that the comb in this cohort
-is at 1.200 Hz rather than the 1.1111 Hz the TR implies, so geometry anchored to the
-trigger grid was spent on frequencies the artifact does not occupy; `removal.comb_fundamental_hz`
-must be declared for the residual stage to test the grid the artifact actually occupies.
-[`docs/removal_operating_point.md`](docs/removal_operating_point.md) derives the fit
-window, the residual floor and the clustering gap from sweeps on these 90 recordings.
+## Threshold-stop validation
 
-### Removal stays inside the bandwidth it declares
+The single-threshold stopping rule was compared with the retired terminal cascade on all
+90 recordings. These percentages describe retained gamma bandwidth, not retained signal
+power.
 
-Availability only means something if removal is confined to the intervals the manifest
-names. Measured on the difference between each source and its derivative, which is exactly
-what was removed, over all 90 recordings:
+| Recording coverage | Terminal cascade | Stop after threshold |
+| --- | ---: | ---: |
+| 100% common | 29.2% | 58.7% |
+| At least 95% | 57.8% | 65.6% |
+| At least 90% | 62.8% | 68.5% |
+| Mean per recording | 77.8% | 80.7% |
 
-| | mean | median | worst recording |
-| --- | ---: | ---: | ---: |
-| Removed energy inside the declared intervals | 99.975% | 99.976% | 99.954% |
-| Power taken from a bin declared available, worst in the cohort | -- | -- | 0.670 dB |
-| Bins declared available that lose more than 0.5 dB | -- | -- | 3 of 287,000 |
+Six recordings were used for method development; the remaining 84 formed the held-out
+comparison. The paired comb difference had a median of 0.000 dB and a participant-level
+bootstrap 95% interval from -0.001 to +0.013 dB. The largest threshold-stop residual was
++0.48 dB. These cohort-specific measurements support the stopping rule; they do not
+establish performance in an independent dataset.
 
-| Analytic bound, every filter the pipeline built | Value |
-| --- | ---: |
-| Maximum passband deviation | 0.027 dB |
-| Minimum stopband attenuation | 50.6 dB |
-
-The passband figure is a design-time property recorded for each filter in the manifest, not
-an estimate: outside its stopband and transitions, an FIR built here cannot alter a frequency
-by more than 0.027 dB. The subtraction stage is bounded empirically instead, and the two
-bins it declares on each side are not spare padding. Halving them to one bin would raise
-gamma availability from 77.8 to 82.8 percent, and 99.7 percent of the removed energy would
-still fall inside the narrower declaration -- but the energy that escapes is concentrated
-rather than spread. At one bin, 539 frequencies across the cohort lose more than 0.5 dB while
-being declared available, and five recordings contain frequencies emptied almost entirely
-under a declaration that calls them usable. At two bins that count is three, and the worst
-is 0.670 dB. `studies/2026-08-19-arm-comparison/declared_width_safety.py` records the
-comparison.
-
-Spectral resolution decides this measurement and it is easy to get wrong. Differencing two
-0.1 Hz-resolution spectra makes removal appear to leak, because a Welch estimate at that
-resolution smears a narrow removal across neighbouring bins; the same removal is 73 percent
-contained at 10 s segments and 100 percent contained once the segment is long enough to
-resolve it. The figures above use the difference signal and segments twice the subtraction
-fit window, which puts eight bins across a declared interval, so they measure the removal
-rather than the estimator. `verify` reports the same quantity per recording in
-`removed_energy_inside_declared_share`.
-
-The cost of this choice is that the comb is left at its background rather than driven
-below it: notching on the corrected 1.2 Hz grid reaches -6.80 dB where subtraction reaches
-about -0.3 dB, at alpha 0.744 and gamma 0.556. That trade is a study-level decision and is
-recorded in the same document.
-
-## Cohort run
-
-`decomb diagnose | apply | verify | psd` over all 90 recordings, 12.09 hours of continuous
-acquisition, 2026-08-20.
-
-| | |
-| --- | ---: |
-| Recordings processed | 90 / 90 |
-| Lines subtracted per recording | 149 (61 to 201) |
-| Residual stopbands per recording | 7.3 (0 to 20) |
-| FIR rounds to a terminal null | 2.88 (at most 5) |
-| Excluded zones per recording | 50, covering 18.6 Hz of 99 Hz |
-| **Derivative reproduced from its declared provenance** | **90 / 90, 0.000e+00 V** |
-| **Removed energy inside the declared bandwidth** | **99.975% mean, 99.954% worst** |
-| Recordings whose confinement falls below 99% | 0 |
-
-| Band | Availability after removal |
-| --- | ---: |
-| Delta | 98.778% |
-| Theta | 99.943% |
-| Alpha | 99.476% |
-| Beta | 92.718% |
-| Gamma | 77.812% |
-
-`verify` refits every stage from the source, replays subtraction, the residual notches and
-the FIR cascade, and requires the result to equal the written derivative sample for sample.
-It reports the confinement figure per recording in `removed_energy_inside_declared_share`.
-The band figures are computed independently by `psd` from the derivative itself and agree
-with the manifest's declared shares to three decimals.
-
-### The spectrum before and after, and what removal declares unavailable
-
-![Cohort source spectrum with the declared-unavailable profile](docs/cohort_spectrum_before.png)
-
-![Cohort derivative spectrum with the declared-unavailable profile](docs/cohort_spectrum_after.png)
-
-Written by the `psd` stage on every run, as `psd_before_declared.png` and
-`psd_after_declared.png`. Cohort spectra over all 90 recordings, each weighted equally. The line is the mean across 63 sensors and
-the band is their full range. The panel beneath gives, for each frequency, the percentage of
-recordings whose manifest declares it unavailable for inference.
-
-The comb is unmistakable in the source as a regular 1.2 Hz picket above 20 Hz, with the pump
-line near 57 Hz and mains at 60 Hz standing well clear of it. In the derivative the picket is
-gone and the spectrum falls smoothly; what remains at the declared frequencies are the
-notches, which read as narrow dips rather than peaks.
-
-The lower panel is the honest cost, and it is not uniform. Below 20 Hz almost nothing is
-declared, because the residual comb stage starts there and few ordinary lines are supported
-lower -- which is why alpha and theta retain above 99 percent. Above it the declaration
-follows the artifact: teeth reaching 100 percent are frequencies every recording had to give
-up, while the many partial bars are lines supported in some recordings and not others. Across
-the 1 to 100 Hz range, 33 percent of frequencies are declared by no recording at all and only
-3 percent by all 90.
+[`docs/artifact_survey.md`](docs/artifact_survey.md) establishes the cohort's 1.200 Hz comb.
+[`docs/removal_operating_point.md`](docs/removal_operating_point.md) records the earlier
+operating-point sweeps.
 
 ## Software and testing
 
@@ -568,6 +448,9 @@ and verification tool on macOS arm64 without widening the general install metada
 22. <a name="ref-22"></a>Leske S, Dalal SS. Reducing power line noise in EEG and MEG data via spectrum
     interpolation. *NeuroImage*. 2019, 189, 763 to 776.
     [DOI](https://doi.org/10.1016/j.neuroimage.2019.01.026)
+23. <a name="ref-23"></a>Holm S. A simple sequentially rejective multiple test procedure.
+    *Scandinavian Journal of Statistics*. 1979, 6, 65 to 70.
+    [JSTOR](https://www.jstor.org/stable/4615733)
 MNE implementation details are documented in the
 [notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html), the
 [filtering methods tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html),
