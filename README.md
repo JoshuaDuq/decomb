@@ -335,7 +335,10 @@ and cumulative unavailable bandwidth. Floating-point geometry is written with 17
 significant digits.
 
 `diagnose` writes `model.tsv`, `detected_lines.tsv`, and `stopbands.tsv`. `apply` writes
-`line_notch_manifest.tsv`, and `verify` writes `line_notch_verification.tsv`.
+`line_notch_manifest.tsv`, and `verify` writes `line_notch_verification.tsv`. `psd` writes
+`psd_before.png` and `psd_after.png`, one line per sensor in position colours, and
+`psd_before_declared.png` and `psd_after_declared.png`, which put the sensor mean and range
+above the share of recordings that declared each frequency unavailable.
 
 `apply` also writes two advisory tables. `comb_analysis_mask.tsv` lists every comb tooth in
 the band where the comb was measured, at the width a subtracted tooth declares, whether or
@@ -460,8 +463,8 @@ with the manifest's declared shares to three decimals.
 
 ![Cohort derivative spectrum with the declared-unavailable profile](docs/cohort_spectrum_after.png)
 
-Cohort spectra over all 90 recordings, each weighted equally, computed by the same
-`psd` stage code that writes the figures above. The line is the mean across 63 sensors and
+Written by the `psd` stage on every run, as `psd_before_declared.png` and
+`psd_after_declared.png`. Cohort spectra over all 90 recordings, each weighted equally. The line is the mean across 63 sensors and
 the band is their full range. The panel beneath gives, for each frequency, the percentage of
 recordings whose manifest declares it unavailable for inference.
 
