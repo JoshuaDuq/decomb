@@ -424,6 +424,50 @@ below it: notching on the corrected 1.2 Hz grid reaches -6.80 dB where subtracti
 about -0.3 dB, at alpha 0.744 and gamma 0.556. That trade is a study-level decision and is
 recorded in the same document.
 
+## Cohort run
+
+`decomb diagnose | apply | verify | psd` over all 90 recordings, 12.09 hours of continuous
+acquisition, 2026-08-20.
+
+| | |
+| --- | ---: |
+| Recordings processed | 90 / 90 |
+| Lines subtracted per recording | 149 (61 to 201) |
+| Residual stopbands per recording | 7.3 (0 to 20) |
+| FIR rounds to a terminal null | 2.88 (at most 5) |
+| Excluded zones per recording | 50, covering 18.6 Hz of 99 Hz |
+| **Derivative reproduced from its declared provenance** | **90 / 90, 0.000e+00 V** |
+| **Removed energy inside the declared bandwidth** | **99.975% mean, 99.954% worst** |
+| Recordings whose confinement falls below 99% | 0 |
+
+| Band | Availability after removal |
+| --- | ---: |
+| Delta | 98.778% |
+| Theta | 99.943% |
+| Alpha | 99.476% |
+| Beta | 92.718% |
+| Gamma | 77.812% |
+
+`verify` refits every stage from the source, replays subtraction, the residual notches and
+the FIR cascade, and requires the result to equal the written derivative sample for sample.
+It reports the confinement figure per recording in `removed_energy_inside_declared_share`.
+The band figures are computed independently by `psd` from the derivative itself and agree
+with the manifest's declared shares to three decimals.
+
+### Every excluded zone, before and after
+
+![Source spectrum with every excluded zone marked](docs/excluded_zones_source.png)
+
+![Derivative spectrum with every excluded zone marked](docs/excluded_zones_derivative.png)
+
+One recording, MNE `Spectrum.plot` with per-sensor colours, 0.1 Hz Welch bins, both panels on
+one decibel scale. Shading marks every interval the manifest declares unavailable for
+inference: 47 zones covering 22.4 Hz of the 1 to 100 Hz range. Below about 20 Hz there is
+almost nothing to exclude, because the comb the residual stage tests starts there and few
+ordinary lines are supported lower. The wide zone at 57 to 61 Hz is the isolated pump line
+together with mains. In the derivative the marked zones are emptied or attenuated and the
+spectrum between them is unchanged.
+
 ## Software and testing
 
 Version `0.2.0` is installable with Python 3.11 or newer and the lower dependency bounds
