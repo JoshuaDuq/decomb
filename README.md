@@ -160,8 +160,28 @@ Both use the same recordings, channels, samples, and decibel scale.
 
 The example audit contains 90 recordings and 12.09 hours of continuous acquisition.
 Removed frequency intervals are unavailable for inference, so downstream analyses should
-account for the cumulative manifest geometry. Cohort-specific validation does not establish
-performance on an independent dataset.
+account for the cumulative manifest geometry.
+
+### Filtering performance
+
+The threshold-stop method retained more gamma bandwidth than the retired terminal
+cascade without a measurable cohort-level comb penalty. Availability is the share of
+gamma-frequency bins not declared unavailable; it is not retained signal power.
+
+| Recording coverage | Terminal cascade | Threshold stop |
+| --- | ---: | ---: |
+| 100% common | 29.2% | 58.7% |
+| At least 95% | 57.8% | 65.6% |
+| At least 90% | 62.8% | 68.5% |
+| Mean per recording | 77.8% | 80.7% |
+
+Six recordings were used for method development and 84 for the held-out comparison.
+The paired comb difference had a median of 0.000 dB and a participant-level bootstrap
+95% interval from -0.001 to +0.013 dB; the largest threshold-stop residual was +0.48 dB.
+Across all 90 recordings, at least 99.95% of removed spectral energy lay inside the
+manifest-declared unavailable intervals in every recording (median 99.97%). Verification
+reproduced every written sample exactly (maximum deviation 0 V). These internal results
+do not establish performance on an independent dataset.
 
 ## References and further reading
 
