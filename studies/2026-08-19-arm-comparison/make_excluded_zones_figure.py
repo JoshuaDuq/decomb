@@ -1,77 +1,61 @@
-"""Full-spectrum MNE PSD of the derivative with every declared-excluded zone marked."""
+"""Cohort spectrum with the frequencies removal declares unavailable."""
 import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import mne
+from matplotlib.ticker import MultipleLocator
 
-from decomb import notch, recordings
-from decomb.config import load_config
+MM = 1 / 25.4
+INK, SPREAD, ZONE = "#1B1B1B", "#C9D4DE", "#B04A57"
+plt.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
+    "font.size": 9, "axes.labelsize": 9, "xtick.labelsize": 8.5,
+    "ytick.labelsize": 8.5, "legend.fontsize": 8.5, "axes.linewidth": 0.8,
+    "xtick.major.width": 0.8, "ytick.major.width": 0.8,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "axes.edgecolor": "#4A4A4A", "figure.dpi": 300, "savefig.dpi": 300,
+})
 
-CONFIG = "/Users/joduq24/Desktop/decomb/decomb.yaml"
-ZONE = "#E8A0A8"
+d = np.load(sys.argv[1])
+freqs, frac = d["freqs"], d["excluded_fraction"]
+n, hours = int(d["n_recordings"]), float(d["hours"])
+db = {k: 10 * np.log10(d[k] * 1e12) for k in ("before", "after")}
+ylim = (db["before"].min() - 2, db["before"].max() + 2)
 
+for label, title in (("before", "Source"), ("after", "Derivative")):
+    fig, (ax, strip) = plt.subplots(
+        2, 1, figsize=(160 * MM, 88 * MM), sharex=True,
+        gridspec_kw={"height_ratios": [5.2, 1.0], "hspace": 0.10})
+    values = db[label]
+    ax.fill_between(freqs, values.min(axis=0), values.max(axis=0),
+                    color=SPREAD, lw=0, zorder=1)
+    ax.plot(freqs, values.mean(axis=0), color=INK, lw=1.1, zorder=3)
+    ax.set_ylim(*ylim)
+    ax.set_ylabel("Power spectral density\n(dB/Hz re 1 µV²)")
+    ax.text(0.985, 0.94, title, transform=ax.transAxes, ha="right", va="top",
+            fontsize=11, fontweight="bold")
+    ax.text(0.985, 0.845, f"{n} recordings · {hours:.1f} h · 63 sensors",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8, color="#666666")
+    handles = [
+        plt.Line2D([], [], color=INK, lw=1.1, label="sensor mean"),
+        plt.Rectangle((0, 0), 1, 1, color=SPREAD, label="sensor range"),
+    ]
+    ax.legend(handles=handles, loc="lower left", frameon=False, handlelength=1.5,
+              labelspacing=0.25, borderaxespad=0.3)
 
-def user_psd(path):
-    """The user's preprocessing and Welch settings, verbatim."""
-    raw = mne.io.read_raw_brainvision(str(path), misc=["ECG"], verbose="ERROR")
-    raw.load_data(verbose="ERROR")
-    raw.filter(1, 100, verbose="ERROR")
-    annot, _ = mne.preprocessing.annotate_amplitude(raw, peak=30e-6, verbose="ERROR")
-    raw.set_annotations(annot + raw.annotations)
-    raw.set_montage("standard_1020", on_missing="ignore", verbose="ERROR")
-    return raw.compute_psd(method="welch", fmin=1, fmax=100, n_fft=10000,
-                           n_per_seg=10000, n_overlap=5000, window="hamming",
-                           picks="eeg", reject_by_annotation=False, verbose="ERROR")
+    strip.fill_between(freqs, 0, 100 * frac, color=ZONE, lw=0)
+    strip.set_ylim(0, 100)
+    strip.set_yticks([0, 100])
+    strip.set_yticklabels(["0", "100"])
+    strip.set_ylabel("declared\nunavailable (%)", fontsize=8, labelpad=2)
+    strip.set_xlabel("Frequency (Hz)")
+    strip.set_xlim(1, 100)
+    strip.xaxis.set_major_locator(MultipleLocator(10))
+    strip.tick_params(labelsize=8)
 
-
-def main():
-    name, out = sys.argv[1], sys.argv[2]
-    config = load_config(CONFIG)
-    src, deriv = config.path("bids_root"), config.path("output_root")
-    manifest = notch._read_manifest(config.path("removal_dir") / notch.MANIFEST_NAME)
-    block = manifest.loc[manifest["recording"] == name]
-    zones = notch.merged_intervals(
-        (float(a), float(b))
-        for a, b in zip(block["unavailable_low_hz"], block["unavailable_high_hz"])
-        if str(a) != "" and str(b) != ""
-    )
-    vhdr = src / name.split("_")[0] / "eeg" / f"{name}.vhdr"
-    spectra = {
-        "source": user_psd(vhdr),
-        "derivative": user_psd(recordings.derivative_vhdr_path(vhdr, src, deriv)),
-    }
-    # one decibel scale for both, taken from the source, so the pair is comparable
-    reference = 10 * np.log10(spectra["source"].get_data() * 1e12)
-    pad = 0.04 * (reference.max() - reference.min())
-    ylim = (reference.min() - pad, reference.max() + pad)
-    excluded = sum(hi - lo for lo, hi in zones)
-
-    for label, spectrum in spectra.items():
-        fig = spectrum.plot(spatial_colors=True, dB=True, amplitude=False, show=False)
-        fig.set_size_inches(11.0, 4.6)
-        for ax in fig.axes:
-            if not ax.get_ylabel():
-                continue
-            for lo, hi in zones:
-                ax.axvspan(lo, hi, color=ZONE, alpha=0.55, lw=0, zorder=0)
-            ax.set_xlim(1, 100)
-            ax.set_ylim(*ylim)
-            handle = plt.Rectangle((0, 0), 1, 1, color=ZONE, alpha=0.55)
-            ax.legend(
-                [handle],
-                [f"declared unavailable: {len(zones)} zones, {excluded:.1f} Hz of 99 Hz"],
-                loc="lower left", frameon=True, framealpha=0.9, edgecolor="none",
-                fontsize=9, handlelength=1.6, borderaxespad=0.4)
-        fig.suptitle(f"{name} — {label}, shared scale", fontsize=10)
-        path = f"{out}_{label}.png"
-        fig.savefig(path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        print(f"wrote {path}")
-    print(f"  {len(zones)} zones, {excluded:.2f} Hz of 99 Hz excluded")
-
-
-if __name__ == "__main__":
-    main()
+    path = f"{sys.argv[2]}_{label}.png"
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"wrote {path}")

@@ -454,19 +454,29 @@ It reports the confinement figure per recording in `removed_energy_inside_declar
 The band figures are computed independently by `psd` from the derivative itself and agree
 with the manifest's declared shares to three decimals.
 
-### Every excluded zone, before and after
+### The spectrum before and after, and what removal declares unavailable
 
-![Source spectrum with every excluded zone marked](docs/excluded_zones_source.png)
+![Cohort source spectrum with the declared-unavailable profile](docs/cohort_spectrum_before.png)
 
-![Derivative spectrum with every excluded zone marked](docs/excluded_zones_derivative.png)
+![Cohort derivative spectrum with the declared-unavailable profile](docs/cohort_spectrum_after.png)
 
-One recording, MNE `Spectrum.plot` with per-sensor colours, 0.1 Hz Welch bins, both panels on
-one decibel scale. Shading marks every interval the manifest declares unavailable for
-inference: 47 zones covering 22.4 Hz of the 1 to 100 Hz range. Below about 20 Hz there is
-almost nothing to exclude, because the comb the residual stage tests starts there and few
-ordinary lines are supported lower. The wide zone at 57 to 61 Hz is the isolated pump line
-together with mains. In the derivative the marked zones are emptied or attenuated and the
-spectrum between them is unchanged.
+Cohort spectra over all 90 recordings, each weighted equally, computed by the same
+`psd` stage code that writes the figures above. The line is the mean across 63 sensors and
+the band is their full range. The panel beneath gives, for each frequency, the percentage of
+recordings whose manifest declares it unavailable for inference.
+
+The comb is unmistakable in the source as a regular 1.2 Hz picket above 20 Hz, with the pump
+line near 57 Hz and mains at 60 Hz standing well clear of it. In the derivative the picket is
+gone and the spectrum falls smoothly; what remains at the declared frequencies are the
+notches, which read as narrow dips rather than peaks.
+
+The lower panel is the honest cost, and it is not uniform. Below 20 Hz almost nothing is
+declared, because the residual comb stage starts there and few ordinary lines are supported
+lower -- which is why alpha and theta retain above 99 percent. Above it the declaration
+follows the artifact: teeth reaching 100 percent are frequencies every recording had to give
+up, while the many partial bars are lines supported in some recordings and not others. Across
+the 1 to 100 Hz range, 33 percent of frequencies are declared by no recording at all and only
+3 percent by all 90.
 
 ## Software and testing
 
