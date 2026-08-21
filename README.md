@@ -4,60 +4,38 @@
   <img src="logo.png" alt="decomb logo" width="420">
 </p>
 
-`decomb` detects and suppresses statistically supported narrow spectral lines in
-continuous EEG. Each recording is fitted independently. All non-bad EEG channels are
-tested as one multiplicity-controlled recording family; their supported intervals are
-merged. Sinusoidal fits are subtracted from non-bad EEG channels, and the same residual
-FIR plan is applied to every EEG channel. The result is written as a
-BrainVision BIDS derivative with
-measured stopbands, transition bands, unavailable-frequency intervals, and verification
-results. A single recording is a valid input; no cohort catalogue is required.
+`decomb` detects and removes supported narrow spectral lines in continuous EEG. It
+analyzes each recording independently, subtracts authorized sinusoidal components from
+non-bad EEG channels, and applies one residual FIR plan to every EEG channel. `apply`
+writes a BrainVision BIDS derivative with provenance and verification results. Frequencies
+removed by either stage are declared unavailable for downstream inference.
 
-## Problem statement
+## Use case and limits
 
-Residual periodic artifacts can remain in EEG acquired during or near fMRI after
-gradient and pulse artifact correction [[1](#user-content-ref-1),
-[2](#user-content-ref-2)]. Cryogenic pumps and scanner ventilation systems are reported
-sources [[3](#user-content-ref-3), [4](#user-content-ref-4)]. Their frequencies can drift
-within a recording and can occur as a harmonic series or as isolated narrowband lines.
+Periodic artifacts can remain after gradient and pulse artifact correction in simultaneous
+EEG-fMRI. Scanner pumps, ventilation systems, and other periodic hardware sources can
+produce drifting lines, isolated lines, or harmonic structure.
 
-The recording alone does not uniquely separate neural and artifactual contributions at
-the same frequency. Source-separation methods require additional assumptions and cannot
-establish unique recovery when those assumptions are unsupported
-[[20](#user-content-ref-20)]. Filtering attenuates neural activity together with the
-artifact and does not reconstruct the rejected signal [[6](#user-content-ref-6),
-[21](#user-content-ref-21), [22](#user-content-ref-22)].
+The recording alone cannot establish whether activity at a removed frequency was neural
+or artifactual. Subtraction and filtering can both remove neural activity at the same
+frequency. Neither reconstructs the rejected signal. Broad rhythms and transient or
+spatial artifacts require other methods. Source control remains preferable when the
+source is known.
 
-`decomb` therefore records every stopband and transition as unavailable for inference
-and does not impute neural activity. Physical attribution requires independent evidence.
-Source control remains preferable when the source is known
-[[5](#user-content-ref-5)].
+## Input requirements
 
-## Scope
+Input recordings must be BrainVision EEG in an EEG-BIDS dataset. Session and run entities
+are supported. Channel metadata mismatches and invalid recording geometry fail before
+processing.
 
-Input recordings must use BrainVision format in an EEG-BIDS dataset
-[[12](#user-content-ref-12), [14](#user-content-ref-14)]. Recording directories may contain
-optional session and run entities. Channel metadata mismatches raise an error.
+Each recording needs at least two non-bad EEG channels with finite data and enough
+continuous samples for the configured estimation windows. Windows do not cross `edge` or
+`bad_acq_skip` annotations. Scanner-trigger annotations must match the configured name
+and repetition time. Continuous spans shorter than the designed FIR are rejected.
 
-At least two non-bad channels typed as EEG are required for detection.
-Those channels must contain finite values and at least three complete estimation windows
-inside continuous acquisition spans. Windows never cross annotations whose descriptions
-begin with
-`edge` or `bad_acq_skip`. Every recording must also contain at least two annotations
-whose description exactly matches `removal.scanner_trigger_event_name`; every interval
-between those annotations must equal `removal.scanner_repetition_time_s` within half a
-sample. When filtering is authorized, every continuous acquisition span must be at
-least as long as the designed FIR; shorter spans fail because MNE warns that such a
-filter is likely to distort the signal.
-
-Detection tests the as-recorded non-bad EEG channels. This deliberately includes
-common/reference-borne lines that remain visible in channel spectra. Changing the
-acquisition reference can therefore change the evidence, and the derivative records the
-tested reference rather than claiming reference invariance.
-
-The method identifies narrow spectral structure. Broad rhythms and transient artifacts
-require temporal or spatial methods [[7](#user-content-ref-7)]. A detected comb does not
-identify its physical source.
+Each recording is its own inferential family. A single recording is sufficient for
+`diagnose`; `apply` and `verify` operate on the complete discovered dataset, while
+`diagnose` and `psd` can restrict their analysis with `--subjects`.
 
 ## Installation
 
@@ -69,7 +47,9 @@ source .venv/bin/activate
 python3 -m pip install -e .
 ```
 
-## Quick start
+## Workflow
+
+Set `paths.bids_root` in `decomb.yaml`. Other settings inherit the packaged defaults.
 
 ```bash
 decomb diagnose --config decomb.yaml
@@ -78,382 +58,121 @@ decomb verify --config decomb.yaml
 decomb psd --config decomb.yaml
 ```
 
-| Command | Operation |
+| Command | Purpose |
 | --- | --- |
-| `diagnose` | Tests narrow spectral lines and writes the proposed filter plan |
-| `apply` | Fits each recording, filters EEG channels, and writes the complete derivative |
-| `verify` | Refits and replays subtraction plus the threshold FIR, then requires exact samples |
-| `psd` | Writes equal-recording cohort spectra before and after correction |
+| `diagnose` | Detect supported lines and write a diagnostic model |
+| `apply` | Subtract authorized lines, notch proud residuals, and write the derivative |
+| `verify` | Reproduce both removal stages and verify the written samples |
+| `psd` | Compare source and derivative spectra |
 
-`apply` and `verify` require the complete discovered dataset. `diagnose` and `psd`
-accept recording subsets. An existing output directory causes `apply` to stop.
+`apply` refuses to use an existing output directory. Run `diagnose` before `apply`, then
+run `verify` and `psd` after the derivative has been written.
 
 ## Configuration
 
-The packaged configuration is
-[`src/decomb/defaults.yaml`](src/decomb/defaults.yaml). Three settings define the
-ordinary line test, and two recording-specific inputs pre-specify the scanner comb.
+The packaged configuration is [`src/decomb/defaults.yaml`](src/decomb/defaults.yaml).
+The settings normally relevant to a user are:
 
-| Setting | Default | Function |
+| Setting | Default | Purpose |
 | --- | --- | --- |
-| `removal.scanner_repetition_time_s` | 0.9 s | Scanner TR; fixes the comb fundamental at `1 / TR` |
-| `removal.scanner_trigger_event_name` | `Volume/V  1` | Exact annotation name used to validate that TR |
-| `removal.estimation_window_s` | 10.0 s | Ordinary-line stationarity interval and spectral resolution |
-| `removal.familywise_error_rate` | 0.05 | Target error budget for one recording's initial statistical authorization |
-| `removal.frequency_range_hz` | 0.0 to 100.0 Hz | Frequencies eligible for detection and filtering |
-| `removal.comb_fundamental_hz` | null | Comb fundamental; null derives it from the TR above |
+| `paths.bids_root` | `data/bids` | Source BrainVision BIDS dataset |
+| `removal.scanner_repetition_time_s` | `0.9` | Scanner repetition time in seconds |
+| `removal.scanner_trigger_event_name` | `Volume/V  1` | Exact annotation used to validate scanner timing |
+| `removal.comb_fundamental_hz` | `null` | Known source frequency; null derives it from the scanner timing |
+| `removal.estimation_window_s` | `10.0` | Stationarity interval for ordinary-line detection |
+| `removal.familywise_error_rate` | `0.05` | Initial recording-level error budget |
+| `removal.frequency_range_hz` | `[0.0, 100.0]` | Detection and filtering range before Nyquist clipping |
+| `execution.n_jobs` | `-1` | Worker count; changes speed, not results |
 
-The default ordinary-line window gives Fourier bins separated by 0.1 Hz. Changing that
-duration changes its frequency spacing; ordinary-line stopbands remain at least 0.25 Hz
-wide. Scanner-comb localization remains fixed at 4 seconds. A supported scanner tooth
-covers its fixed 1 Hz local-background neighborhood on each side, while prespecified
-weak teeth retain the 0.25 Hz localization width. FIR selectivity remains fixed at the
-54-second reference geometry. The recording-specific inputs are the TR and exact trigger
-name. Harmonic count, search radius, and filter width are fixed by the method.
+The scanner repetition time and exact trigger name validate recording timing. Set
+`removal.comb_fundamental_hz` when independent hardware information gives a periodic source
+frequency different from the scanner volume rate. The frequency is never estimated from
+the EEG. Unknown settings raise an error. The configured upper frequency is clipped to
+remain below each recording's Nyquist frequency.
 
-A periodic source need not run at the volume rate. `removal.comb_fundamental_hz`
-declares its frequency directly: a cryogenic cold head at 72 cycles per minute is 1.2 Hz,
-whereas a 0.9 s TR gives 1.1111 Hz. A grid based on the wrong fundamental tests frequencies
-between the comb teeth. When the setting is null, the fundamental is derived from the TR.
-Any explicit value must be specified from independent hardware information rather than
-estimated from the spectrum; the trigger check still validates recording timing. In this
-cohort the comb is at 1.200 Hz in 88 of 90 recordings, while the trigger-derived grid has
-no corresponding spectral support; see
-[`docs/artifact_survey.md`](docs/artifact_survey.md).
+## Method
 
-`paths.bids_root` identifies the input dataset. Output and report locations have
-packaged defaults. Optional `frequency_bands` entries report unavailable and retained
-bandwidth and do not affect detection.
+Continuous acquisition spans are analyzed in overlapping windows. MNE's multitaper
+sinusoid F test identifies phase-coherent lines. A complementary persistence test detects
+narrowband peaks whose phase or frequency changes prevent a sinusoid fit. Initial line and
+scanner-harmonic evidence is controlled within each recording before removal targets are
+authorized.
 
-Unknown and obsolete settings raise an error. Each recording clips the configured upper
-frequency to values strictly below Nyquist.
+Authorized ordinary lines and comb teeth that exceed the predeclared candidate floor are
+fit with MNE multitaper sinusoid estimates and subtracted from non-bad EEG channels. The
+default subtraction fit uses a 20-second window while detection uses 10 seconds. The
+subtracted frequencies remain populated by whatever the sinusoid fit does not explain.
 
-## Methods
+The residual spectrum is then tested once. Residual candidates above the 2 dB local
+prominence threshold are clustered when they are within three Fourier bins. Each retained
+cluster receives one stopband that includes its measured span and its edge margin. There is
+no terminal cascade after this threshold FIR stage.
 
-### Spectral estimation
+The same residual FIR plan is applied to every EEG channel, including channels marked bad.
+It uses MNE's `Raw.notch_filter` with a zero-phase Hamming `firwin` design, automatic filter
+length, reflect-limited padding, and annotation-aware processing. Unsupported frequencies
+remain in the passband. A recording with no subtraction target or residual stopband is
+copied unchanged.
 
-The configured duration must be an exact whole number of samples at the recording's
-sampling rate. Windows overlap by 50 percent, and the final window in each continuous
-acquisition span is
-aligned with that span's end. No estimation window crosses or includes samples marked
-by MNE's `edge` or `bad_acq_skip` annotation prefixes.
+Verification starts from the source recording, re-runs the authorization and subtraction
+decisions, re-derives the residual stopbands, and checks the exact written samples. `psd`
+uses matched Welch spectra for source and derivative files with equal recording weight and
+a shared decibel scale.
 
-The source recording is evaluated with two complementary line-shape tests. Thomson's
-multitaper sinusoid F test follows MNE's `spectrum_fit` implementation: eight DPSS
-tapers, a time-bandwidth product of four, alternating tapers for the sinusoidal estimate
-and residual, and an F distribution with 2 and 14 degrees of freedom
-[[9](#user-content-ref-9)]. It detects a phase-coherent sinusoid.
+## Outputs
 
-The persistent-peak test detects narrowband power whose phase or frequency modulation
-prevents a sinusoid fit. From the 50-percent-overlapping 10-second windows, every fourth
-window estimates a channel-specific, median-smoothed spectral background and the
-intervening non-overlapping windows form a disjoint test sample. At each Fourier bin, a
-three-bin target band is compared with equal-width symmetric flanking bands. Under the
-local smooth-spectrum null, the target is uniquely largest with probability one third;
-an exact one-sided binomial test measures its persistence. The two shape-test p-values
-are Bonferroni-combined at each window, channel, and frequency. DC is excluded.
+`diagnose` writes `model.tsv`, `detected_lines.tsv`, `stopbands.tsv`, and the effective
+configuration used for the run.
 
-### Initial line and scanner-comb detection
+`apply` writes corrected BrainVision triplets with the `_desc-decomb` entity, a BIDS
+`dataset_description.json`, `line_notch_manifest.tsv`, `comb_analysis_mask.tsv`,
+`analysis_availability.tsv`, and the effective configuration. The manifest distinguishes
+subtracted frequencies from residual-notched stopbands and records their evidence,
+geometry, attenuation, and cumulative unavailable bandwidth. The two analysis tables are
+advisory downstream masks and do not describe the derivative.
 
-The initial authorization uses `alpha / (1 * 2)` and splits it equally between the
-ordinary-line and scanner-comb families. The ordinary family
-uses one Holm correction across every as-recorded non-bad EEG channel, continuous
-10-second
-estimation window, and tested Fourier frequency in the recording
-[[23](#user-content-ref-23)]. A frequency is
-eligible only when its recording-family Holm-adjusted, shape-test-union p-value is below
-the ordinary family's allocated rate.
+`verify` writes `line_notch_verification.tsv` with replay results. `psd` writes
+`psd_before.png`, `psd_after.png`, `psd_before_declared.png`, and
+`psd_after_declared.png`.
 
-The scanner family is fixed before the spectrum is inspected. Its fundamental is exactly
-`1 / TR`, after the configured event sequence passes the timing check above. A separate
-4-second Thomson fit evaluates the nearest Fourier bin to each in-range integer harmonic.
-Each harmonic is Bonferroni-corrected across its windows, channels, and the prespecified
-harmonic grid. Each supported harmonic authorizes only its own 2.25 Hz
-local-background envelope: the 0.25 Hz localization width plus the fixed 1 Hz
-neighborhood on each side. Support at one tooth is never extrapolated to another: a tooth
-that fails its own test is left in place, however many of its neighbors passed.
-No unconfigured or data-inferred fundamental can authorize the plan.
+## Example result
 
-The statistical result supplies ordinary-line subtraction targets. Independently, comb
-teeth above the predeclared 1 dB candidate floor are also fitted. Recordings are
-independent inferential families and channels are never pooled across the cohort.
-
-### Removal: subtract, then notch what survives
-
-`apply` removes a line by fitting and subtracting it, and filters only the residue. Two
-stages run before the derivative is written.
-
-**Subtract.** A round-one fit selects targets: the statistically supported ordinary lines,
-plus comb teeth standing more than 1 dB proud of their local background. MNE `spectrum_fit`
-estimates one sinusoid's amplitude and phase per window by multitaper harmonic analysis and
-removes exactly that [[9](#user-content-ref-9), [10](#user-content-ref-10),
-[11](#user-content-ref-11)], so the frequency stays populated and whatever the sinusoid does
-not describe survives. The fit window is twice the detection window, 20 s at the default
-10 s, which halves the bandwidth each fit destroys without changing what detection sees.
-
-**Notch the residue.** Detected bins closer than three Fourier bins are one physical line; a
-group whose post-subtraction prominence still exceeds 2 dB is filtered across its whole span
-plus 1.25 bins on each side [[6](#user-content-ref-6)]. Thresholding on the residual that
-survives subtraction, rather than on prominence before it, is what makes the threshold
-transfer between recordings.
-
-**Stop.** The derivative is written immediately after this one 2 dB residual-threshold
-FIR. No terminal statistical-line cascade or terminal-null requirement is applied.
-
-Subtraction is not free. It removes whatever sits at the fitted frequency, neural activity
-included, so each subtracted frequency declares an unavailable interval of two Fourier bins
-of the fit window on each side. Those intervals merge with the FIR stopbands and their
-transitions, and every manifest row carries the single recording-wide share that results.
-`verify` re-derives both stages from the source before replaying them.
-
-The residual stage is heuristic: it filters candidates that remain more than 2 dB above
-their local background after subtraction. Its constants were selected from this cohort;
-the supporting measurements are in
-[`docs/removal_operating_point.md`](docs/removal_operating_point.md) and
-[`docs/artifact_survey.md`](docs/artifact_survey.md).
-
-### Stopbands and FIR filtering
-
-The residual stage evaluates the subtracted targets and every configured comb tooth from
-20 to 95 Hz. Candidates separated by no more than three Fourier bins form one cluster.
-A cluster is filtered only when its largest residual prominence exceeds 2 dB. Its
-stopband spans the cluster plus 1.25 Fourier bins at each edge. Stopbands are merged when
-they overlap; frequencies outside the resulting stopbands and transitions remain in the
-passband.
-
-The total transition bandwidth is fixed at `3.3 / 54 = 0.061111` Hz. MNE assigns half
-of this width to each stopband edge, producing the selective 108-second Hamming FIR while
-leaving the statistical estimation horizons independent. Merged stopbands are passed to
-MNE `Raw.notch_filter` as one recording-wide plan for every EEG channel, including
-channels marked bad
-[[10](#user-content-ref-10), [11](#user-content-ref-11)].
-
-| Parameter | Value |
-| --- | --- |
-| `freqs` | Measured stopband centres |
-| `notch_widths` | Measured stopband widths |
-| `trans_bandwidth` | 0.061111 Hz total (0.030556 Hz per edge) |
-| `method` | `fir` |
-| `filter_length` | `auto` |
-| `phase` | `zero` |
-| `fir_window` | `hamming` |
-| `fir_design` | `firwin` |
-| `pad` | `reflect_limited` |
-| `skip_by_annotation` | `edge`, `bad_acq_skip` |
-| `n_jobs` | `-1` |
-
-The residual filter is a zero-phase, noncausal FIR design with delay compensation. The
-manifest records its exact sample count and measured response. A filter plan that changes
-no samples raises an error.
-A transition reaching zero frequency or Nyquist, or a continuous span shorter than the
-FIR, raises an error
-[[6](#user-content-ref-6)].
-
-### Attenuation and verification
-
-Stopband power is summed across frequency bins on the channel carrying ordinary-line
-evidence, or across the equal-channel mean for recording-level scanner evidence. Source
-and derivative spectra use the same complete Hamming windows used by
-the boundary policy. The reported change is descriptive and no attenuation threshold
-decides whether verification passes.
-
-Verification confirms that scientific settings, library versions, and recording geometry
-match the apply stage. Starting from the source recording, it refits the initial targets,
-replays multitaper subtraction, re-derives the 2 dB residual stopbands, and reapplies that
-single FIR stage. It then applies the destination BrainVision calibration and float32
-quantization. Every sample must equal the written derivative exactly. A recording with no
-subtraction target or threshold stopband is reproduced unchanged.
-
-Quality-control spectra use MNE `psd_array_welch` with detrended Hamming windows, whose
-sidelobe behaviour bounds the spectral leakage between neighbouring bins
-[[8](#user-content-ref-8)], and are
-wrapped as MNE `SpectrumArray` objects for plotting [[18](#user-content-ref-18)]. Source
-and derivative files use identical EEG channels, complete continuous-acquisition
-windows, segment duration, 50 percent overlap, frequency range, and frequency grid. No
-Welch window crosses an `edge` or includes a `bad_acq_skip` interval. Each recording
-contributes one per-channel spectrum. For each same-named sensor, recordings in which
-that sensor is marked bad are excluded before the remaining spectra are averaged in
-linear power with equal recording weight. Every sensor with at least one good recording
-remains visible, and both figures share one decibel scale.
-
-### Validation scope
-
-Null calibration used stationary Gaussian surrogates whose channel spectra match
-median-smoothed real-recording periodograms. This deliberately line-free null tests the
-implementation under a known stochastic model; it does not establish calibration for
-arbitrary nonstationary, non-Gaussian EEG. The primary null result is the proportion of
-recordings with at least one authorization. Channel-recording detection proportion is
-reported only as a secondary descriptive metric.
-
-Recovery uses a fixed 90-point factorial design independent of Decomb settings: three
-frequencies across the analysis range, three component-to-background energy ratios, two
-phases, and two
-fixed physical drift magnitudes (0.05 and 0.2 Hz) or occupancies where applicable. The
-complete target set must lie below the lowest Nyquist frequency in the cohort; an
-incompatible cohort fails validation before calibration begins. Component amplitudes
-are scaled from the surrogate background alone. Decomb settings and detections from the
-real cohort do not define the benchmark. Persistent stationary and drifting injections
-also record whether the two-stage pipeline removes any frequency outside the known
-injected support.
-
-## Outputs and provenance
-
-The output follows EEG-BIDS and BIDS derivative conventions
-[[12](#user-content-ref-12), [13](#user-content-ref-13),
-[19](#user-content-ref-19)]. Corrected BrainVision triplets receive a `_desc-decomb`
-entity. The derivative includes a stopband manifest, `dataset_description.json`, apply
-and verification configurations, an independent verification table, and matched PSD
-products. The manifest records every subtracted frequency, each threshold-authorized
-residual stopband, its prominence and FIR geometry, and cumulative unavailable bandwidth.
-Floating-point geometry is written with 17 significant digits.
-
-`diagnose` writes `model.tsv`, `detected_lines.tsv`, and `stopbands.tsv`. `apply` writes
-`line_notch_manifest.tsv`, and `verify` writes `line_notch_verification.tsv`. `psd` writes
-`psd_before.png` and `psd_after.png`, one line per sensor in position colours, and
-`psd_before_declared.png` and `psd_after_declared.png`, which put the sensor mean and range
-above the share of recordings that declared each frequency unavailable.
-
-`apply` also writes two advisory tables. `comb_analysis_mask.tsv` lists every comb tooth in
-the band where the comb was measured, at the width a subtracted tooth declares, whether or
-not a given recording removed that tooth; `analysis_availability.tsv` gives each band's
-retained share with and without that mask. Both are for downstream analysis only. Neither
-describes the derivative: the manifest records what was destroyed, these record what an
-analyst may additionally choose to distrust.
-
-## PSD quality-control outputs
-
-The PSD stage writes sensor-level source and derivative spectra and a second pair that
-adds the recording-level declared-unavailable profile. The figures below were generated
-from the verified 90-recording threshold-stop derivative. Each recording has equal weight
-in the cohort summary. Sensor plots exclude channels marked bad in BIDS; the declared
-profile is the share of recordings whose manifest marks each frequency unavailable.
+These figures show the same EEG cohort before and after the threshold-stop correction.
+Both use the same recordings, channels, samples, and decibel scale.
 
 ![Sensor-level source spectra](docs/psd_before.png)
 
 ![Sensor-level threshold-stop derivative spectra](docs/psd_after.png)
 
-![Cohort source spectrum and declared-unavailable profile](docs/cohort_spectrum_before.png)
+The example audit contains 90 recordings and 12.09 hours of continuous acquisition.
+Removed frequency intervals are unavailable for inference, so downstream analyses should
+account for the cumulative manifest geometry. Cohort-specific validation does not establish
+performance on an independent dataset.
 
-![Cohort threshold-stop derivative spectrum and declared-unavailable profile](docs/cohort_spectrum_after.png)
+## References and further reading
 
-## Threshold-stop validation
+1. Allen PJ, Josephs O, Turner R. A method for removing imaging artifact from continuous
+   EEG recorded during functional MRI. *NeuroImage*. 2000. [DOI](https://doi.org/10.1006/nimg.2000.0599)
+2. Niazy RK, et al. Removal of fMRI environment artifacts from EEG data using optimal
+   basis sets. *NeuroImage*. 2005. [DOI](https://doi.org/10.1016/j.neuroimage.2005.06.067)
+3. Mullinger KJ, Castellone P, Bowtell R. Best current practice for obtaining high quality
+   EEG data during simultaneous fMRI. *Journal of Visualized Experiments*. 2013.
+   [DOI](https://doi.org/10.3791/50283)
+4. Widmann A, Schröger E, Maess B. Digital filter design for electrophysiological data.
+   *Journal of Neuroscience Methods*. 2015. [DOI](https://doi.org/10.1016/j.jneumeth.2014.08.002)
+5. Thomson DJ. Spectrum estimation and harmonic analysis. *Proceedings of the IEEE*.
+   1982. [DOI](https://doi.org/10.1109/PROC.1982.12433)
+6. Gramfort A, et al. MNE software for processing MEG and EEG data. *NeuroImage*.
+   2014. [DOI](https://doi.org/10.1016/j.neuroimage.2013.10.027)
+7. Pernet CR, et al. EEG-BIDS, an extension to the Brain Imaging Data Structure for
+   electroencephalography. *Scientific Data*. 2019. [DOI](https://doi.org/10.1038/s41597-019-0104-8)
+8. Welch P. The use of fast Fourier transform for the estimation of power spectra.
+   *IEEE Transactions on Audio and Electroacoustics*. 1967.
+   [DOI](https://doi.org/10.1109/TAU.1967.1161901)
 
-The single-threshold stopping rule was compared with the retired terminal cascade on all
-90 recordings. These percentages describe retained gamma bandwidth, not retained signal
-power.
-
-| Recording coverage | Terminal cascade | Stop after threshold |
-| --- | ---: | ---: |
-| 100% common | 29.2% | 58.7% |
-| At least 95% | 57.8% | 65.6% |
-| At least 90% | 62.8% | 68.5% |
-| Mean per recording | 77.8% | 80.7% |
-
-Six recordings were used for method development; the remaining 84 formed the held-out
-comparison. The paired comb difference had a median of 0.000 dB and a participant-level
-bootstrap 95% interval from -0.001 to +0.013 dB. The largest threshold-stop residual was
-+0.48 dB. These cohort-specific measurements support the stopping rule; they do not
-establish performance in an independent dataset.
-
-[`docs/artifact_survey.md`](docs/artifact_survey.md) establishes the cohort's 1.200 Hz comb.
-[`docs/removal_operating_point.md`](docs/removal_operating_point.md) records the earlier
-operating-point sweeps.
-
-## Software and testing
-
-Version `0.2.0` is installable with Python 3.11 or newer and the lower dependency bounds
-declared in [`pyproject.toml`](pyproject.toml). The exact environment used for the current
-90-recording validation is published in
-[`requirements/validated.txt`](requirements/validated.txt): Python 3.12.13, NumPy 2.5.2,
-SciPy 1.18.0, MNE-Python 1.12.1, MNE-BIDS 0.19.0, pandas 3.0.5, PyYAML 6.0.3,
-Matplotlib 3.11.1, and pybv 0.8.1. The validated file freezes every installed dependency
-and verification tool on macOS arm64 without widening the general install metadata
-[[10](#user-content-ref-10),
-[11](#user-content-ref-11), [14](#user-content-ref-14), [15](#user-content-ref-15),
-[16](#user-content-ref-16), [17](#user-content-ref-17)].
-
-```bash
-.venv/bin/pytest -q
-.venv/bin/ruff check src tests
-```
-
-## References
-
-1. <a name="ref-1"></a>Allen PJ, Josephs O, Turner R. A method for removing imaging artifact from continuous
-   EEG recorded during functional MRI. *NeuroImage*. 2000, 12, 230 to 239.
-   [DOI](https://doi.org/10.1006/nimg.2000.0599)
-2. <a name="ref-2"></a>Niazy RK, Beckmann CF, Iannetti GD, Brady JM, Smith SM. Removal of FMRI environment
-   artifacts from EEG data using optimal basis sets. *NeuroImage*. 2005, 28, 720 to 737.
-   [DOI](https://doi.org/10.1016/j.neuroimage.2005.06.067)
-3. <a name="ref-3"></a>Rothlübbers S, Relvas V, Leal A, Murta T, Lemieux L, Figueiredo P. Characterisation
-   and reduction of the EEG artefact caused by the helium cooling pump in the MR
-   environment. *Brain Topography*. 2015, 28, 208 to 220.
-   [DOI](https://doi.org/10.1007/s10548-014-0408-0)
-4. <a name="ref-4"></a>Nierhaus T, Gundlach C, Goltz D, et al. Internal ventilation system of MR scanners
-   induces specific EEG artifact during simultaneous EEG-fMRI. *NeuroImage*. 2013, 74,
-   70 to 76. [DOI](https://doi.org/10.1016/j.neuroimage.2013.02.016)
-5. <a name="ref-5"></a>Mullinger KJ, Castellone P, Bowtell R. Best current practice for obtaining high quality
-   EEG data during simultaneous fMRI. *Journal of Visualized Experiments*. 2013, 76,
-   e50283. [DOI](https://doi.org/10.3791/50283)
-6. <a name="ref-6"></a>Widmann A, Schröger E, Maess B. Digital filter design for electrophysiological data,
-   a practical approach. *Journal of Neuroscience Methods*. 2015, 250, 34 to 46.
-   [DOI](https://doi.org/10.1016/j.jneumeth.2014.08.002)
-7. <a name="ref-7"></a>Bullock M, Jackson GD, Abbott DF. Artifact reduction in simultaneous EEG-fMRI, a
-   systematic review of methods and contemporary usage. *Frontiers in Neurology*. 2021,
-   12, 622719. [DOI](https://doi.org/10.3389/fneur.2021.622719)
-8. <a name="ref-8"></a>Harris FJ. On the use of windows for harmonic analysis with the discrete Fourier
-   transform. *Proceedings of the IEEE*. 1978, 66, 51 to 83.
-   [DOI](https://doi.org/10.1109/PROC.1978.10837)
-9. <a name="ref-9"></a>Thomson DJ. Spectrum estimation and harmonic analysis. *Proceedings of the IEEE*.
-   1982, 70, 1055 to 1096. [DOI](https://doi.org/10.1109/PROC.1982.12433)
-10. <a name="ref-10"></a>Gramfort A, Luessi M, Larson E, et al. MNE software for processing MEG and EEG data.
-    *NeuroImage*. 2014, 86, 446 to 460.
-    [DOI](https://doi.org/10.1016/j.neuroimage.2013.10.027)
-11. <a name="ref-11"></a>Gramfort A, Luessi M, Larson E, et al. MEG and EEG data analysis with MNE-Python.
-    *Frontiers in Neuroscience*. 2013, 7, 267.
-    [DOI](https://doi.org/10.3389/fnins.2013.00267)
-12. <a name="ref-12"></a>Pernet CR, Appelhoff S, Gorgolewski KJ, et al. EEG-BIDS, an extension to the Brain
-    Imaging Data Structure for electroencephalography. *Scientific Data*. 2019, 6, 103.
-    [DOI](https://doi.org/10.1038/s41597-019-0104-8)
-13. <a name="ref-13"></a>Gorgolewski KJ, Auer T, Calhoun VD, et al. The Brain Imaging Data Structure, a format
-    for organizing and describing outputs of neuroimaging experiments. *Scientific
-    Data*. 2016, 3, 160044. [DOI](https://doi.org/10.1038/sdata.2016.44)
-14. <a name="ref-14"></a>Appelhoff S, Sanderson M, Brooks TL, et al. MNE-BIDS, organizing
-    electrophysiological data into the BIDS format and facilitating their analysis.
-    *Journal of Open Source Software*. 2019, 4, 1896.
-    [DOI](https://doi.org/10.21105/joss.01896)
-15. <a name="ref-15"></a>Harris CR, Millman KJ, van der Walt SJ, et al. Array programming with NumPy. *Nature*.
-    2020, 585, 357 to 362. [DOI](https://doi.org/10.1038/s41586-020-2649-2)
-16. <a name="ref-16"></a>Virtanen P, Gommers R, Oliphant TE, et al. SciPy 1.0, fundamental algorithms for
-    scientific computing in Python. *Nature Methods*. 2020, 17, 261 to 272.
-    [DOI](https://doi.org/10.1038/s41592-019-0686-2)
-17. <a name="ref-17"></a>Hunter JD. Matplotlib, a 2D graphics environment. *Computing in Science and
-    Engineering*. 2007, 9, 90 to 95.
-    [DOI](https://doi.org/10.1109/MCSE.2007.55)
-18. <a name="ref-18"></a>Welch P. The use of fast Fourier transform for the estimation of power spectra, a
-    method based on time averaging over short, modified periodograms. *IEEE Transactions
-    on Audio and Electroacoustics*. 1967, 15, 70 to 73.
-    [DOI](https://doi.org/10.1109/TAU.1967.1161901)
-19. <a name="ref-19"></a>BIDS Contributors. BIDS Derivatives. *Brain Imaging Data Structure specification*.
-    Version 1.11.1.
-    [Specification](https://bids-specification.readthedocs.io/en/stable/derivatives/introduction.html)
-20. <a name="ref-20"></a>Hyvärinen A, Oja E. Independent component analysis, algorithms and applications.
-    *Neural Networks*. 2000, 13, 411 to 430.
-    [DOI](https://doi.org/10.1016/S0893-6080(00)00026-5)
-21. <a name="ref-21"></a>de Cheveigné A, Nelken I. Filters, when, why, and how not to use them. *Neuron*.
-    2019, 102, 280 to 293.
-    [DOI](https://doi.org/10.1016/j.neuron.2019.02.039)
-22. <a name="ref-22"></a>Leske S, Dalal SS. Reducing power line noise in EEG and MEG data via spectrum
-    interpolation. *NeuroImage*. 2019, 189, 763 to 776.
-    [DOI](https://doi.org/10.1016/j.neuroimage.2019.01.026)
-23. <a name="ref-23"></a>Holm S. A simple sequentially rejective multiple test procedure.
-    *Scandinavian Journal of Statistics*. 1979, 6, 65 to 70.
-    [JSTOR](https://www.jstor.org/stable/4615733)
-MNE implementation details are documented in the
-[notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html), the
-[filtering methods tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html),
-and the
-[Welch PSD API](https://mne.tools/stable/generated/mne.time_frequency.psd_array_welch.html).
+Implementation details are available in the MNE
+[notch-filter API](https://mne.tools/stable/generated/mne.filter.notch_filter.html) and
+[filtering tutorial](https://mne.tools/stable/auto_tutorials/preprocessing/25_background_filtering.html).
 
 ## License
 
